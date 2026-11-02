@@ -1,0 +1,14 @@
+# Direct dependencies for the local Windows controller (Python 3.12).
+# Remote inference dependencies are installed by remote_h3.py on Colab.
+-c requirements-cached.txt
+av==19.0.1
+fastapi==0.143.0
+google-auth==2.61.0
+google-auth-oauthlib==1.5.0
+google-colab-cli==0.7.4
+jupyter-kernel-client==0.9.0
+pillow==12.3.0
+pydantic==2.14.0
+python-multipart==0.0.32
+requests==2.34.2
+uvicorn==0.54.0
