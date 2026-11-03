@@ -9,12 +9,12 @@ import remote_h3 as h3
 
 class PerformanceConfigTests(unittest.TestCase):
     def routes(self):
-        return [{}, {'image_id': 'a' * 32 + '.png'},
+        return [{}, {'references': [dict(slot=1,image_id='a'*32+'.png',frame='first')]},
                 {'references': [dict(slot=1, image_id='a' * 32 + '.png', role='character')]}]
 
     def test_master_off_overrides_all_acceleration_and_matches_downloads(self):
         for route in self.routes():
-            config = app.JobConfig(prompt='A woman speaks.', performance=False,
+            config = app.H3JobConfig(prompt='A woman speaks.', performance=False,
                                    encoder='heretic_int8', mode='pdd', veda=True, people=True,
                                    **route).model_dump()
             self.assertEqual(config['encoder'], 'official_bf16')
@@ -33,7 +33,7 @@ class PerformanceConfigTests(unittest.TestCase):
             self.assertIn('qwen3vl_32b_h3_instruct_generation_tail_50_63_bf16.safetensors', names)
 
     def test_remote_graph_also_honors_master_off_for_raw_configs(self):
-        config = dict(app.JobConfig(prompt='x').model_dump(), performance=False, job_id='test')
+        config = dict(app.H3JobConfig(prompt='x').model_dump(), performance=False, job_id='test')
         graph = h3.build_graph(config)
         self.assertEqual(graph['2']['inputs']['clip_name'], 'qwen3vl_32b_minimax_h3_bf16.safetensors')
         self.assertNotIn('6', graph)
@@ -42,7 +42,7 @@ class PerformanceConfigTests(unittest.TestCase):
     def test_independent_choices_have_matching_model_adapter_and_tail(self):
         for route, encoder, quantized, mode in itertools.product(
                 self.routes(), ('heretic_int8', 'official_int8', 'official_bf16'), (True, False), ('pdd', 'base')):
-            c = app.JobConfig(prompt='x', encoder=encoder, quantized_model=quantized,
+            c = app.H3JobConfig(prompt='x', encoder=encoder, quantized_model=quantized,
                               mode=mode, people=False, **route).model_dump()
             graph = h3.build_graph(dict(c, job_id='test'))
             names = {Path(f[1]).name for f in h3.files_for(c)}
@@ -54,7 +54,7 @@ class PerformanceConfigTests(unittest.TestCase):
             if mode == 'pdd':
                 adapter = graph['6']['inputs']['lora_name']
                 self.assertIn(adapter, names)
-                if route.get('references'):
+                if h3.uses_reference_model(c):
                     self.assertEqual('pruned' in adapter, quantized)
             else:
                 self.assertNotIn('6', graph)
@@ -62,7 +62,7 @@ class PerformanceConfigTests(unittest.TestCase):
             self.assertNotIn(tail[1], direct_names)
 
     def test_history_exposes_master_and_individual_options(self):
-        config = app.JobConfig(prompt='x', performance=False).model_dump()
+        config = app.H3JobConfig(prompt='x', performance=False).model_dump()
         public = app.controller.public_job(dict(id='test', status='done', config=config))
         for key in ('performance', 'encoder', 'quantized_model', 'quantized_vae', 'mode', 'veda'):
             self.assertEqual(public['creation'][key], config[key])

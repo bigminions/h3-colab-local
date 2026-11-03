@@ -55,7 +55,7 @@ characters = []; context.updateModelControls(); assert.equal($('mode').value,'ba
 console.log('PASS sampling selection, request payload and draft restore for references, anchors, characters and text');
 
 // New annotation mode has its own persisted preference, independent of retired flags.
-draft = JSON.stringify({promptEnhance:false});
+draft = JSON.stringify({});
 context.restoreDraft();
 assert.equal($('qwenFormatting').checked,true);
 assert.equal(context.generationConfig().prompt_processing,'faithful');
@@ -66,16 +66,6 @@ context.restoreDraft();
 assert.equal($('qwenFormatting').checked,false);
 assert.equal(context.generationConfig().prompt_processing,'direct');
 console.log('PASS Qwen default, explicit opt-out, payload and draft restore');
-
-// Old drafts must not restore a hidden camera override.
-draft = JSON.stringify({...JSON.parse(draft),camera:'orbit',promptEnhance:true});
-context.restoreDraft();
-assert.equal('camera' in context.generationConfig(),false);
-context.saveDraft();
-assert.equal('camera' in JSON.parse(draft),false);
-
-assert.equal('prompt_enhance' in context.generationConfig(),false);
-assert.equal('promptEnhance' in JSON.parse(draft),false);
 
 // Turning acceleration off forces the original request without losing the saved choices.
 $('performance').checked = false;

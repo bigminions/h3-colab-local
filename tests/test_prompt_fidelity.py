@@ -441,8 +441,8 @@ class FidelityTests(unittest.TestCase):
         self.assertNotIn('character sheet', text)
 
     def test_default_formatting_and_explicit_direct_mode(self):
-        self.assertEqual(app.JobConfig(prompt='x', prompt_enhance=False).prompt_processing, 'faithful')
-        self.assertEqual(app.JobConfig(prompt='x', prompt_processing='direct').prompt_processing, 'direct')
+        self.assertEqual(app.H3JobConfig(prompt='x').prompt_processing, 'faithful')
+        self.assertEqual(app.H3JobConfig(prompt='x', prompt_processing='direct').prompt_processing, 'direct')
 
     def test_quoted_sound_effects_and_parenthesized_directions_do_not_become_dialogue(self):
         # Chinese, English, and Japanese scripts with quoted sounds and bracketed stage directions

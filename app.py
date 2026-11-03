@@ -1,5 +1,4 @@
-"""Local-only Windows controller using Google Colab CLI core transports."""
-import base64
+"""LStudio local workspace, application jobs and compute coordination."""
 import ctypes
 from contextlib import asynccontextmanager
 from ctypes import wintypes
@@ -9,7 +8,7 @@ from importlib import resources
 import json
 import math
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import re
 import secrets
 import sys
@@ -31,17 +30,21 @@ if sys.platform == 'win32':
     except Exception:
         pass
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile
+from fastapi import FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, model_validator
-from typing import Literal
+from pydantic import BaseModel, Field
+from typing import Annotated, Literal
 from PIL import Image, UnidentifiedImageError
-from remote_h3 import DIMENSIONS, reference_prompt, uses_reference_model
-from characters import CharacterLibrary, CharacterProfile, VoiceReference, AudioAsset, AUDIO_ID, expand_characters, inspect_audio, validate_audio_asset
+from apps.h3 import DIMENSIONS, reference_prompt
+from apps.h3 import CharacterLibrary, CharacterProfile, AudioAsset, AUDIO_ID, inspect_audio, validate_audio_asset
 from drive_cache import DriveCache
 from drive_storage import DriveStorage
 from history_recycle import HistoryRecycle
+from asset_library import AssetLibrary
+from compute_colab import ColabProvider
+from apps.h3 import H3Application, H3JobConfig
+from workspace_runtime import ApplicationRegistry, ProviderRegistry, ProviderSpec
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import AuthorizedSession
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -52,14 +55,17 @@ from colab_cli.contents import ContentsClient
 from runtime_recovery import observe_execution, connection_failure, TaskCancelled, ReconnectExhausted, enable_cancellation
 
 BASE = Path(__file__).resolve().parent
-PRIVATE = BASE / '.private'
-VIDEOS = BASE / 'videos'
-LOG = BASE / 'log'
-PRIVATE.mkdir(exist_ok=True)
-VIDEOS.mkdir(exist_ok=True)
+DATA = Path(os.environ.get('LSTUDIO_DATA_ROOT') or BASE).resolve()
+PRIVATE = DATA / '.private'
+MATERIALS = DATA / 'materials'
+VIDEOS = MATERIALS / 'h3' / 'outputs' / 'videos'
+LOG = DATA / 'log'
+PRIVATE.mkdir(parents=True, exist_ok=True)
+VIDEOS.mkdir(parents=True, exist_ok=True)
 LOG.mkdir(exist_ok=True)
 SCOPES = ['openid', 'https://www.googleapis.com/auth/userinfo.email', 'https://www.googleapis.com/auth/colaboratory']
-LOCAL_ORIGINS = {'http://127.0.0.1:7865', 'http://localhost:7865'}
+PORT = int(os.environ.get('LSTUDIO_PORT', '7865'))
+LOCAL_ORIGINS = {f'http://127.0.0.1:{PORT}', f'http://localhost:{PORT}'}
 GPU_ACCELERATORS = {Accelerator.G4, Accelerator.T4, Accelerator.L4, Accelerator.A100, Accelerator.H100}
 CONNECT_PROGRESS_INTERVAL = 15
 
@@ -99,7 +105,7 @@ def protect(data, decrypt=False):
     if decrypt:
         ok = dll.CryptUnprotectData(ctypes.byref(source), None, None, None, None, 1, ctypes.byref(result))
     else:
-        ok = dll.CryptProtectData(ctypes.byref(source), 'H3 Colab local', None, None, None, 1, ctypes.byref(result))
+        ok = dll.CryptProtectData(ctypes.byref(source), 'LStudio', None, None, None, 1, ctypes.byref(result))
     if not ok:
         raise ctypes.WinError(ctypes.get_last_error())
     try:
@@ -118,8 +124,17 @@ def load_secret(path):
     return protect(path.read_bytes(), decrypt=True)
 
 
+applications = ApplicationRegistry([H3Application()])
+providers = ProviderRegistry([
+    ProviderSpec('colab', 'Google Colab', True, '使用自己的 Colab 计算单元，按需连接运行时', ('G4', 'A100')),
+    ProviderSpec('runpod', 'RunPod', False, '按需 GPU 实例'),
+    ProviderSpec('modal', 'Modal', False, '按任务启动 GPU 容器'),
+])
+asset_library = AssetLibrary(MATERIALS)
+
+
 drive_cache = DriveCache(PRIVATE, load_secret, save_secret)
-character_library = CharacterLibrary(PRIVATE)
+character_library = CharacterLibrary(PRIVATE, asset_library)
 
 
 def safe_error(exc):
@@ -185,520 +200,16 @@ class TimedContents(ContentsClient):
         return response.json()
 
 
-class ReferenceImage(BaseModel):
-    slot: int = Field(ge=1, le=9)
-    image_id: str = Field(pattern=r'^[0-9a-f]{32}\.(png|jpg|webp)$')
-    role: Literal['character', 'scene', 'clothing', 'style', 'product', 'other'] = 'other'
-    description: str = Field(default='', max_length=500)
-    frame: Literal['reference', 'first', 'last'] = 'reference'
-    character_id: str | None = Field(default=None, pattern=r'^[0-9a-f]{32}$')
-
-
 class ReleasePolicy(BaseModel):
     mode: Literal['always', 'idle', 'manual'] = 'idle'
     idle_minutes: int = Field(default=10, ge=1, le=120)
 
 
-class JobConfig(BaseModel):
-    prompt: str = Field(min_length=1, max_length=8000)
-    prompt_processing: Literal['faithful', 'direct'] = 'faithful'
-    performance: bool = True
-    encoder: Literal['heretic_int8', 'official_int8', 'official_bf16'] = 'heretic_int8'
-    quantized_model: bool = True
-    quantized_vae: bool = True
-    veda: bool = True
-    title: str = Field(default='', max_length=80)
-    aspect_ratio: Literal['16:9', '9:16', '1:1', '4:5', '3:4'] = '16:9'
-    mode: Literal['pdd', 'base'] = 'pdd'
-    resolution: Literal['480p', '768p'] = '768p'
-    duration: Literal[5, 10, 12, 15] = 5
-    count: int = Field(default=1, ge=1, le=8, strict=True)
-    seed: int = Field(default=20261009, ge=0, le=2**53 - 1)
-    people: bool = True
-    strength: float = Field(default=.7, ge=0, le=1)
-    auto_release: bool = False
-    release_mode: Literal['always', 'idle', 'manual'] | None = None
-    idle_minutes: int = Field(default=10, ge=1, le=120)
-    gpu: Literal['A100', 'G4'] = 'A100'
-    endpoint: str | None = None
-    image_id: str | None = None
-    generation_type: Literal['text', 'image', 'reference'] | None = None
-    references: list[ReferenceImage] = Field(default_factory=list, max_length=9)
-    reference_size: Literal['match', 'max'] = 'match'
-    characters: list[CharacterProfile] = Field(default_factory=list, max_length=9)
-    audio_references: list[VoiceReference] = Field(default_factory=list, max_length=3)
+H3JobConfig.character_profiles = lambda: character_library.list()
+runtime_services = sys.modules[__name__]
+providers.register('colab', lambda control: ColabProvider(control, runtime_services))
 
-    @model_validator(mode='before')
-    @classmethod
-    def resolve_mentions(cls, data):
-        if isinstance(data, dict) and '@' in str(data.get('prompt', '')):
-            return expand_characters(data, character_library.list())
-        return data
-
-    @model_validator(mode='after')
-    def validate_references(self):
-        if not self.performance:
-            self.encoder = 'official_bf16'
-            self.quantized_model = self.quantized_vae = self.veda = self.people = False
-            self.mode = 'base'
-        if self.release_mode is not None:
-            self.auto_release = self.release_mode == 'always'
-        elif 'auto_release' in self.model_fields_set:
-            self.release_mode = 'always' if self.auto_release else 'manual'
-        else:
-            self.release_mode = 'idle'
-            self.auto_release = False
-        if self.characters and (not self.references or len({c.id for c in self.characters}) != len(self.characters)):
-            raise ValueError('角色配置需要有效参考图，且角色不能重复')
-        if self.audio_references:
-            if not self.references:
-                raise ValueError('声音参考需要搭配角色参考图')
-            if sum(a.duration for a in self.audio_references) > 15.0001:
-                raise ValueError('声音参考总长不能超过 15 秒')
-            if any(a.character_id not in {c.id for c in self.characters} for a in self.audio_references):
-                raise ValueError('声音参考未绑定有效角色')
-        inferred = 'image' if self.references or self.image_id else 'text'
-        # Accept saved/API requests using the previous reference mode name.
-        selected = 'image' if self.generation_type == 'reference' and self.references else self.generation_type
-        if selected and selected != inferred:
-            raise ValueError('生成方式与上传的图片不匹配；图生视频至少需要一张图片')
-        if self.references:
-            if self.image_id:
-                raise ValueError('参考图与首帧图不能同时使用')
-            if len({r.slot for r in self.references}) != len(self.references):
-                raise ValueError('参考图编号不能重复')
-            self.references.sort(key=lambda r: r.slot)
-            for frame, label in [('first', '首帧'), ('last', '尾帧')]:
-                if sum(r.frame == frame for r in self.references) > 1:
-                    raise ValueError(label + '只能指定一张图片')
-            input_images = {r.image_id for r in self.references}
-            if any(not set(ch.image_ids).issubset(input_images) for ch in self.characters):
-                raise ValueError('角色参考图未加入本次输入')
-            reference_prompt(self.model_dump())
-            # Ref2VA selects its own PDD adapter; keep the user's sampling mode.
-            if uses_reference_model(self.model_dump()):
-                self.people = False
-        self.generation_type = inferred
-        return self
-
-
-class GoogleTransport:
-    def __init__(self, controller):
-        self.controller = controller
-        self.running_runtime = None
-        self.assignment_hash = uuid.uuid4()
-
-    def cancel_pending_assignment(self, job):
-        if not job.get('assignment_pending'):
-            return
-        config = JobConfig(**job['config'])
-        client = self.client()
-        found = client._get_assignment(uuid.UUID(job['assignment_hash']),variant=Variant.GPU,
-            accelerator=Accelerator(config.gpu),shape=None if config.gpu=='G4' else Shape.HIGH_RAM)
-        endpoint = getattr(found,'endpoint',None)
-        if endpoint:
-            self._unassign_confirmed(client,endpoint)
-        job['assignment_pending'] = False
-
-    def stop_running(self):
-        if self.running_runtime is not None:
-            self.running_runtime.stop()
-
-    def client(self):
-        path = PRIVATE / 'google-token.dat'
-        if not path.exists():
-            raise RuntimeError('请先完成 Google 授权')
-        creds = Credentials.from_authorized_user_info(json.loads(load_secret(path)), scopes=SCOPES)
-        return Client(Prod(), TimedSession(creds))
-
-    def account(self):
-        client = self.client()
-        assignments = client.list_assignments()
-        managed = (self.controller.session or {}).get('endpoint')
-        if managed and not any(a.endpoint == managed for a in assignments):
-            self.controller.session = None
-            if hasattr(self.controller, 'save_session'):
-                self.controller.save_session()
-            if hasattr(self.controller, 'on_runtime_recycled'):
-                self.controller.on_runtime_recycled(managed)
-        return {'runtimes': [{'endpoint': a.endpoint, 'gpu': a.accelerator.value} for a in assignments],
-                'consumption': client.get_consumption_user_info().model_dump(mode='json')}
-
-    def detect_online_gpus(self):
-        managed = (self.controller.session or {}).get('endpoint')
-        assignments = [a for a in self.client().list_assignments() if a.accelerator in GPU_ACCELERATORS]
-        if managed and not any(a.endpoint == managed for a in assignments):
-            self.controller.session = None
-            if hasattr(self.controller, 'save_session'):
-                self.controller.save_session()
-            if hasattr(self.controller, 'on_runtime_recycled'):
-                self.controller.on_runtime_recycled(managed)
-        return {'runtimes': [dict(endpoint=a.endpoint, gpu=a.accelerator.value,
-                                  managed=a.endpoint == (self.controller.session or {}).get('endpoint'))
-                             for a in assignments],
-                'updated_at': time.time()}
-
-    def connection_step(self, phase, operation):
-        active = getattr(self.controller, 'active', None)
-        job = self.controller.jobs.get(active) if isinstance(active, str) else None
-        started, finished = time.monotonic(), threading.Event()
-        if job:
-            self.controller.event(job, 'connect', phase)
-            def waiting():
-                while not finished.wait(CONNECT_PROGRESS_INTERVAL):
-                    if job.get('cancel_requested'):
-                        return
-                    self.controller.event(job, 'connect', phase + '，已等待 %d 秒' % (time.monotonic() - started))
-            threading.Thread(target=waiting, daemon=True).start()
-        try:
-            result = operation()
-        except Exception as exc:
-            exc.h3_phase = phase
-            if not getattr(exc, 'h3_request', None):
-                exc.h3_request = {'method': '', 'operation': '请求',
-                                  'seconds': round(time.monotonic() - started, 1)}
-            raise
-        finally:
-            finished.set()
-        if job:
-            self.controller.event(job, 'connect', phase + '完成，用时 %.1f 秒' % (time.monotonic() - started))
-        return result
-
-    def connect(self, config):
-        client = self.client()
-        previous = self.controller.session
-        if previous:
-            if config.endpoint and config.endpoint != previous['endpoint']:
-                raise RuntimeError('请先释放本控制台正在管理的运行时，再选择其他显卡。')
-            if previous.get('accelerator', 'A100') != config.gpu:
-                raise RuntimeError('请先释放当前运行时，再切换显卡型号。')
-            return self.connection_step('检查已有 Colab 运行时', self.refresh)
-        accelerator = Accelerator(config.gpu)
-        # G4 has one fixed memory profile: Colab rejects shape=hm for G4.
-        shape = None if config.gpu == 'G4' else Shape.HIGH_RAM
-        assignments = self.connection_step('查询 Colab 运行时列表（含授权检查）', client.list_assignments)
-        active_id = getattr(self.controller,'active',None)
-        owned_job = self.controller.jobs.get(active_id) if isinstance(active_id,str) else None
-        notebook_hash = uuid.UUID(owned_job['id']) if owned_job else self.assignment_hash
-        if owned_job:
-            owned_job.update(assignment_hash=str(notebook_hash),assignment_pending=True)
-            self.controller.save_jobs()
-        if config.endpoint:
-            match = next((a for a in assignments if a.endpoint == config.endpoint and a.accelerator == accelerator), None)
-            if match is None:
-                released_by_this_app = any(j.get('endpoint') == config.endpoint and j['status'] == 'done' and j['config'].get('auto_release') for j in self.controller.jobs.values())
-                if not released_by_this_app:
-                    raise RuntimeError('选中的 ' + config.gpu + ' 运行时已离线或型号不匹配，请刷新列表。')
-                assignment = self.connection_step('申请并启动 ' + config.gpu + ' 显卡',
-                    lambda: client.assign(notebook_hash, variant=Variant.GPU, accelerator=accelerator, shape=shape))
-            else:
-                assignment = match
-        else:
-            assignment = self.connection_step('申请并启动 ' + config.gpu + ' 显卡',
-                lambda: client.assign(notebook_hash, variant=Variant.GPU, accelerator=accelerator, shape=shape))
-        proxy = assignment.runtime_proxy_info
-        self.controller.session = dict(endpoint=assignment.endpoint, url=proxy.url, token=proxy.token,
-            name='h3-local', variant='GPU', accelerator=config.gpu, machine_shape='HIGH_RAM',
-            kernel_id=None, session_id=None)
-        self.controller.save_session()
-        if owned_job:
-            owned_job['assignment_pending'] = False
-        return SessionState(**self.controller.session)
-
-    def refresh(self):
-        endpoint = self.controller.session['endpoint']
-        match = next((a for a in self.client().list_assignments() if a.endpoint == endpoint), None)
-        if match is None:
-            self.controller.session = None
-            if hasattr(self.controller, 'save_session'):
-                self.controller.save_session()
-            if hasattr(self.controller, 'on_runtime_recycled'):
-                self.controller.on_runtime_recycled(endpoint)
-            raise RuntimeError('Colab 运行时已被回收，远程临时文件可能已丢失。')
-        self.controller.session.update(url=match.runtime_proxy_info.url, token=match.runtime_proxy_info.token)
-        self.controller.save_session()
-        return SessionState(**self.controller.session)
-
-    def execute(self, job):
-        s = self.refresh()
-        runtime = ColabRuntime(s.url, s.token, kernel_id=s.kernel_id, session_id=s.session_id)
-        def remember(field, value):
-            self.controller.session[field] = value
-            self.controller.save_session()
-        runtime.on_kernel_started = lambda value: remember('kernel_id', value)
-        runtime.on_session_started = lambda value: remember('session_id', value)
-        source = (BASE / 'remote_h3.py').read_text(encoding='utf-8')
-        if job['config'].get('prompt_processing') == 'faithful':
-            import base64
-            bundle = {name: base64.b64encode((BASE / name).read_bytes()).decode()
-                      for name in ('h3_prompt.py', 'h3_prompt_worker.py')}
-            source = ('import base64, pathlib, sys\n_prompt_tools = pathlib.Path("/content/h3-prompt-tools")\n'
-                      '_prompt_tools.mkdir(exist_ok=True)\n'
-                      'for _name, _data in ' + repr(bundle) + '.items():\n'
-                      '    (_prompt_tools / _name).write_bytes(base64.b64decode(_data))\n'
-                      'sys.path.insert(0, str(_prompt_tools))\nsys.modules.pop("h3_prompt", None)\n' + source)
-        if drive_cache.enabled:
-            import base64
-            cache_source = (BASE / 'drive_cache_remote.py').read_bytes()
-            source += '\nimport types, base64\n_drive_module = types.ModuleType("drive_cache_remote")\n'
-            source += 'exec(base64.b64decode(' + repr(base64.b64encode(cache_source).decode()) + '), _drive_module.__dict__)\nsys.modules["drive_cache_remote"] = _drive_module\n'
-            if drive_cache.backend == 'native':
-                from native_drive_mount import install_mount_hook
-                install_mount_hook(runtime, self.client(), s.endpoint,
-                    lambda stage, message: self.controller.event(job, stage, message), PRIVATE)
-                mounted_source = (BASE / 'mounted_drive_cache.py').read_bytes()
-                source += '_mounted = types.ModuleType("mounted_drive_cache")\nexec(base64.b64decode(' + repr(base64.b64encode(mounted_source).decode()) + '), _mounted.__dict__)\n'
-                source += 'from google.colab import drive\ndrive.mount("/content/drive", timeout_ms=900000)\nMODEL_CACHE = _mounted.MountedDriveModelCache(event)\n'
-            else:
-                source += 'MODEL_CACHE = _drive_module.DriveModelCache(' + repr(drive_cache.remote_token()) + ', event, quota_project=' + repr(drive_cache.quota_project) + ', token_provider=lambda: input("H3_DRIVE_ACCESS_TOKEN"))\n'
-        cfg = dict(job['config'], job_id=job['id'])
-        image_names = ([cfg['image_id']] if cfg.get('image_id') else []) + [r['image_id'] for r in cfg.get('references', [])]
-        asset_names = image_names + [a['audio_id'] for a in cfg.get('audio_references', [])]
-        for name in dict.fromkeys(asset_names):
-            image = PRIVATE / name
-            # /content already exists; upload here before ComfyUI prepares its input folder.
-            TimedContents(s).upload(str(image), 'content/' + image.name)
-        if cfg.get('image_id'):
-            cfg['image_name'] = cfg['image_id']
-        if asset_names:
-            source += '\n_orig_prepare = prepare\ndef prepare():\n    _orig_prepare()\n    import shutil\n    (ROOT / "input").mkdir(exist_ok=True)\n    for name in ' + repr(list(dict.fromkeys(asset_names))) + ':\n        shutil.copy2("/content/" + name, ROOT / "input" / name)\n'
-        code = source + '\nrun(json.loads(' + repr(json.dumps(cfg)) + '))\n'
-        lines_seen = set()
-        def output_hook(output):
-            self.controller.check_cancelled(job)
-            for line in str(output.get('text', '')).splitlines():
-                if line.startswith('H3_EVENT ') and line not in lines_seen:
-                    try:
-                        payload = json.loads(line[9:])
-                    except ValueError:
-                        continue
-                    lines_seen.add(line)
-                    if payload.get('gpu_info'):
-                        job['gpu_info'] = payload['gpu_info']
-                    if payload.get('timings'):
-                        job.setdefault('timings', {}).update(payload['timings'])
-                    if payload.get('acceleration'):
-                        job['acceleration'] = payload['acceleration']
-                    if payload.get('prompt_plan'):
-                        job['prompt_plan'] = payload['prompt_plan']
-                    if payload.get('prompt_diagnostics'):
-                        job['prompt_diagnostics'] = payload['prompt_diagnostics']
-                    if payload.get('model_load'):
-                        job.setdefault('model_loads', []).append({**payload['model_load'], 'message': payload['message']})
-                    if payload.get('model_load_summary'):
-                        job['model_load_summary'] = payload['model_load_summary']
-                    if payload.get('cache_metric'):
-                        job.setdefault('model_transfers', []).append(payload['cache_metric'])
-                    if payload['stage'] == 'result':
-                        job['remote_result'] = payload['result']
-                    if payload['stage'] == 'failure':
-                        job['safe_release'] = payload.get('safe_release', False)
-                    self.controller.event(job, payload['stage'], payload['message'])
-        try:
-            self.running_runtime = runtime
-            enable_cancellation(runtime, lambda: self.controller.check_cancelled(job))
-            if s.kernel_id and s.session_id:
-                import requests
-                response = requests.get(s.url.rstrip('/') + '/api/kernels',
-                    params={'authuser':'0','colab-runtime-proxy-token':s.token},
-                    headers={'X-Colab-Client-Agent':'colab-cli','X-Colab-Runtime-Proxy-Token':s.token},
-                    timeout=(10,20))
-                response.raise_for_status()
-                kernels = response.json()
-                if not isinstance(kernels, list):
-                    raise RuntimeError('无法确认原内核状态，运行时保留')
-                if any(k.get('id') == s.kernel_id and k.get('execution_state') == 'busy' for k in kernels):
-                    self.controller.event(job, 'recover', '远端原任务仍在执行，已重新连接进度；不重复提交')
-                    observed = observe_execution(runtime, s.session_id, output_hook)
-                    errors = [o for o in observed if o.get('output_type') == 'error']
-                    if errors:
-                        raise RuntimeError(errors[-1].get('evalue','远端原任务执行失败'))
-                    if job.get('remote_result'):
-                        return
-                    self.controller.event(job, 'recover', '原内核已空闲，检查并恢复本任务已生成的结果')
-            outputs = runtime.execute_code(code, allow_stdin=drive_cache.enabled,
-                stdin_hook=drive_cache.runtime_stdin_hook(runtime) if drive_cache.enabled and drive_cache.backend == 'api' else None,
-                output_hook=output_hook, timeout=4500)
-            for output in outputs:
-                output_hook(output)
-            errors = [o for o in outputs if o.get('output_type') == 'error']
-            if errors:
-                raise RuntimeError(errors[-1].get('evalue', 'Colab 执行失败'))
-            if not job.get('remote_result'):
-                raise RuntimeError('远程执行结束，但未收到视频结果；运行时保留以便检查。')
-        finally:
-            runtime.stop()
-            if self.running_runtime is runtime:
-                self.running_runtime = None
-
-    def download(self, result, target):
-        path = PurePosixPath(result['path'])
-        if not path.is_relative_to('/content/ComfyUI/output') or '..' in path.parts:
-            raise RuntimeError('远程输出路径不合法')
-        TimedContents(self.refresh()).download(str(path).lstrip('/'), str(target))
-
-    def remote_json(self, code, marker, timeout=180):
-        s = self.refresh()
-        runtime = ColabRuntime(s.url, s.token, kernel_id=s.kernel_id, session_id=s.session_id)
-        def remember(field, value):
-            self.controller.session[field] = value
-            self.controller.save_session()
-        runtime.on_kernel_started = lambda value: remember('kernel_id', value)
-        runtime.on_session_started = lambda value: remember('session_id', value)
-        try:
-            self.running_runtime = runtime
-            active_job = self.controller.jobs.get(self.controller.active)
-            if active_job:
-                enable_cancellation(runtime, lambda: self.controller.check_cancelled(active_job))
-            outputs = runtime.execute_code(code, timeout=timeout)
-            for output in outputs:
-                for line in str(output.get('text', '')).splitlines():
-                    if line.startswith(marker + ' '):
-                        data = json.loads(line[len(marker) + 1:])
-                        if data.get('error'):
-                            raise RuntimeError(data['error'])
-                        return data
-            raise RuntimeError('Colab 未返回上传确认，远端结果保留')
-        finally:
-            runtime.stop()
-            if self.running_runtime is runtime:
-                self.running_runtime = None
-
-    def upload_drive(self, job):
-        storage = self.controller.drive_storage
-        result = job['remote_result']
-        path = PurePosixPath(result['path'])
-        if not path.is_relative_to('/content/ComfyUI/output') or '..' in path.parts:
-            raise RuntimeError('远程输出路径不合法')
-        code = '''import json, hashlib
-from pathlib import Path
-try:
-    p = Path(PATH)
-    with p.open('rb') as f:
-        sha = hashlib.file_digest(f, 'sha256').hexdigest()
-    with p.open('rb') as f:
-        md5 = hashlib.file_digest(f, 'md5').digest()
-    value = {'size':p.stat().st_size, 'sha256':sha, 'md5':md5.hex()}
-except Exception as exc:
-    value = {'error':'读取远端视频失败：' + type(exc).__name__}
-print('H3_DRIVE_PROBE ' + json.dumps(value))
-'''.replace('PATH', repr(str(path)))
-        probe = self.remote_json(code, 'H3_DRIVE_PROBE', timeout=60)
-        if probe['size'] != result['size'] or probe['sha256'] != result['sha256']:
-            raise RuntimeError('远端视频校验失败，停止上传')
-        job['drive_upload_id'] = storage.ensure_file(job)
-        self.controller.save_jobs()
-        target = storage.upload_target(job)
-        code = '''import json, requests
-try:
-    with open(PATH, 'rb') as f:
-        response = requests.put(URL, data=f, headers=HEADERS, timeout=(15,120))
-    value = {'ok':response.status_code in (200,201,204), 'status':response.status_code}
-    if not value['ok']:
-        value['error'] = 'Drive 上传失败（HTTP %s）' % response.status_code
-except Exception as exc:
-    value = {'error':'Drive 上传未确认：' + type(exc).__name__}
-print('H3_DRIVE_UPLOAD ' + json.dumps(value))
-'''.replace('PATH', repr(str(path))).replace('URL', repr(target['url'])).replace('HEADERS', repr(target['headers']))
-        confirmation = self.remote_json(code, 'H3_DRIVE_UPLOAD', timeout=180)
-        if confirmation.get('ok') is not True:
-            raise RuntimeError('Drive 上传未确认，Colab 视频保留')
-        return storage.verify(job, target, probe['md5'])
-
-    def _unassign_confirmed(self, client, endpoint):
-        if any(a.endpoint == endpoint for a in client.list_assignments()):
-            client.unassign(endpoint)
-        for _ in range(6):
-            if not any(a.endpoint == endpoint for a in client.list_assignments()):
-                return
-            time.sleep(2)
-        raise RuntimeError('尚未确认显卡已释放，请稍后重试或在 Colab 删除运行时。')
-
-    def release(self):
-        self._unassign_confirmed(self.client(), self.controller.session['endpoint'])
-        self.controller.session = None
-        self.controller.save_session()
-
-    def release_detected_gpu(self, endpoint):
-        client = self.client()
-        assignment = next((a for a in client.list_assignments() if a.endpoint == endpoint), None)
-        if assignment is None:
-            return False
-        if assignment.accelerator not in GPU_ACCELERATORS:
-            raise HTTPException(409, '选中的运行时不是显卡，未执行释放')
-        if not self.check_idle(endpoint):
-            raise HTTPException(409, '该显卡仍有任务运行或排队，请完成后再释放')
-        self._unassign_confirmed(client, endpoint)
-        return True
-
-    def check_idle(self, endpoint=None):
-        """Check a listed runtime without allocating a VM or interrupting a kernel."""
-        import requests
-        endpoint = endpoint or self.controller.session['endpoint']
-        managed = (self.controller.session or {}).get('endpoint') == endpoint
-        assignment = next((a for a in self.client().list_assignments() if a.endpoint == endpoint), None)
-        if assignment is None:
-            if managed:
-                self.controller.session = None
-                if hasattr(self.controller, 'save_session'):
-                    self.controller.save_session()
-                if hasattr(self.controller, 'on_runtime_recycled'):
-                    self.controller.on_runtime_recycled(endpoint)
-            return True
-        if managed:
-            self.controller.session.update(url=assignment.runtime_proxy_info.url, token=assignment.runtime_proxy_info.token)
-            self.controller.save_session()
-            s = SessionState(**self.controller.session)
-        else:
-            s = SessionState(endpoint=endpoint, url=assignment.runtime_proxy_info.url,
-                             token=assignment.runtime_proxy_info.token, name='h3-gpu-check',
-                             variant='GPU', accelerator=assignment.accelerator.value,
-                             machine_shape='HIGH_RAM', kernel_id=None, session_id=None)
-        response = requests.get(s.url.rstrip('/') + '/api/kernels',
-            params={'authuser': '0', 'colab-runtime-proxy-token': s.token},
-            headers={'X-Colab-Client-Agent': 'colab-cli', 'X-Colab-Runtime-Proxy-Token': s.token}, timeout=(10, 20))
-        response.raise_for_status()
-        kernels = response.json()
-        if not isinstance(kernels, list) or any(k.get('execution_state') != 'idle' for k in kernels):
-            return False
-        kernel_id = s.kernel_id if any(k.get('id') == s.kernel_id for k in kernels) else None
-        runtime = ColabRuntime(s.url, s.token, kernel_id=kernel_id, session_id=s.session_id)
-        def remember(field, value):
-            if managed:
-                self.controller.session[field] = value
-                self.controller.save_session()
-        runtime.on_kernel_started = lambda value: remember('kernel_id', value)
-        runtime.on_session_started = lambda value: remember('session_id', value)
-        code = '''import json, socket, requests, errno
-with socket.socket() as probe:
-    probe.settimeout(3)
-    connection_status = probe.connect_ex(('127.0.0.1', 8188))
-    if connection_status not in (0, errno.ECONNREFUSED):
-        raise RuntimeError('无法确认生成服务状态')
-    listening = connection_status == 0
-idle = True
-if listening:
-    response = requests.get('http://127.0.0.1:8188/queue', timeout=5)
-    response.raise_for_status()
-    queue = response.json()
-    if not all(isinstance(queue.get(k), list) for k in ('queue_running', 'queue_pending')):
-        raise RuntimeError('生成队列返回格式无法确认')
-    idle = not (queue['queue_running'] or queue['queue_pending'])
-print('H3_IDLE_CHECK ' + json.dumps({'idle': idle}))
-'''
-        try:
-            outputs = runtime.execute_code(code, timeout=20)
-            for output in outputs:
-                for line in str(output.get('text', '')).splitlines():
-                    if line.startswith('H3_IDLE_CHECK '):
-                        return json.loads(line[14:])['idle'] is True
-            raise RuntimeError('无法确认 Colab 生成队列，保留显卡，请稍后检查。')
-        finally:
-            runtime.stop()
-
-
-# Reference from the A100 resource panel observed during setup, not a fixed
-# Google tariff. Replace with this account's unambiguous live A100 rate.
+# Observed account reference; live consumption replaces it when available.
 A100_REFERENCE_RATE = 6.77
 
 
@@ -843,7 +354,8 @@ class Controller:
                             child['status'] = 'done'
         if (directory / 'session.dat').exists():
             self.session = json.loads(load_secret(directory / 'session.dat'))
-        self.transport = transport or GoogleTransport(self)
+        self.provider_id = 'colab'
+        self.transport = transport or providers.create(self.provider_id, self)
         if self.session and self.idle_since is None:
             self.idle_since = self.now()
 
@@ -1387,7 +899,7 @@ class Controller:
     def event(self, job, stage, message):
         with self.lock:
             job['stage'], job['message'] = stage, message
-            job['events'].append({'time': time.strftime('%H:%M:%S'), 'stage': stage, 'message': message})
+            job['events'].append({'timestamp': self.now(), 'time': time.strftime('%H:%M:%S'), 'stage': stage, 'message': message})
             job['events'] = job['events'][-120:]
             self.save_jobs()
 
@@ -1454,6 +966,8 @@ class Controller:
                     self.save_jobs()
 
     def start(self, config, retry=None):
+        if config is not None:
+            providers.validate(applications.get(config.app_id), config.provider_id, config.gpu)
         with self.lock:
             if retry and self.jobs.get(retry, {}).get('drive'):
                 job = self.jobs[retry]
@@ -1507,7 +1021,7 @@ class Controller:
                 target_id = job['id']
             else:
                 job_id = uuid.uuid4().hex
-                self.configure_release(ReleasePolicy(mode=config.release_mode or ('always' if config.auto_release else 'manual'), idle_minutes=config.idle_minutes))
+                self.configure_release(ReleasePolicy(mode=config.release_mode, idle_minutes=config.idle_minutes))
                 job = dict(id=job_id, config=config.model_dump(), events=[], status='queued', stage='connect', message='排队中，等待执行', created=time.time())
                 self.jobs[job_id] = job
                 if config.count > 1:
@@ -1574,8 +1088,14 @@ class Controller:
                 self.save_jobs()
 
     def run(self, job, in_batch=False):
-        config = JobConfig(**job['config'])
+        application = applications.get(job['config'].get('app_id', 'h3'))
+        config = application.config_model(**job['config'])
         try:
+            if config.provider_id != self.provider_id:
+                if self.session:
+                    raise RuntimeError('请先释放当前算力再切换提供商')
+                self.transport = providers.create(config.provider_id, self)
+                self.provider_id = config.provider_id
             if job.get('drive'):
                 self.download_drive_result(job)
                 return
@@ -1607,10 +1127,10 @@ class Controller:
                     digest = hashlib.file_digest(handle, 'sha256').hexdigest()
                 if partial.stat().st_size != result['size'] or digest != result['sha256']:
                     raise RuntimeError('下载校验未通过，Colab 运行时已保留，请重试取回。')
-                target = self.videos / (job['id'] + '.mp4')
+                target = self.videos / (job['id'] + application.output_extension)
                 partial.replace(target)
                 job['file'] = target.name
-            job['metadata'] = {k: result[k] for k in ['width', 'height', 'duration', 'audio']}
+            job['metadata'] = {k: result[k] for k in application.metadata_fields}
             saved = '视频已上传 Drive 并校验' if job.get('drive') else '视频已保存到本机'
             self.event(job, 'saved', saved)
             self.check_cancelled(job)
@@ -1703,14 +1223,15 @@ class Controller:
                           key=lambda j: j['batch_index'])
         local_file = bool(job.get('file') and (self.videos / job['file']).is_file() and not job.get('local_download_error'))
         is_preparing = bool(job['id'] in self.preparing_videos or job['id'] in self.download_threads)
-        return {**{k: v for k, v in job.items() if k not in ('remote_result', 'config', 'safe_release', 'drive_upload_id')},
+        return {'app_id': config.get('app_id', 'h3'), 'provider_id': config.get('provider_id', 'colab'),
+                **{k: v for k, v in job.items() if k not in ('remote_result', 'config', 'safe_release', 'drive_upload_id')},
                 'local_file': local_file,
                 'is_preparing': is_preparing,
                 'is_downloading': is_preparing,
                 'batch': {'id': job['batch_id'], 'total': job['batch_total'],
                           'completed': sum(bool(j.get('file') and not j.get('local_download_error')) for j in siblings),
                           'finished': bool(job.get('batch_complete')), 'ids': [j['id'] for j in siblings]} if siblings else None,
-                'creation': {**{k: config[k] for k in ('title', 'prompt', 'prompt_processing', 'performance', 'encoder', 'quantized_model', 'quantized_vae', 'veda', 'aspect_ratio', 'resolution', 'duration', 'mode', 'seed', 'people', 'strength', 'references', 'generation_type', 'reference_size', 'characters') if k in config}, 'count': job.get('batch_total', 1), 'gpu': config.get('gpu', 'A100'), 'has_image': bool(config.get('image_id'))},
+                'creation': {**{k: config[k] for k in ('title', 'prompt', 'prompt_processing', 'performance', 'encoder', 'quantized_model', 'quantized_vae', 'veda', 'aspect_ratio', 'resolution', 'duration', 'mode', 'seed', 'people', 'strength', 'references', 'generation_type', 'reference_size', 'characters') if k in config}, 'count': job.get('batch_total', 1), 'gpu': config.get('gpu', 'A100')},
                 'can_clear_history': self.history_clearable(job),
                 'drive': self.public_drive(job.get('drive')),
                 'recovery_kind': 'download' if job.get('drive') else 'retrieve' if job.get('remote_result') else 'resume',
@@ -1736,7 +1257,7 @@ async def lifespan(application):
     controller.monitor_stop.set()
 
 
-app = FastAPI(title='H3 本地控制台', docs_url=None, redoc_url=None, lifespan=lifespan)
+app = FastAPI(title='LStudio · LocalStudio', docs_url=None, redoc_url=None, lifespan=lifespan)
 app.mount('/static', StaticFiles(directory=BASE / 'static'), name='static')
 oauth_flow = None
 
@@ -1747,7 +1268,7 @@ async def local_only(request: Request, call_next):
     origin = request.headers.get('origin')
     if hostname not in ('127.0.0.1', 'localhost') or request.headers.get('sec-fetch-site') == 'cross-site' or (origin and origin not in LOCAL_ORIGINS):
         return JSONResponse({'detail': '只允许本机访问'}, status_code=403)
-    if request.url.path.startswith('/api/') and not secrets.compare_digest(request.headers.get('X-H3-Key', ''), API_KEY):
+    if request.url.path.startswith('/api/') and not secrets.compare_digest(request.headers.get('X-LStudio-Key', ''), API_KEY):
         return JSONResponse({'detail': '需要本地 API Key'}, status_code=401)
     response = await call_next(request)
     response.headers['Cache-Control'] = 'no-store'
@@ -1772,11 +1293,107 @@ def status():
     recent_ids = {j['id'] for j in active_or_queued + ordered[:20] + saved[:20]}
     recent_batches = {j['batch_id'] for j in ordered if j['id'] in recent_ids and j.get('batch_id')}
     return {'authorized': (PRIVATE / 'google-token.dat').exists(), 'active': controller.active,
+            'compute': {'provider_id': controller.provider_id, 'gpu': (controller.session or {}).get('accelerator')},
             'gpu_online_available': True,
             'drive_cache': drive_cache.status(),
             'managed_gpu': bool(controller.session), 'release': controller.release_status(),
             'history': {'count': len(saved), 'clearable': sum(controller.history_clearable(j) for j in saved)},
             'jobs': [controller.public_job(j) for j in ordered if j['id'] in recent_ids or j.get('batch_id') in recent_batches]}
+
+
+def asset_scopes():
+    scopes = [{'app_id': 'shared', 'app_name': '共享素材', 'purpose': 'imports',
+               'purpose_name': '导入素材', 'kinds': ('images', 'videos', 'audios')}]
+    for application in applications.list():
+        for purpose in application['asset_purposes']:
+            scopes.append({'app_id': application['id'], 'app_name': application['name'],
+                           'purpose': purpose['id'], 'purpose_name': purpose['name'], 'kinds': purpose['kinds']})
+    return scopes
+
+
+def validate_asset_scope(app_id, purpose, kind):
+    scope = next((item for item in asset_scopes() if item['app_id'] == app_id and item['purpose'] == purpose), None)
+    if not scope or kind not in scope['kinds']:
+        raise HTTPException(400, '所选应用用途不支持该素材类型')
+
+
+@app.get('/api/workspace')
+def workspace():
+    return {'applications': applications.list(), 'providers': providers.list(),
+            'compute': compute_status(),
+            'library': {'root': str(asset_library.root), 'scopes': asset_scopes()}}
+
+
+@app.get('/api/compute')
+def compute_status():
+    session = controller.session or {}
+    return {'provider_id': controller.provider_id, 'provider_name': providers.get(controller.provider_id).name,
+            'authorized': (PRIVATE / 'google-token.dat').exists(),
+            'connected': bool(session), 'busy': bool(controller.active),
+            'gpu': session.get('accelerator'), 'release': controller.release_status()}
+
+
+@app.get('/api/assets')
+def list_assets(kind: str | None = None, app_id: str | None = None, purpose: str | None = None):
+    try:
+        items = asset_library.list(kind, list(controller.jobs.values()), app_id=app_id, purpose=purpose)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    return {'assets': items, 'root': str(asset_library.root), 'scopes': asset_scopes()}
+
+
+@app.post('/api/assets', status_code=201)
+async def import_asset(file: UploadFile, app_id: Annotated[str, Form()] = 'shared', purpose: Annotated[str, Form()] = 'imports'):
+    extension = Path(file.filename or '').suffix.lower()[1:]
+    if extension in ('png', 'jpg', 'jpeg', 'webp'):
+        result = await save_image(file, app_id, purpose)
+        return {'id': result['image_id'], 'kind': 'images', 'app_id': app_id, 'purpose': purpose}
+    if extension not in ('mp4', 'wav', 'mp3', 'm4a', 'ogg', 'flac', 'aac'):
+        raise HTTPException(400, '支持 PNG、JPEG、WebP 图片，MP4 视频和常见音频格式')
+    library = asset_library
+    asset_id = uuid.uuid4().hex + '.' + extension
+    validate_asset_scope(app_id, purpose, library.kind(asset_id))
+    target = library.target(asset_id, app_id, purpose)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix('.partial')
+    size = 0
+    try:
+        with temporary.open('xb') as output:
+            while chunk := await file.read(1024 ** 2):
+                size += len(chunk)
+                if size > 512 * 1024 ** 2:
+                    raise HTTPException(400, '单项素材不能超过 512MB')
+                output.write(chunk)
+        import av
+        try:
+            with av.open(str(temporary)) as container:
+                stream = next(iter(container.streams.video if extension == 'mp4' else container.streams.audio), None)
+                if stream is None or (extension != 'mp4' and container.streams.video):
+                    raise ValueError('素材类型与文件格式不符')
+                next(container.decode(stream))
+                duration = float(container.duration / av.time_base) if container.duration else 0
+        except Exception:
+            raise HTTPException(400, '素材无法解码，请使用有效的视频或音频文件') from None
+        temporary.replace(target)
+        library._write_metadata(target, {'name': Path(file.filename).name[:120], 'duration': duration})
+        return {'id': asset_id, 'kind': library.kind(asset_id), 'app_id': app_id, 'purpose': purpose}
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+@app.get('/api/assets/{asset_id}/file')
+def asset_file(asset_id: str, request: Request, download: bool = False):
+    library = asset_library
+    try:
+        kind = library.kind(asset_id)
+        if kind == 'videos':
+            return video(asset_id, request, download)
+        path = library.resolve(asset_id)
+    except (ValueError, FileNotFoundError):
+        raise HTTPException(404, '素材不存在') from None
+    if not path.is_file():
+        raise HTTPException(404, '素材不存在')
+    return FileResponse(path, media_type=library.media_type(asset_id), filename=asset_id if download else None)
 
 
 @app.delete('/api/history')
@@ -1855,7 +1472,9 @@ def release_online_gpu(payload: GpuReleaseConfig):
 @app.get('/api/settings')
 def generation_settings():
     # UI and remote graph use the same dimension table.
-    return {'dimensions': DIMENSIONS, 'fps': 24, 'alignment': 32,
+    h3_app = applications.get('h3')
+    settings = h3_app.settings() if hasattr(h3_app, 'settings') else {'dimensions': DIMENSIONS, 'fps': 24, 'alignment': 32}
+    return {**settings,
             'result_storage': 'drive' if controller.drive_storage.enabled else 'local',
             'storage_ready': True, 'drive_folder': 'H3-Videos'}
 
@@ -1975,25 +1594,29 @@ def authorize_finish(payload: AuthCode):
 
 
 @app.post('/api/jobs', status_code=202)
-def create_job(config: JobConfig):
+def create_job(config: H3JobConfig):
     if not (PRIVATE / 'google-token.dat').exists():
         raise HTTPException(401, '请先授权 Google 账号')
     if not config.prompt.strip():
         raise HTTPException(400, '请输入提示词')
-    if config.image_id and not re.fullmatch(r'[0-9a-f]{32}\.(png|jpg|webp)', config.image_id):
-        raise HTTPException(400, '图片编号不合法')
-    if config.image_id and not (PRIVATE / config.image_id).is_file():
-        raise HTTPException(400, '上传的图片不存在')
-    for reference in config.references:
-        if not (PRIVATE / reference.image_id).is_file():
-            raise HTTPException(400, f'图片{reference.slot}已丢失，请重新上传')
-    for audio in config.audio_references:
+    app_id = getattr(config, 'app_id', 'h3')
+    application = applications.get(app_id)
+    if hasattr(application, 'validate_assets'):
         try:
-            actual = validate_audio_asset(PRIVATE, audio)
-            if abs(actual.duration - audio.duration) > .001:
-                raise ValueError('声音样本时长不匹配，请重新上传')
+            application.validate_assets(config, asset_library)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
+    else:
+        for reference in getattr(config, 'references', []):
+            if not asset_library.exists(reference.image_id):
+                raise HTTPException(400, f'图片{reference.slot}已丢失，请重新上传')
+        for audio in getattr(config, 'audio_references', []):
+            try:
+                actual = validate_audio_asset(asset_library, audio)
+                if abs(actual.duration - audio.duration) > .001:
+                    raise ValueError('声音样本时长不匹配，请重新上传')
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from None
     # Fast duplicate guard: within 3s if identical config submitted, return existing job
     now_ts = time.time()
     for existing in controller.jobs.values():
@@ -2054,7 +1677,12 @@ def release(config: ReleaseConfig):
 
 
 @app.post('/api/images')
-async def upload_image(file: UploadFile):
+async def upload_image(file: UploadFile, purpose: Annotated[str, Form()] = 'references'):
+    return await save_image(file, 'h3', purpose)
+
+
+async def save_image(file, app_id, purpose):
+    validate_asset_scope(app_id, purpose, 'images')
     data = await file.read(20 * 1024**2 + 1)
     if len(data) > 20 * 1024**2:
         raise HTTPException(400, '图片不能超过 20MB')
@@ -2069,7 +1697,7 @@ async def upload_image(file: UploadFile):
     except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
         raise HTTPException(400, '图片无法读取或尺寸过大，请使用有效的 PNG、JPEG、WebP 图片') from None
     image_id = uuid.uuid4().hex + '.' + extension
-    (PRIVATE / image_id).write_bytes(data)
+    asset_library.store(image_id, data, name=Path(file.filename or image_id).name[:120], app_id=app_id, purpose=purpose)
     return {'image_id': image_id}
 
 
@@ -2113,7 +1741,7 @@ def save_character(profile: CharacterProfile):
 
 
 @app.post('/api/characters/preview')
-def preview_characters(config: JobConfig):
+def preview_characters(config: H3JobConfig):
     return {'characters': [c.name for c in config.characters], 'images': len(config.references),
             'audios': len(config.audio_references),
             'audio_seconds': sum(a.duration for a in config.audio_references),
@@ -2136,18 +1764,21 @@ async def upload_audio(file: UploadFile):
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from None
     audio_id = uuid.uuid4().hex + '.' + extension
-    path = PRIVATE / audio_id
-    path.write_bytes(data)
-    stat = path.stat()
-    atomic(path.with_suffix(path.suffix + '.json'), json.dumps(dict(duration=duration, size=stat.st_size, mtime_ns=stat.st_mtime_ns)))
+    asset_library.store(audio_id, data, name=Path(file.filename or '声音样本').name[:120], metadata={'duration': duration}, app_id='h3', purpose='characters')
     return AudioAsset(audio_id=audio_id, name=Path(file.filename or '声音样本').name[:120], duration=duration).model_dump()
 
 
 @app.get('/api/audios/{audio_id}')
 def audio_preview(audio_id: str):
-    if not re.fullmatch(AUDIO_ID, audio_id) or not (PRIVATE / audio_id).is_file():
+    if not re.fullmatch(AUDIO_ID, audio_id):
         raise HTTPException(404, '声音样本不存在')
-    return FileResponse(PRIVATE / audio_id, media_type={'wav':'audio/wav', 'mp3':'audio/mpeg',
+    try:
+        path = asset_library.resolve(audio_id)
+    except (ValueError, FileNotFoundError):
+        raise HTTPException(404, '声音样本不存在') from None
+    if not path.is_file():
+        raise HTTPException(404, '声音样本不存在')
+    return FileResponse(path, media_type={'wav':'audio/wav', 'mp3':'audio/mpeg',
         'm4a':'audio/mp4', 'ogg':'audio/ogg', 'flac':'audio/flac', 'aac':'audio/aac'}[Path(audio_id).suffix[1:]])
 
 
@@ -2155,7 +1786,10 @@ def audio_preview(audio_id: str):
 def image_preview(image_id: str):
     if not re.fullmatch(r'[0-9a-f]{32}\.(png|jpg|webp)', image_id):
         raise HTTPException(404, '图片不存在')
-    path = PRIVATE / image_id
+    try:
+        path = asset_library.resolve(image_id)
+    except (ValueError, FileNotFoundError):
+        raise HTTPException(404, '图片不存在') from None
     if not path.is_file():
         raise HTTPException(404, '图片不存在')
     media = {'png': 'image/png', 'jpg': 'image/jpeg', 'webp': 'image/webp'}[path.suffix[1:]]
@@ -2164,13 +1798,19 @@ def image_preview(image_id: str):
 
 @app.get('/video/{filename}')
 def video(filename: str, request: Request, download: bool = False):
-    if not re.fullmatch(r'[0-9a-f]{32}\.mp4|example\.mp4', filename):
+    if not re.fullmatch(r'[0-9a-f]{32}\.mp4', filename):
         raise HTTPException(404)
-    path = VIDEOS / filename
     byte_range = request.headers.get('range')
     if byte_range and (len(byte_range) > 128 or not re.fullmatch(r'bytes=\d*-\d*', byte_range)):
         raise HTTPException(416, '不支持该视频范围请求')
     job = controller.jobs.get(filename.removesuffix('.mp4'))
+    if job:
+        path = controller.history_recycle.video(job.get('file') or filename)
+    else:
+        try:
+            path = asset_library.resolve(filename)
+        except (ValueError, FileNotFoundError):
+            raise HTTPException(404, '视频不存在') from None
     if job and job.get('drive'):
         target = controller.history_recycle.video(job.get('file') or filename)
         if not controller.valid_local_video(target, job['drive']) or not job.get('file'):
@@ -2184,4 +1824,4 @@ def video(filename: str, request: Request, download: bool = False):
 
 if __name__ == '__main__':
     import uvicorn
-    uvicorn.run(app, host='127.0.0.1', port=7865, access_log=False)
+    uvicorn.run(app, host='127.0.0.1', port=PORT, access_log=False)

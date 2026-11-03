@@ -109,7 +109,10 @@ def run_backup(gpu_type='T4', config=None, benchmark=False, reuse=False, concurr
                 result = json.loads(line[len('H3_CACHE_REPORT '):])
 
     cache_source = (app.BASE / 'drive_cache_remote.py').read_bytes()
-    source = (app.BASE / 'remote_h3.py').read_text(encoding='utf-8')
+    remote_path = app.BASE / 'apps' / 'h3' / 'remote_h3.py'
+    if not remote_path.exists():
+        remote_path = app.BASE / 'remote_h3.py'
+    source = remote_path.read_text(encoding='utf-8')
     code = "import subprocess, sys\nsubprocess.run([sys.executable, '-m', 'pip', 'install', '-q', 'huggingface_hub'], check=True)\n"
     code += source + '\nimport types, base64, shutil\n'
     code += '_module = types.ModuleType("drive_cache_remote")\nexec(base64.b64decode(' + repr(base64.b64encode(cache_source).decode()) + '), _module.__dict__)\nsys.modules["drive_cache_remote"] = _module\n'
@@ -226,7 +229,7 @@ print('H3_CACHE_REPORT ' + json.dumps(report), flush=True)
                 if not concurrent:
                     try:
                         requests.post('http://127.0.0.1:7865/api/release', json={},
-                            headers={'X-H3-Key': app.API_KEY}, timeout=60)
+                            headers={'X-LStudio-Key': app.API_KEY}, timeout=60)
                     except Exception:
                         pass
                 original_path = app.PRIVATE / 'drive-cache-original-release.json'
@@ -234,7 +237,7 @@ print('H3_CACHE_REPORT ' + json.dumps(report), flush=True)
                     try:
                         policy = json.loads(original_path.read_text())
                         requests.put('http://127.0.0.1:7865/api/release-policy',
-                            headers={'X-H3-Key': app.API_KEY}, json=policy, timeout=10)
+                            headers={'X-LStudio-Key': app.API_KEY}, json=policy, timeout=10)
                     except Exception:
                         pass
             else:

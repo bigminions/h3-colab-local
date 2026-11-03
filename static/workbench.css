@@ -94,7 +94,7 @@
 .connection-page .card-title{margin-bottom:16px}
 #connectionError{grid-column:1/-1;margin:0}
 @media(max-width:800px){.connection-page{grid-template-columns:1fr}.connection-page .connection-card{padding:20px}}
-#toolPage{max-width:1920px;margin:20px auto;padding:0 24px;grid-template-columns:minmax(0,2.2fr) minmax(320px,1fr);gap:20px;align-items:stretch}
+#toolPage{max-width:1920px;margin:20px auto;padding:0 24px;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px;align-items:stretch}
 #toolPage>section{min-width:0}
 .topbar,footer{max-width:1920px}
 .creation-card{padding:20px}
@@ -274,7 +274,7 @@ button.secondary:hover:not(:disabled),.linkbtn:hover{background:#30394d;border-c
 .primary:hover:not(:disabled){background:#d2d9ff}
 .primary:active:not(:disabled){transform:translateY(1px)}
 button:disabled{transform:none}
-#toolPage{max-width:1680px;margin:24px auto;padding:0 28px;grid-template-columns:minmax(0,1.8fr) minmax(340px,1fr);gap:20px}
+#toolPage{max-width:1680px;margin:24px auto;padding:0 28px;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px}
 .creation-card,.result-card{padding:24px}
 .creation-heading{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:24px}
 .creation-heading .card-title{margin:0;white-space:nowrap}
@@ -352,7 +352,7 @@ button:disabled{transform:none}
 .api-card{border-radius:13px;background:#141820}
 .api-card summary{font-size:12px;color:#929fb7}
 .release-config{background:#131923;border-color:#354057}
-@media(min-width:1100px) and (max-width:1399px){#toolPage{padding:0 22px;gap:18px;grid-template-columns:minmax(0,1.8fr) minmax(340px,1fr)}#generateForm{grid-template-columns:minmax(0,1fr) 220px;gap:18px}.creation-settings{padding-left:18px}.creation-card,.result-card{padding:20px}.creation-heading .tab{padding:8px 11px}}
+@media(min-width:1100px) and (max-width:1399px){#toolPage{padding:0 22px;gap:18px;grid-template-columns:minmax(0,1fr) minmax(0,1fr)}#generateForm{grid-template-columns:minmax(0,1fr) 220px;gap:18px}.creation-settings{padding-left:18px}.creation-card,.result-card{padding:20px}.creation-heading .tab{padding:8px 11px}}
 @media(max-width:1099px){#toolPage{grid-template-columns:1fr;max-width:1100px}#generateForm{grid-template-columns:minmax(0,1fr) 260px}.preview-section .result-card{min-height:430px}}
 @media(max-width:800px){.topbar{height:56px;padding:0 16px;gap:16px}.page-tab{padding:8px 12px;font-size:12px}main{padding:0 18px;margin:24px auto}#toolPage{padding:0 16px;margin:18px auto;gap:18px}#generateForm{grid-template-columns:1fr;gap:24px}.creation-settings{border:0;padding:22px 0 0;border-top:1px solid var(--line)}.creation-card,.result-card{padding:18px}.creation-heading{margin-bottom:20px;gap:10px}.creation-heading .card-title{font-size:15px}.creation-heading .tab{padding:7px 10px;font-size:11px}#prompt{height:270px;min-height:240px}.creation-settings .format-tile{min-height:62px}.preview-section .result-card{min-height:440px}.history-card{padding:18px}.character-editor{padding:20px}.character-editor-columns{grid-template-columns:1fr;gap:28px}.character-editor-voice{padding:24px 0 0;border:0;border-top:1px solid var(--line)}.connection-modules{gap:16px}.connection-page .connection-card{padding:22px}.manager-toolbar{margin-top:22px}.manager-list{gap:12px}}
 @media(max-width:600px){.topbar{gap:10px}.page-tabs{gap:2px}.page-tab{padding:8px 10px}.balance-trigger{padding:7px 9px}.manager-character-info{padding:12px 12px 0}.manager-character h3{font-size:16px}.character-page h2,.config-section-title{font-size:20px}}
@@ -391,7 +391,7 @@ body.image-viewing{overflow:hidden}
   margin: 16px auto !important;
   padding: 0 24px !important;
   display: grid !important;
-  grid-template-columns: minmax(480px, 4fr) minmax(0, 6fr) !important;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important;
   gap: 20px !important;
   align-items: stretch !important;
   box-sizing: border-box !important;
@@ -415,9 +415,9 @@ main.hidden,
   display: flex !important;
   flex-direction: column !important;
   position: sticky !important;
-  top: 72px !important;
-  height: calc(100vh - 100px) !important;
-  max-height: calc(100vh - 100px) !important;
+  top: 16px !important;
+  height: calc(100vh - 84px) !important;
+  max-height: calc(100vh - 84px) !important;
 }
 
 .creation-section > .creation-card {
@@ -533,7 +533,7 @@ main.hidden,
   min-width: 0;
   width: 100%;
   box-sizing: border-box;
-  min-height: calc(100vh - 100px) !important;
+  min-height: calc(100vh - 84px) !important;
 }
 
 .task-stream-heading {

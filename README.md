@@ -1,22 +1,41 @@
-# H3 本地视频工作台
+# LStudio
 
-在 Windows 本机打开网页，使用自己的 Google Colab 运行时生成 MiniMax H3 视频。本机负责素材、任务和作品管理，模型下载与推理在 Colab 上完成，不要求本机有 NVIDIA 显卡。
+**LocalStudio · 本地创作工作台，按需使用云端 GPU。**
 
-支持文生视频、参考图与首尾帧、角色库和声音参考、批量生成、Qwen 提示词整理，以及可选的 Google Drive 模型缓存和成片备份。
+LStudio 在 Windows 本机管理应用、素材与任务，把模型下载和推理交给远程 GPU。素材和作品保存在本机，不要求本机配备 NVIDIA 显卡。
+
+工作台分为三个部分：
+
+- **应用**：左侧选择应用，中间显示应用内容。当前提供 H3 视频应用，包含创作和角色管理。
+- **算力**：左下角、设置上方的算力卡片显示提供商、GPU、运行状态、剩余计算单元与预估可用时长，点击进入配置。
+- **素材库**：图片、视频、音频统一保存，跨应用复用。设置位于左侧导航底部。
+
+切换页面和浏览素材不会申请 GPU；提交生成任务后才连接算力。
+
+## 当前支持
+
+| 项目 | 状态 |
+| --- | --- |
+| MiniMax H3 视频应用 | 可用：文生视频、图生视频、首尾帧、角色和声音参考 |
+| Google Colab 算力 | 可用：账号授权、按需连接、运行时复用与释放 |
+| 本机素材库 | 可用：导入、筛选、搜索、预览、下载和 H3 图片引用 |
+| 生图应用 | 尚未接入 |
+| RunPod / Modal | 尚未接入，算力页仅展示其状态 |
+
+任务串行执行。应用和算力的扩展接口已拆出，详见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
 ## 环境要求
 
-- Windows 10 / 11。凭据使用 Windows DPAPI 加密，当前不支持直接在 Linux、macOS 或 WSL 中运行本地控制台。
-- Python 3.12（64 位），安装时勾选 Python Launcher。
-- 可以使用 Colab 的 Google 账号，以及可分配所选 GPU 的配额或计算单元。网页提供 G4、A100 选择，实际可用性以账号返回为准。
-- 本机能访问 Google OAuth、Colab 和 Drive；Colab 运行时能访问 GitHub、Hugging Face 等模型和代码来源。
-- 本机需要保存视频和上传素材的空间。模型在远程下载，可能需要数十 GB 的运行时磁盘；使用 Drive 缓存时还需相应的 Drive 空间。
+- Windows 10 / 11、64 位 Python 3.12。凭据使用当前 Windows 用户的 DPAPI 加密。
+- 可使用 Colab 的 Google 账号，以及可分配所选 GPU 的计算单元或配额。当前 H3 配置支持 G4 96GB、A100 80GB，实际供应以账号返回为准。
+- 本机可以访问 Google OAuth、Colab 和可选的 Drive；远程运行时可以访问 GitHub、Hugging Face 等代码及模型来源。
+- 本机有足够空间保存素材和视频。远程模型可能占用数十 GB 磁盘；启用 Drive 模型缓存还需要相应的 Drive 空间。
 
-GPU 运行时会消耗自己的 Colab 额度。首次使用或释放后重新分配运行时，需要重新准备环境和模型，耗时取决于模型大小与网络。
+首次使用或释放后重新申请运行时，需要准备环境和模型。准备过程也会消耗运行时资源。
 
 ## 安装与启动
 
-下载或克隆代码后，在项目目录打开 PowerShell：
+在项目目录打开 PowerShell：
 
 ```powershell
 py -3.12 -m venv .venv
@@ -25,81 +44,116 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe launch.py
 ```
 
-也可在安装依赖后双击 `start.cmd`。浏览器会打开 <http://127.0.0.1:7865/>；已有工作台服务时，启动器复用该服务。
+安装完成后也可双击 `start.cmd`。启动器会打开 [LStudio 本机工作台](http://127.0.0.1:7865/)，已有 LStudio 服务时复用该服务。
 
-`requirements.txt` 声明本地代码直接使用的依赖，并用 `requirements-cached.txt` 约束已验证的依赖版本，两个文件需要放在一起。Colab 上的 ComfyUI、模型与推理依赖由程序准备，无需安装到本机。
+`requirements.txt` 与 `requirements-cached.txt` 需要放在一起，分别声明本机依赖和已验证的版本约束。远程 ComfyUI、模型和推理依赖由应用准备。
 
-如果窗口未打开，可以运行以下命令查看启动错误：
+启动失败时，可直接运行后台查看错误：
 
 ```powershell
 .\.venv\Scripts\python.exe -u app.py
 ```
 
-## 第一次生成
+启动器日志位于 `log/server.log` 和 `log/server-error.log`。更新代码后，正常退出后台并重新启动。
 
-1. 打开“配置”，连接自己的 Google 账号。按页面提示完成 Google 授权，将授权码粘贴回本机工作台。
-2. 回到创作页，输入提示词，选择视频比例、画质、时长和生成数量。第一次可用 5 秒、480p 验证完整流程。
-3. 如需图生视频，上传参考图并设置为首帧、尾帧或一般参考图。角色库可保存角色外观、图片和声音样本，在提示词中用 `@` 选择角色。
-4. 在高级设置确认 GPU 和释放方式，再开始生成。进度和错误原因可在运行日志中查看。
-5. 完成后在作品区播放或下载视频。最近作品支持应用配置、重新下载和移入系统回收箱。
+## 开始创作
 
-无需授权 Drive 即可生成并保存到本机。Drive 是独立授权，用于可选的成片备份及模型缓存。
+1. 点击左下角算力卡片，连接 Google 账号。按页面提示完成授权，将授权码粘贴回本机工作台。
+2. 在算力页选择 GPU、运行时和释放方式。选择运行时不会立即申请 GPU。
+3. 进入“H3 视频 → 创作”，输入画面、动作与声音描述，选择比例、画质、时长和数量。首次验证可以使用 5 秒、480p。
+4. 生成时在任务队列查看进度、日志与错误，完成后播放或下载视频。
 
-### 提示词与性能选项
+图生视频可直接上传图片，也可从素材库选图。图片可设置为一般参考图、首帧或尾帧；首尾帧各限一张。素材库图片卡片上的“用于 H3”会把图片加入当前创作。
 
-- **Qwen 整理**：先理解输入剧本，再将描述整理为 H3 使用的英文区段；对白和画面文字保留原文。整理结果可能有语义偏差，可查看日志并调整输入，或关闭整理直接传入提示词。
-- **性能加速**：提供编码器选择、主模型和视频 VAE 量化、PDD 8 步与实验性 Veda 注意力加速。关闭总开关会使用官方 BF16 主模型和编码器、FP16 视频 VAE、常规 20 步与完整注意力，资源占用会增加。
-- **角色声音**：每次任务的声音参考合计最多 3 段、15 秒；角色图、参考图和首尾帧合计最多 9 张。
-- **批量生成**：一次 1–8 条，顺序执行并复用同一运行时，各条使用独立输出编号和种子。
+在“H3 视频 → 角色管理”保存角色外观、参考图和声音样本，随后在提示词中输入 `@` 选择图片或角色。
 
-部分加速组合会影响画面和声音。模型、编码器、PDD、Veda 的具体版本与校验信息记录在代码和任务日志中。
+### H3 生成选项
 
-### GPU 释放
+- **素材上限**：角色图、其他参考图和首尾帧合计最多 9 张。声音参考最多 3 段，每段 2–15 秒，合计不超过 15 秒。
+- **批量生成**：一次 1–8 条，顺序执行并复用运行时，各条使用独立输出编号和种子。
+- **Qwen 提示词整理**：理解剧本并整理成 H3 使用的英文区段，保留原文对白和画面文字。可查看整理日志，或关闭整理直接传入提示词。
+- **性能加速**：编码器、主模型和视频 VAE 量化、PDD 8 步、实验性 Veda 注意力加速可分别调整。关闭总开关会使用原版权重、常规 20 步和完整注意力，资源占用增加。
 
-高级设置提供整批生成后释放、闲置后释放、手动释放。保留运行时期间仍可能消耗额度。
+加速组合可能影响画面和声音。模型版本、校验和加载来源记录在代码及任务日志中。
 
-释放前程序检查自己管理的运行时是否空闲、结果是否已取回或完成备份。网络异常或结果未保存可能阻止释放，应查看日志并处理。取消任务后也应检查释放状态。
+## 素材与本机数据
 
-关闭浏览器不会关闭后台服务；关闭后台程序后无法继续执行定时释放。退出前请在工作台确认显卡释放，必要时在自己的 Colab 中核对运行时。
+所有媒体保存在同一个 `materials/` 根目录，按“应用 / 用途 / 类型”存放，以素材编号引用，原始名称保存在元数据中：
+
+```text
+materials/
+├── shared/imports/          通用导入素材
+│   ├── images/
+│   ├── videos/
+│   └── audios/
+└── h3/
+    ├── references/images/  H3 创作参考图与首尾帧
+    ├── characters/
+    │   ├── images/         角色图片
+    │   └── audios/         角色声音样本
+    └── outputs/videos/     H3 生成和恢复的作品
+```
+
+素材库可按应用、用途和类型筛选。导入前会显示保存位置；直接从 H3 创作或角色管理上传的素材自动归入对应用途。从其他用途引用素材时保留其原有位置，跨应用复用无需复制文件。
+
+素材库支持 PNG、JPEG、WebP 图片，MP4 视频，以及 WAV、MP3、M4A、OGG、FLAC、AAC 音频。图片最大 20MB；单个视频或音频最大 512MB。通用音频导入不受 H3 声音时长限制，引用到 H3 时会按应用规则校验。
+
+| 目录 | 内容 |
+| --- | --- |
+| `materials/` | 统一媒体素材和作品 |
+| `.private/` | 加密凭据、本地 API Key、会话、任务记录和角色配置 |
+| `log/` | 启动器日志 |
+| `.venv/` | 本机 Python 虚拟环境 |
+
+上述目录均为本机数据，不应提交到 Git。草稿、算力选择和部分偏好保存在浏览器中；DPAPI 凭据绑定当前 Windows 用户。
+
+作品区的移除操作使用系统回收箱。需要恢复时，在系统回收箱还原对应作品，工作台会检查恢复包并重建记录。
+
+## 算力释放
+
+算力页提供三种策略：整批完成后释放、闲置后释放、手动释放。默认在闲置 10 分钟后检查释放。
+
+保留运行时期间仍可能消耗额度。释放前会检查运行时是否空闲，以及结果是否已保存和校验。取消任务或网络中断后，可在算力页检查实际状态。
+
+关闭浏览器不会关闭后台；退出后台后，定时释放也会停止。结束使用前请确认 GPU 已释放，必要时在自己的 Colab 中核对运行时。
 
 ## Google Drive（可选）
 
-在“配置”中单独完成 Drive 授权：
+无需授权 Drive 即可生成和保存到本机。在“算力 → 连接与缓存”中可独立授权 Drive，用于：
 
-- 成片备份保存在私有的 `H3-Videos` 文件夹；本机副本缺失时可从 Drive 恢复并校验。
-- 模型缓存使用 `H3-Model-Cache`，校验来源版本、大小与 SHA-256；缓存未命中时按原模型来源下载。
-- 缓存备份会申请运行时，复制模型并校验，结束后尝试释放所申请的运行时。它会消耗时间、运行时资源和 Drive 空间，不保证比直接从 Hugging Face 下载更快。
+- **成片备份**：保存到 `H3-Videos`，本机副本缺失时可恢复并校验。
+- **模型缓存**：保存到 `H3-Model-Cache`，校验来源版本、大小和 SHA-256，作为模型下载的备用来源。
 
-如提示 `SERVICE_DISABLED` 或配额项目错误，需要在自己的 Google Cloud 配额项目启用 Drive API，并确认项目权限。可用配置接口设置自己的项目 ID；不要使用他人的项目名：
+自动备份模型会申请运行时、复制和校验模型，并在结束后尝试释放资源。它会消耗运行时和存储空间，不保证比直接下载更快。备份报告位于 `.private/drive-cache-reports/`。
+
+遇到 `SERVICE_DISABLED` 或配额项目错误时，请在自己的 Google Cloud 配额项目启用 Drive API，并确认项目权限。可通过本地配置接口保存项目 ID，再在页面重新检查和启用缓存：
 
 ```powershell
-$headers = @{ 'X-H3-Key' = '从本机配置页复制的Key' }
+$headers = @{ 'X-LStudio-Key' = '从本机设置页复制的 Key' }
 $body = @{ enabled = $false; backend = 'api'; quota_project = 'your-project-id' } | ConvertTo-Json
 Invoke-RestMethod -Method Put -Uri http://127.0.0.1:7865/api/drive-cache -Headers $headers -ContentType application/json -Body $body
 ```
 
-保存配额项目后，在页面重新检查并启用 Drive 缓存。普通生成不依赖 Drive，也不需要预先运行备份脚本。
-
-`seed_drive_cache.py` 是缓存备份和测速工具，操作报告写入 `.private/drive-cache-reports/`，按用户数据管理，不属于安装依赖。
-
-## 本机数据
-
-程序按需创建以下目录，均不应提交到 Git：
-
-| 目录 | 内容 |
-| --- | --- |
-| `.private/` | 加密凭据、API Key、会话、任务记录、角色库、上传的图片和声音 |
-| `videos/` | 下载到本机的视频 |
-| `log/` | 启动器的服务日志和错误日志 |
-| `.venv/` | 本机 Python 虚拟环境 |
-
-网页草稿和部分偏好保存在当前浏览器的本地存储中。Windows DPAPI 凭据绑定当前 Windows 用户，不能把别人的 `.private/` 当成可复用配置。
-
-用户素材和生成视频保存在上述数据目录中。测试使用程序生成的合成素材，仓库不携带个人作品或历史实测结果。
-
 ## 本地 API
 
-在“配置 → 开发者 · 本地 API”复制本机 Key，请求携带 `X-H3-Key`。服务只接受本机访问。
+在“设置 → 开发者 · 本地 API”复制 Key，请求携带 `X-LStudio-Key`。服务仅接受本机访问。
+
+| 接口 | 用途 |
+| --- | --- |
+| `GET /api/workspace` | 应用、提供商和素材目录 |
+| `GET /api/status` | 任务、作品和连接状态 |
+| `GET /api/compute` | 本机已知的算力状态，不探测云端 |
+| `GET /api/assets` | 素材列表，支持 `app_id`、`purpose`、`kind` 筛选 |
+| `POST /api/assets` | 导入素材，multipart 字段为 `file`、`app_id`、`purpose`，默认 `shared/imports` |
+| `GET /api/assets/{id}/file` | 读取素材；加 `?download=true` 下载 |
+| `POST /api/images` | 上传 H3 图片，`purpose` 为 `references` 或 `characters`，返回 `image_id` |
+| `POST /api/jobs` | 提交 H3 生成任务 |
+| `GET /api/jobs/{id}` | 查询任务 |
+| `POST /api/jobs/{id}/cancel` | 取消任务 |
+| `POST /api/jobs/{id}/retry` | 恢复任务或取回已有结果 |
+| `GET /video/{id}.mp4` | 播放本机视频，支持 Range；加 `?download=true` 下载 |
+| `GET` / `PUT /api/release-policy` | 查询或修改释放策略 |
+| `POST /api/release` | 检查并释放工作台管理的运行时 |
 
 以下示例会提交真实生成任务并使用 Colab 额度：
 
@@ -108,8 +162,10 @@ import time
 import requests
 
 base = "http://127.0.0.1:7865"
-headers = {"X-H3-Key": "从本机配置页复制的Key"}
+headers = {"X-LStudio-Key": "从本机设置页复制的 Key"}
 response = requests.post(base + "/api/jobs", headers=headers, json={
+    "app_id": "h3",
+    "provider_id": "colab",
     "prompt": "A quiet garden in soft morning light, leaves moving in the breeze.",
     "prompt_processing": "direct",
     "gpu": "G4",
@@ -127,35 +183,49 @@ while True:
     job = response.json()
     print(job["status"])
     if job["status"] in {"done", "warning", "error", "interrupted", "cancelled"}:
-        print(job)
         break
     time.sleep(3)
 ```
 
-| 接口 | 用途 |
-| --- | --- |
-| `GET /api/status` | 当前任务、作品及连接状态 |
-| `POST /api/images` | 上传参考图，multipart 字段名为 `file` |
-| `POST /api/jobs` | 提交生成任务 |
-| `GET /api/jobs/{id}` | 查询任务 |
-| `POST /api/jobs/{id}/cancel` | 取消任务 |
-| `POST /api/jobs/{id}/retry` | 恢复或取回已有结果，视任务状态而定 |
-| `GET /video/{id}.mp4` | 播放本机作品，支持 Range；加 `?download=true` 下载 |
-| `GET` / `PUT /api/release-policy` | 查询或修改释放策略 |
-| `POST /api/release` | 检查并释放工作台管理的运行时 |
-
-图生任务先上传图片，取得 `image_id`，再在生成请求中传入 `references`，例如：
+图生视频统一使用 `references`。上传图片后，将返回的 `image_id` 放入对应引用：
 
 ```json
-{"generation_type":"image","references":[{"slot":1,"image_id":"上传返回的图片编号","frame":"first","role":"character","description":"保持人物外观"}]}
+{
+  "generation_type": "image",
+  "references": [
+    {"slot": 1, "image_id": "上传返回的图片编号", "frame": "first"}
+  ]
+}
 ```
 
-`frame` 可选 `first`、`last`、`reference`。API 省略 `gpu` 时默认 A100，网页默认选择与 API 默认值可能不同，建议调用方显式指定 GPU、种子、性能和释放参数。
+`frame` 可选 `first`、`last`、`reference`。生成请求校验现行字段，不接受已移除的参数。建议调用方显式指定 GPU、种子、性能和释放配置；API 默认 GPU 为 A100，网页初始选择 G4。
 
-## 开发与提交范围
+## 开发与验证
 
-运行代码包括 `app.py`、`remote_h3.py`、提示词模块、角色与历史模块、Drive 模块、运行时恢复模块、`studio.html` 和 `static/`。`seed_drive_cache.py` 被网页的备份接口调用，也需要提交。
+应用、算力和素材库的代码边界见 [ARCHITECTURE.md](ARCHITECTURE.md)，源码与数据的提交范围见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-安装入口、依赖声明和 `tests/` 中的离线回归测试一起提交。用户数据与运行产物由程序保存在数据目录中；历史实测结果和一次性诊断文件已从项目目录移除。具体文件边界和验证方式见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+隔离验证可指定独立数据目录和本机端口：
 
-本项目使用的主要上游项目包括 [ComfyUI](https://github.com/Comfy-Org/ComfyUI)、[MiniMax H3](https://huggingface.co/Comfy-Org/MiniMax-H3)、[社区 Qwen 编码器](https://huggingface.co/ethanfel/Qwen3-VL-32B-Ultra-Heretic-H3-ComfyUI-INT8-ConvRot) 和 [Veda-on-ComfyUI](https://github.com/veda-sparse/Veda-on-ComfyUI)。模型权重与上游组件各自的许可不因本项目公开而改变；仓库不包含模型权重。项目自身的许可证尚待维护者确定。
+```powershell
+$env:LSTUDIO_DATA_ROOT = Join-Path $PWD '.private/dev-workspace'
+$env:LSTUDIO_PORT = '7866'
+.\.venv\Scripts\python.exe -u app.py
+```
+
+源码仍从项目目录读取，账号、任务、素材和后台数据写入指定目录。启动器默认使用项目数据目录与 7865 端口，自定义运行参数请直接启动 `app.py`。
+
+离线检查使用临时目录、模拟传输和合成素材：
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -t . -q
+Get-ChildItem -File tests/test_*.cjs | ForEach-Object { node $_.FullName; if ($LASTEXITCODE -ne 0) { throw "Frontend check failed: $_" } }
+git diff --check
+```
+
+真实授权、GPU 分配、模型下载和生成需要单独实测，会消耗账户资源。
+
+## 上游与许可
+
+主要上游包括 [ComfyUI](https://github.com/Comfy-Org/ComfyUI)、[MiniMax H3](https://huggingface.co/Comfy-Org/MiniMax-H3)、[社区 Qwen 编码器](https://huggingface.co/ethanfel/Qwen3-VL-32B-Ultra-Heretic-H3-ComfyUI-INT8-ConvRot) 和 [Veda-on-ComfyUI](https://github.com/veda-sparse/Veda-on-ComfyUI)。
+
+仓库不包含模型权重。上游组件与模型各自的许可保持有效；LStudio 自身的许可证尚待维护者确定。

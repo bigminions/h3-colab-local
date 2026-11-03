@@ -22,16 +22,16 @@ class QueueStreamTests(unittest.TestCase):
     def test_queue_submission_while_active_enqueues_and_runs_fifo(self):
         with patch.object(app.threading, 'Thread'):
             # 1. Start job 1 while idle
-            id1 = self.control.start(app.JobConfig(prompt='job 1'))
+            id1 = self.control.start(app.H3JobConfig(prompt='job 1'))
             self.assertEqual(self.control.active, id1)
             self.assertEqual(self.control.jobs[id1]['status'], 'running')
 
             # 2. Start job 2 while active is running
-            id2 = self.control.start(app.JobConfig(prompt='job 2'))
+            id2 = self.control.start(app.H3JobConfig(prompt='job 2'))
             self.assertEqual(self.control.jobs[id2]['status'], 'queued')
 
             # 3. Start job 3 while active is running
-            id3 = self.control.start(app.JobConfig(prompt='job 3'))
+            id3 = self.control.start(app.H3JobConfig(prompt='job 3'))
             self.assertEqual(self.control.jobs[id3]['status'], 'queued')
 
             # 4. Cancel job 2 (queued job cancel test)

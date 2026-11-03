@@ -1,8 +1,8 @@
 (function (root) {
   'use strict';
-  const PREF = 'h3-completion-sound-enabled-v1';
-  const NOTIFIED = 'h3-completion-sound-notified-v1';
-  const NOTIFIED_ERRORS = 'h3-error-sound-notified-v1';
+  const PREF = 'lstudio-completion-sound-enabled-v1';
+  const NOTIFIED = 'lstudio-completion-sound-notified-v1';
+  const NOTIFIED_ERRORS = 'lstudio-error-sound-notified-v1';
 
   class CompletionSound {
     constructor(storage, createAudio, notifier) {

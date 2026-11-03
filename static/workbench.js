@@ -1,11 +1,9 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const KEY = $('apiKey').value;
-let authorized = false, selectedJob = null, current = null;
-let latestJobs = [], followActive = true;
+let authorized = false;
+let latestJobs = [];
 let historyBusy = false, historyRemoval = null;
-let historyExpanded = false, historyObserver = null;
-let historyApplying = false;
 let lastActive = undefined, lastManaged = undefined, accountBusy = false;
 let lastAccountData = null, studioMode = 'text';
 let onlineGpuState = null, gpuOnlineReady = false, gpuDetectionBusy = false, gpuDetectionError = '', gpuReleaseMessage = '';
@@ -22,7 +20,7 @@ let submitCooldownTimer = null;
 
 function getSubmitCooldownRemaining() {
   try {
-    const until = Number(sessionStorage.getItem('h3-submit-cooldown-until') || 0);
+    const until = Number(sessionStorage.getItem('lstudio-h3-submit-cooldown-until') || 0);
     const left = Math.ceil((until - Date.now()) / 1000);
     return left > 0 ? left : 0;
   } catch (_) {
@@ -33,7 +31,7 @@ function getSubmitCooldownRemaining() {
 function startSubmitCooldown(seconds = 5) {
   if (submitCooldownTimer) clearInterval(submitCooldownTimer);
   try {
-    sessionStorage.setItem('h3-submit-cooldown-until', String(Date.now() + seconds * 1000));
+    sessionStorage.setItem('lstudio-h3-submit-cooldown-until', String(Date.now() + seconds * 1000));
   } catch (_) {}
   updateGenerate();
   submitCooldownTimer = setInterval(() => {
@@ -41,18 +39,18 @@ function startSubmitCooldown(seconds = 5) {
     if (left <= 0) {
       clearInterval(submitCooldownTimer);
       submitCooldownTimer = null;
-      try { sessionStorage.removeItem('h3-submit-cooldown-until'); } catch (_) {}
+      try { sessionStorage.removeItem('lstudio-h3-submit-cooldown-until'); } catch (_) {}
     }
     updateGenerate();
   }, 1000);
 }
 let lastNativeDrivePrompt = null;
-let activeJobId = null, pendingRun = null;
+let activeJobId = null;
 let runStarts = {};
-try { runStarts = JSON.parse(localStorage.getItem('h3-run-starts-v1') || '{}'); }
+try { runStarts = JSON.parse(localStorage.getItem('lstudio-h3-run-starts-v1') || '{}'); }
 catch (_) { /* A missing browser record falls back to the task creation time. */ }
 if (!runStarts || typeof runStarts !== 'object' || Array.isArray(runStarts)) runStarts = {};
-const DRAFT = 'h3-studio-settings-v1';
+const DRAFT = 'lstudio-h3-settings-v1';
 const completionSound = new H3CompletionSound({
   getItem: key => localStorage.getItem(key), setItem: (key,value) => localStorage.setItem(key,value)
 }, () => {
@@ -65,12 +63,12 @@ $('testNotification')?.addEventListener('click', () => {
   completionSound.unlock();
   completionSound.play();
   setTimeout(() => completionSound.playError(), 850);
-  completionSound.notify('H3 Studio 提示通知', '提示音与桌面通知已就绪：任务完成或失败时将自动提醒。', 'h3-test');
+  completionSound.notify('LStudio 提示通知', '提示音与桌面通知已就绪：任务完成或失败时将自动提醒。', 'h3-test');
 });
 document.addEventListener('pointerdown', () => completionSound.unlock(), {capture:true});
 document.addEventListener('keydown', () => completionSound.unlock(), {capture:true});
 window.addEventListener('storage', event => {
-  if (event.key === 'h3-completion-sound-enabled-v1') {
+  if (event.key === 'lstudio-completion-sound-enabled-v1') {
     completionSound.enabled = event.newValue !== 'off';
     $('completionSound').checked = completionSound.enabled;
   }
@@ -78,7 +76,7 @@ window.addEventListener('storage', event => {
 async function api(path, options = {}) {
   const response = await fetch('/api/' + path, {
     ...options,
-    headers: {'X-H3-Key': KEY, ...(options.body instanceof FormData ? {} : {'Content-Type':'application/json'}), ...options.headers}
+    headers: {'X-LStudio-Key': KEY, ...(options.body instanceof FormData ? {} : {'Content-Type':'application/json'}), ...options.headers}
   });
   const data = await response.json();
   if (!response.ok) throw Error(typeof data.detail === 'string' ? data.detail : Array.isArray(data.detail) ? data.detail.map(item => String(item.msg || '参数不正确').replace(/^Value error, /,'')).join('；') : '请求失败');
@@ -118,7 +116,7 @@ function updateModelControls() {
 }
 
 function setMode(mode) {
-  studioMode = mode === 'reference' ? 'image' : mode;
+  studioMode = mode;
   $('textTab').setAttribute('aria-selected', String(studioMode === 'text'));
   $('imageTab').setAttribute('aria-selected', String(studioMode === 'image'));
   $('imagePanel').classList.toggle('hidden', studioMode !== 'image');
@@ -248,17 +246,11 @@ async function restoreReferences(saved) {
   references = (Array.isArray(saved) ? saved : []).slice(0,9).filter(r => {
     if (!Number.isInteger(r.slot) || r.slot < 1 || r.slot > 9 || used.has(r.slot) || !/^[0-9a-f]{32}\.(png|jpg|webp)$/.test(r.image_id)) return false;
     used.add(r.slot); return true;
-  }).map(r => {
-    // Make legacy per-image instructions visible and editable in the main prompt.
-    const role = {character:'角色',scene:'场景',clothing:'服装',style:'风格',product:'产品'}[r.role];
-    const note = [role ? `作为${role}参考` : '',String(r.description || '').trim()].filter(Boolean).join('；');
-    if (note) $('prompt').value += `\n@图片${r.slot}：${note}`;
-    return {slot:r.slot,image_id:r.image_id,role:'other',description:'',frame:['first','last'].includes(r.frame) ? r.frame : 'reference',pending:true};
-  });
+  }).map(r => ({...r, frame:r.frame || 'reference', pending:true}));
   renderReferences();
   await Promise.all(references.map(async ref => {
     try {
-      const response = await fetch('/api/images/' + ref.image_id, {headers:{'X-H3-Key':KEY}});
+      const response = await fetch('/api/images/' + ref.image_id, {headers:{'X-LStudio-Key':KEY}});
       if (!response.ok) throw Error(`图片${ref.slot}已丢失，请替换或移除`);
       const blob = await response.blob();
       if (references.includes(ref)) ref.url = URL.createObjectURL(blob);
@@ -350,7 +342,7 @@ function saveDraft() {
   updateReleaseUI();
   try {
     const value = {studioMode};
-    for (const id of ['prompt','resolution','duration','count','mode','strength','gpu','encoder']) value[id] = $(id).value;
+    for (const id of ['prompt','resolution','duration','count','mode','strength','encoder']) value[id] = $(id).value;
     value.aspectRatio = selectedRatio();
     value.peopleEnhancement = $('peopleEnhancement').checked;
     value.performance = $('performance').checked;
@@ -368,8 +360,11 @@ function restoreDraft() {
   try {
     $('seed').value = '';
     const draft = JSON.parse(localStorage.getItem(DRAFT) || 'null');
+    const compute = JSON.parse(localStorage.getItem('lstudio-compute-v1') || 'null');
+    const gpu = compute?.gpu;
+    if (['G4','A100'].includes(gpu)) $('gpu').value = gpu;
     if (!draft) return;
-    for (const id of ['prompt','resolution','duration','count','mode','strength','gpu','encoder']) {
+    for (const id of ['prompt','resolution','duration','count','mode','strength','encoder']) {
       if (typeof draft[id] !== 'string') continue;
       const input = $(id);
       if (input.tagName === 'SELECT' && ![...input.options].some(o => o.value === draft[id])) continue;
@@ -377,8 +372,7 @@ function restoreDraft() {
     }
     const ratio = [...document.querySelectorAll('input[name="aspectRatio"]')].find(input => input.value === draft.aspectRatio);
     if (ratio) ratio.checked = true;
-    if (typeof draft.peopleEnhancement === 'boolean') $('peopleEnhancement').checked = draft.peopleEnhancement;
-    else $('peopleEnhancement').checked = draft.scene === 'portrait';
+    $('peopleEnhancement').checked = draft.peopleEnhancement === true;
     $('performance').checked = draft.performance !== false;
     $('quantizedModel').checked = draft.quantizedModel !== false;
     $('quantizedVae').checked = draft.quantizedVae !== false;
@@ -436,18 +430,6 @@ function updateCardElapsed(card, job) {
 }
 
 function updateRunMonitor() {
-  const job = pendingRun || current;
-  const progress = H3JobProgress.snapshot(job,latestJobs,Date.now(),runStarts,activeJobId);
-  $('runElapsed').textContent = job ? `${progress.running ? '已用时' : '总用时'} ${H3JobProgress.formatDuration(progress.elapsed)}` : '已用时 00:00';
-  $('runIndicator').classList.toggle('running',progress.running);
-  const line = $('latestLog');
-  if (line.textContent !== progress.message) {
-    line.textContent = progress.message; line.title = progress.message;
-    if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-      line.getAnimations().forEach(animation => animation.cancel());
-      line.animate([{opacity:0,transform:'translateY(65%)',clipPath:'inset(0 0 100% 0)'},{opacity:1,transform:'translateY(0)',clipPath:'inset(0 0 0 0)'}],{duration:300,easing:'ease-out'});
-    }
-  }
   const stream = $('taskStreamList');
   if (stream) {
     stream.querySelectorAll('.task-card.is-running, .task-card.is-queued').forEach(card => {
@@ -465,110 +447,6 @@ function updateRunMonitor() {
         }
       }
     });
-  }
-}
-
-function render(job) {
-  current = job;
-  updateHistorySelection();
-  if (pendingRun?.id === job.id || pendingRun?.id === job.batch_id) pendingRun = null;
-  updateRunMonitor();
-  const siblings = latestJobs.filter(j => job.batch_id && j.batch_id === job.batch_id).sort((a,b) => a.batch_index-b.batch_index);
-  $('variants').classList.toggle('hidden', !job.batch);
-  $('batchProgress').classList.toggle('hidden', !job.batch);
-  $('variants').replaceChildren();
-  if (job.batch) {
-    const running = siblings.find(j => j.status === 'running');
-    const paused = siblings.some(j => ['error','interrupted'].includes(j.status));
-    $('batchProgress').textContent = job.batch.finished ? `本批 ${job.batch.total} 条已全部完成` :
-      `本批已完成 ${job.batch.completed} / ${job.batch.total} 条${running ? ` · 正在处理第 ${running.batch_index} 条` : paused ? ' · 已暂停，可重试继续' : ''}`;
-    for (const variant of siblings) {
-      const button = document.createElement('button'); button.type = 'button'; button.className = 'secondary';
-      button.setAttribute('aria-pressed', String(variant.id === job.id));
-      button.textContent = `第 ${variant.batch_index} 条 · ${(variant.local_file ?? !!variant.file) ? '已完成' : variant.status === 'running' ? '处理中' : ['error','interrupted'].includes(variant.status) ? '未完成' : '等待中'}`;
-      button.onclick = () => { followActive = false; selectedJob = variant.id; render(variant); };
-      $('variants').append(button);
-    }
-  }
-  const available = job.local_file !== undefined ? !!job.local_file : !!job.file;
-  const isDownloading = !!(job.is_preparing || job.is_downloading);
-  $('message').textContent = available ? '' :
-    job.drive ? (isDownloading ? '正在从 Drive 下载视频到本机并校验，请稍候…' :
-                 job.local_download_error ? ('视频已在 Drive 保存，本机下载未完成：' + job.local_download_error) :
-                 '正在准备下载到本机…') :
-    job.status === 'cancelled' ? '任务已取消。' :
-    job.status === 'cancelling' ? '正在停止未完成任务并确认显卡释放，请稍候…' :
-    ['error','interrupted'].includes(job.status) ? (job.can_retry ? (job.recovery_kind === 'retrieve' ? '视频已生成，请重试取回结果。' : '任务中断，请点击恢复任务；远端仍在执行时会重新跟踪进度。') : '本次生成未完成，请查看运行日志或重新生成。') :
-    job.status === 'discarded' ? '本次生成未完成，可重新生成。' :
-    ['result','download','saved','release'].includes(job.stage) ? '正在保存视频，请稍候…' :
-    job.stage === 'generate' ? '正在生成视频，请稍候…' : job.stage === 'prompt' ? '正在检查提示词与素材关系…' : '正在准备生成，请稍候…';
-  const state = {done:'已完成',running:'处理中',queued:'等待中',cancelling:'正在取消',cancelled:'已取消',error:'未完成',warning:available ? '已完成' : (isDownloading ? '下载中' : (job.local_download_error ? '未完成' : '已完成')),interrupted:'已中断',discarded:'未完成'};
-  $('resultState').textContent = isDownloading ? '从云端下载中' : (state[job.status] || job.status);
-  const log = job.events.map(e => e.time + '  ' + e.message);
-  log.push('随机种子：' + job.creation?.seed);
-  if (job.batch_id) log.push(`批次：${job.batch_id} · 第 ${job.batch_index}/${job.batch_total} 条`);
-  if (job.gpu_info) log.push('\n显卡信息：' + JSON.stringify(job.gpu_info));
-  if (job.timings) log.push('执行用时：' + JSON.stringify(job.timings));
-  if (job.model_loads?.length) {
-    log.push('\n模型文件加载记录：');
-    log.push(...job.model_loads.map(item => item.message));
-  }
-  if (job.model_load_summary) log.push(job.model_load_summary);
-  if (job.acceleration) {
-    log.push('\n视频加速：' + (job.acceleration.enabled ? 'Veda' : '默认注意力'));
-    if (job.acceleration.sampler_cached) log.push('本次采样命中缓存，不用于加速测速。');
-    if (job.acceleration.log?.length) log.push(...job.acceleration.log);
-  }
-  if (job.prompt_plan) {
-    if (job.prompt_plan.understanding_summary?.length) {
-      log.push('\n第 1 步剧本理解：');
-      log.push(...job.prompt_plan.understanding_summary);
-    }
-    if (job.prompt_plan.warnings?.length) {
-      log.push('\n整理提示：');
-      log.push(...job.prompt_plan.warnings);
-    }
-    const compiled = job.prompt_plan.compiled_prompt || job.prompt_plan.prompt;
-    if (compiled) log.push('\n最终 H3 提示词：\n' + compiled);
-  }
-  if (job.drive) log.push('\nDrive 保存信息：\n' + JSON.stringify(job.drive,null,2));
-
-  $('logs').textContent = log.join('\n');
-  const showRetry = Boolean(job.can_retry || isDownloading);
-  $('retry').classList.toggle('hidden', !showRetry);
-  $('retry').disabled = retrying || isDownloading;
-  $('retry').textContent = isDownloading ? '正在从 Drive 下载视频到本机…' : retrying ? '正在恢复任务…' : job.recovery_kind === 'download' ? (job.local_download_error ? '重新从 Drive 下载' : '下载到本机') : job.recovery_kind === 'retrieve' ? '重试取回结果' : '恢复未完成任务';
-  $('resubmit').classList.toggle('hidden', !job.can_resubmit);
-  $('resubmit').disabled = resubmitting || submitting || retrying || cancelling;
-  $('resubmit').textContent = resubmitting ? '正在重新提交…' : '重新提交任务';
-  $('resubmit').title = '重新提交该任务加入排队';
-  $('cancelJob').classList.toggle('hidden', !job.can_cancel);
-  $('cancelJob').disabled = cancelling || job.status === 'cancelling';
-  $('cancelJob').textContent = cancelling || job.status === 'cancelling' ? '正在取消并释放…' : job.cancel_requested ? '重试取消并释放显卡' : '取消任务并释放显卡';
-  $('reuseSettings').classList.toggle('hidden', !job.creation?.prompt);
-  if (!available) { $('player').pause(); if ($('player').hasAttribute('src')) { $('player').removeAttribute('src'); $('player').load(); } }
-  $('player').classList.toggle('hidden', !available);
-  $('videoPlaceholder').classList.toggle('hidden', available);
-  $('videoLabel').classList.toggle('hidden', !available);
-  if (available) {
-    const url = '/video/' + (job.file || job.id + '.mp4');
-    if ($('player').getAttribute('src') !== url) $('player').src = url;
-    $('download').href = url + '?download=true';
-    const name = (job.creation?.title || 'H3-' + job.id).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/[. ]+$/, '').trim();
-    $('download').download = (name || 'H3-' + job.id) + '.mp4';
-    $('download').classList.remove('hidden');
-    $('download').onclick = async (event) => {
-      if (window.showSaveFilePicker) {
-        event.preventDefault();
-        await saveVideoToLocation($('download').href, $('download').download, $('download'), $('videoLabel'));
-      }
-    };
-    const m = job.metadata;
-    $('player').width = m.width; $('player').height = m.height;
-    $('videoLabel').textContent = `${m.width} × ${m.height} · ${m.duration.toFixed(2)} 秒${m.audio ? ' · 含声音' : ''}`;
-  } else {
-    $('download').classList.add('hidden');
-    $('player').pause(); $('player').removeAttribute('src');
   }
 }
 
@@ -634,21 +512,8 @@ async function saveVideoToLocation(url, suggestedName, button, feedbackEl) {
   }
 }
 
-function clearResultPreview() {
-  selectedJob = null; current = null; followActive = false;
-  updateHistorySelection();
-  $('player').pause(); $('player').removeAttribute('src'); $('player').load();
-  $('player').classList.add('hidden'); $('videoPlaceholder').classList.remove('hidden');
-  for (const id of ['videoLabel','download','reuseSettings','retry','resubmit','cancelJob','batchProgress','variants']) $(id).classList.add('hidden');
-  $('download').removeAttribute('href'); $('variants').replaceChildren();
-  $('logs').textContent = '开始任务后显示生成进度。';
-  updateRunMonitor();
-  $('resultState').textContent = '准备就绪';
-  $('message').textContent = '';
-}
-
 function historyRemovalBox(jobId) {
-  return jobId ? [...document.querySelectorAll('.task-card, .history-row')].find(row=>row.dataset.jobId === jobId)?.querySelector('.history-remove-confirm') : $('historyClearConfirm');
+  return jobId ? [...document.querySelectorAll('.task-card')].find(row=>row.dataset.jobId === jobId)?.querySelector('.history-remove-confirm') : $('historyClearConfirm');
 }
 function closeHistoryRemoval() {
   if (historyBusy) return;
@@ -670,25 +535,17 @@ async function clearHistoryRecords(jobId = null) {
   const box = historyRemovalBox(jobId);
   if (!box || box.hidden) return;
   historyBusy = true;
-  if ($('toggleHistory')) $('toggleHistory').disabled = true;
   const commit = box.querySelector('.history-confirm-commit');
   if (commit) commit.textContent = '处理中…';
   document.querySelectorAll('.history-remove-confirm button, .history-clear').forEach(button=>button.disabled = true);
   if ($('clearHistory')) $('clearHistory').disabled = true;
-  for (const row of $('history').querySelectorAll('.history-row')) {
-    if (jobId && row.dataset.jobId !== jobId) continue;
-    const video = row.querySelector('video');
-    if (video) { video.pause(); video.removeAttribute('src'); video.load(); }
-  }
   for (const card of $('taskStreamList')?.querySelectorAll('.task-card') || []) {
     if (jobId && card.dataset.jobId !== jobId) continue;
     const video = card.querySelector('video');
     if (video) { video.pause(); video.removeAttribute('src'); video.load(); }
   }
-  if (!jobId || selectedJob === jobId) { $('player').pause(); $('player').removeAttribute('src'); $('player').load(); }
   try {
     const result = await api('history/recycle',{method:'POST',body:JSON.stringify({job_id:jobId})});
-    if (result.ids?.includes(selectedJob)) clearResultPreview();
     $('historyFeedback').textContent = result.count ? `已将 ${result.count} 条作品移入系统回收箱` : '';
     if (result.errors?.length) box.querySelector('.history-remove-error').textContent = result.errors[0].message;
     else { box.hidden = true; historyRemoval = null; }
@@ -696,17 +553,12 @@ async function clearHistoryRecords(jobId = null) {
   finally {
     historyBusy = false;
     if (commit) commit.textContent = '移除';
-    if ($('toggleHistory')) $('toggleHistory').disabled = false;
     document.querySelectorAll('.history-remove-confirm button, .history-clear').forEach(button=>button.disabled = false);
     if ($('clearHistory')) $('clearHistory').disabled = false;
-    $('history').dataset.fingerprint = '';
     const stream = $('taskStreamList');
     if (stream) stream.dataset.fingerprint = '';
     await refreshStatus();
-    for (const video of $('history').querySelectorAll('video[data-src]')) {
-      if (!video.getAttribute('src')) historyObserver?.observe(video);
-    }
-    if (current) render(current);
+
   }
 }
 function makeHistoryConfirmation(jobId, count = 1) {
@@ -753,6 +605,7 @@ function renderBalance(data, failure = null) {
     $('balanceInfo').textContent = authorized ? '正在读取 Colab 余额…' : '授权 Google 后自动显示';
     $('balanceInfo').title = '';
   }
+  window.Workspace?.updateBalance(data, failure);
 }
 
 async function refreshAccount(force = false) {
@@ -831,13 +684,6 @@ async function releaseOnlineGPU() {
   } catch (e) { gpuReleaseMessage = '释放失败：' + e.message; await refreshStatus(); }
   finally { releaseActionBusy = false; updateReleaseUI(); }
 }
-
-function updateHistorySelection() {
-  for (const row of $('history').querySelectorAll('.history-row')) {
-    row.classList.toggle('is-current',row.dataset.jobId === selectedJob);
-  }
-}
-
 
 function renderVariantVideoWrap(sibling) {
   const isLocal = sibling.local_file !== undefined ? !!sibling.local_file : !!sibling.file;
@@ -985,7 +831,6 @@ function renderTaskStream(jobs) {
 
   if (!visibleJobs.length) {
     if ($('taskStreamSummary')) $('taskStreamSummary').textContent = '0 个任务';
-    if ($('historyCount')) $('historyCount').textContent = '0';
     if (empty) empty.classList.remove('hidden');
     stream.querySelectorAll('.task-card').forEach(c => {
       c.querySelectorAll('video').forEach(v => { v.pause(); v.removeAttribute('src'); v.load(); });
@@ -1045,7 +890,6 @@ function renderTaskStream(jobs) {
   const doneCount = groups.filter(g => g.isDone).length;
   const summaryText = (runningCount ? `${runningCount} 个进行/排队 · ` : '') + `${doneCount} 个已完成`;
   if ($('taskStreamSummary')) $('taskStreamSummary').textContent = summaryText;
-  if ($('historyCount')) $('historyCount').textContent = String(visibleJobs.filter(j => j.file || j.drive).length);
 
   const runningGroups = groups.filter(g => g.isRunning);
   const queuedGroups = groups.filter(g => g.isQueued).sort((a, b) => a.created - b.created);
@@ -1396,228 +1240,6 @@ function renderTaskStream(jobs) {
   }
 }
 
-function renderHistory(jobs) {
-  const historyCard = document.querySelector('.history-card');
-  if (!historyCard || !$('history')) return;
-  jobs = jobs.filter(job => job.file || job.drive);
-  if ($('historyCount')) $('historyCount').textContent = String(jobs.length);
-  if ($('toggleHistory')) {
-    $('toggleHistory').textContent = historyExpanded ? '收起' : '展开';
-    $('toggleHistory').setAttribute('aria-expanded',String(historyExpanded));
-  }
-  if ($('history')) $('history').hidden = !historyExpanded;
-  historyCard.classList.toggle('is-collapsed',!historyExpanded);
-  const clearGroup = historyCard.querySelector('.history-clear-group');
-  if (clearGroup) clearGroup.hidden = !historyExpanded;
-  if (!historyExpanded) {
-    closeHistoryRemoval();
-    historyObserver?.disconnect();
-    for (const video of $('history').querySelectorAll('video')) { video.pause(); video.removeAttribute('src'); video.load(); }
-    $('history').replaceChildren();
-    $('history').dataset.fingerprint = '';
-    return;
-  }
-  const fingerprint = JSON.stringify([historyExpanded,jobs.map(j => [j.id,j.status,j.file,j.local_file,j.drive?.file_id,j.can_clear_history,j.creation?.title,j.creation?.prompt,j.metadata])]);
-  if ($('history').dataset.fingerprint === fingerprint) return;
-  $('history').dataset.fingerprint = fingerprint;
-  const existing = new Map([...$('history').querySelectorAll('.history-row')].map(row=>[row.dataset.jobId,row]));
-  $('history').querySelector('.history-empty')?.remove();
-  if (!jobs.length) {
-    historyObserver?.disconnect();
-    for (const row of existing.values()) { row.querySelectorAll('video').forEach(video=>{ video.removeAttribute('src'); video.load(); }); row.remove(); }
-    const empty = document.createElement('p'); empty.className = 'history-empty'; empty.textContent = '还没有作品'; $('history').append(empty);
-    return;
-  }
-  historyObserver ||= new IntersectionObserver(entries => {
-    for (const entry of entries) if (entry.isIntersecting) {
-      const video = entry.target;
-      if (!historyExpanded || !video.isConnected) { historyObserver.unobserve(video); continue; }
-      video.src = video.dataset.src;
-      historyObserver.unobserve(video);
-    }
-  },{rootMargin:'160px'});
-  const labels = {done:'已保存',running:'生成中',queued:'等待中',cancelling:'正在取消',cancelled:'已取消',error:'未完成',warning:'已保存',interrupted:'已中断',discarded:'未完成'};
-  for (const job of jobs) {
-    const isDownloading = !!(job.is_preparing || job.is_downloading);
-    const available = !!(job.file || job.drive), running = ['running','queued','cancelling'].includes(job.status) || isDownloading;
-    const isLocal = job.local_file !== undefined ? !!job.local_file : !!job.file;
-    const isCloudOnly = available && !isLocal && !!(job.drive);
-    const date = new Date(job.created * 1000).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false,timeZone:'Asia/Shanghai'});
-    const description = job.creation?.title || date;
-    const title = description.length > 80 ? description.slice(0,80) + '…' : description;
-    const itemFingerprint = JSON.stringify([job.status,job.file,isLocal,isDownloading,job.local_download_error,job.drive?.file_id,job.creation?.title,job.metadata]);
-    const old = existing.get(job.id);
-    if (old?.dataset.fingerprint === itemFingerprint && old.querySelector('.history-download')) {
-      const clear = old.querySelector('.history-clear');
-      clear.classList.toggle('hidden',!job.can_clear_history && historyRemoval !== job.id);
-      clear.disabled = historyBusy || !job.can_clear_history;
-      existing.delete(job.id); continue;
-    }
-    const row = document.createElement('article'); row.className = 'history-row'; row.dataset.jobId = job.id;
-    const card = document.createElement('div'); card.className = 'history-item';
-    const cover = document.createElement('div'); cover.className = 'history-cover';
-    const placeholder = document.createElement('span'); placeholder.className = 'history-cover-placeholder';
-    const icon = document.createElement('span'); icon.className = 'history-placeholder-icon'; icon.textContent = running ? '◌' : '▷';
-    const hint = document.createElement('span'); hint.textContent = isDownloading ? '正在从云端下载' : available ? '预览加载中' : running ? '正在生成' : '暂无视频';
-    placeholder.append(icon,hint); cover.append(placeholder);
-    let video = null, coverAction = null;
-    if (available) {
-      video = document.createElement('video'); video.controls = true; video.playsInline = true; video.preload = 'metadata';
-      video.setAttribute('aria-label','播放作品：' + title);
-      video.addEventListener('play',()=>{ for (const other of document.querySelectorAll('video')) if (other !== video) other.pause(); });
-      video.dataset.src = '/video/' + (job.file || job.id + '.mp4') + '#t=0.1';
-      video.addEventListener('loadeddata',()=>cover.classList.add('has-preview'),{once:true});
-      video.addEventListener('error',()=>{ hint.textContent = '视频暂时无法播放'; },{once:true});
-      cover.append(video);
-      if (isLocal) {
-        historyObserver.observe(video);
-      } else if (isCloudOnly) {
-        coverAction = document.createElement('div');
-        coverAction.className = 'history-cover-action';
-        coverAction.setAttribute('role', 'button');
-        coverAction.setAttribute('tabindex', '0');
-        coverAction.setAttribute('aria-label', '播放作品：' + title);
-        coverAction.title = isDownloading ? '正在从 Drive 下载到本机…' : running ? '正在自动下载到本机' : '下载到本机并播放';
-        coverAction.setAttribute('aria-disabled', String(running));
-
-        const playBtn = document.createElement('span');
-        playBtn.className = 'history-cover-play';
-        playBtn.textContent = running ? '◌' : '▶';
-        if (running) coverAction.classList.add('is-loading');
-        coverAction.append(playBtn);
-
-        if (job.metadata?.duration) {
-          const badge = document.createElement('span');
-          badge.className = 'history-cover-badge';
-          badge.textContent = H3JobProgress.formatDuration(job.metadata.duration * 1000);
-          coverAction.append(badge);
-        }
-        cover.append(coverAction);
-      }
-    }
-    const state = document.createElement('span'); state.className = 'history-state' + (running ? ' is-running' : available ? ' is-saved' : '');
-    state.textContent = labels[job.status] || job.status; cover.append(state);
-    const copy = document.createElement('span'); copy.className = 'history-copy';
-    const name = document.createElement('strong'); name.className = 'history-name'; name.textContent = title; name.title = title;
-    const meta = document.createElement('span'); meta.className = 'history-meta';
-    const information = [];
-    if (job.creation?.title) information.push(date);
-    if (job.metadata) information.push(`${job.metadata.width} × ${job.metadata.height}`);
-    if (job.metadata?.duration) information.push(H3JobProgress.formatDuration(job.metadata.duration * 1000));
-    if (!job.creation?.title && job.metadata?.audio) information.push('含声音');
-    if (!job.creation?.title && !job.metadata) information.push(running ? '视频准备中' : '暂无视频');
-    if (job.batch_id) information.push(`第 ${job.batch_index}/${job.batch_total} 条`);
-    const historyElapsed = getJobElapsed(job);
-    if (historyElapsed) information.push(historyElapsed.text);
-    meta.textContent = information.join(' · ');
-    const actions = document.createElement('span'); actions.className = 'history-card-actions';
-
-    let loadingVideo = false;
-    const triggerLoadVideo = async () => {
-      if (loadingVideo || running || isDownloading) return;
-      loadingVideo = true;
-      if (coverAction) {
-        coverAction.classList.add('is-loading');
-        const play = coverAction.querySelector('.history-cover-play');
-        if (play) play.textContent = '◌';
-      }
-      const feedback = row.querySelector('.history-folder-feedback');
-      if (feedback) feedback.textContent = '';
-      try {
-        const res = await api('history/' + encodeURIComponent(job.id) + '/load', {method:'POST'});
-        job.file = res.file;
-        job.local_file = true;
-        if (coverAction) coverAction.remove();
-        if (video) {
-          video.src = '/video/' + res.file;
-          video.load();
-          video.play().catch(()=>{});
-        }
-        cover.classList.add('has-preview');
-        await refreshStatus();
-      } catch (e) {
-        if (coverAction) {
-          coverAction.classList.remove('is-loading');
-          const play = coverAction.querySelector('.history-cover-play');
-          if (play) play.textContent = '⚠';
-        }
-        if (feedback) feedback.textContent = e.message;
-      } finally {
-        loadingVideo = false;
-      }
-    };
-    if (coverAction) {
-      coverAction.onclick = triggerLoadVideo;
-      coverAction.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); triggerLoadVideo(); } };
-    }
-
-    const download = document.createElement('button'); download.type = 'button'; download.className = 'history-download'; download.textContent = '下载视频'; download.disabled = !available || isDownloading;
-    if (isDownloading) download.title = '视频正在从 Drive 下载中…';
-    download.onclick = async () => {
-      const url = '/video/' + (job.file || job.id + '.mp4');
-      const safeTitle = (job.creation?.title || 'H3-' + job.id).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/[. ]+$/, '').trim().slice(0, 80);
-      const suggestedName = (safeTitle || 'H3-' + job.id) + '.mp4';
-      await saveVideoToLocation(url, suggestedName, download, folderFeedback);
-    };
-    const folder = document.createElement('button'); folder.type = 'button'; folder.className = 'history-open-folder'; folder.textContent = '打开文件夹'; folder.disabled = !available || isDownloading;
-    if (isDownloading) folder.title = '视频正在从 Drive 下载中…';
-    folder.onclick = async () => {
-      folder.disabled = true; folder.textContent = '准备中…'; folder.title = '';
-      const feedback = row.querySelector('.history-folder-feedback'); feedback.textContent = '';
-      try {
-        await api('history/' + encodeURIComponent(job.id) + '/open-folder',{method:'POST'});
-        folder.textContent = '已打开'; $('historyFeedback').textContent = '已打开视频所在文件夹';
-        if (coverAction) coverAction.remove();
-        await refreshStatus();
-      } catch (e) { folder.textContent = '重试打开'; feedback.textContent = e.message; }
-      finally { folder.disabled = false; }
-    };
-    const apply = document.createElement('button'); apply.type = 'button'; apply.className = 'history-apply'; apply.textContent = '应用配置'; apply.disabled = historyApplying || !job.creation?.prompt;
-    apply.onclick = async () => {
-      if (historyApplying) return;
-      historyApplying = true;
-      $('history').querySelectorAll('.history-apply').forEach(button=>button.disabled = true);
-      apply.disabled = true; apply.textContent = '应用中…';
-      try {
-        await applyCreation(latestJobs.find(item=>item.id === job.id)?.creation || job.creation,false);
-        $('history').querySelectorAll('.history-apply').forEach(button=>button.textContent = '应用配置');
-        apply.textContent = '已应用'; $('historyFeedback').textContent = '已应用这条作品的配置';
-      }
-      catch (e) { apply.textContent = '应用失败'; apply.title = e.message; }
-      finally {
-        historyApplying = false;
-        for (const row of $('history').querySelectorAll('.history-row')) row.querySelector('.history-apply').disabled = !latestJobs.find(item=>item.id === row.dataset.jobId)?.creation?.prompt;
-      }
-    };
-    const folderFeedback = document.createElement('span'); folderFeedback.className = 'history-folder-feedback'; folderFeedback.setAttribute('role','alert');
-    actions.append(download,folder,apply); copy.append(name,meta,actions,folderFeedback); card.append(cover,copy);
-    card.onclick = (e) => {
-      if (e.target.closest('button, video, a, .history-cover-action')) return;
-      selectedJob = job.id;
-      const targetJob = latestJobs.find(item => item.id === job.id) || job;
-      render(targetJob);
-      updateHistorySelection();
-    };
-    const clear = document.createElement('button'); clear.type = 'button'; clear.className = 'history-clear'; clear.textContent = '×';
-    clear.setAttribute('aria-label','清除作品 ' + title); clear.title = '移除这条记录';
-    clear.classList.toggle('hidden',!job.can_clear_history); clear.disabled = historyBusy || !job.can_clear_history;
-    clear.onclick = () => openHistoryRemoval(job.id);
-    row.append(card,clear,makeHistoryConfirmation(job.id));
-    row.dataset.fingerprint = itemFingerprint;
-    if (old) { old.querySelectorAll('video').forEach(video=>{ historyObserver?.unobserve(video); video.removeAttribute('src'); video.load(); }); old.replaceWith(row); }
-    else $('history').append(row);
-    existing.delete(job.id);
-  }
-  for (const row of existing.values()) {
-    row.querySelectorAll('video').forEach(video=>{ historyObserver?.unobserve(video); video.removeAttribute('src'); video.load(); }); row.remove();
-  }
-  const order = jobs;
-  order.forEach((job,index)=>{
-    const row = [...$('history').children].find(item=>item.dataset.jobId === job.id);
-    if (row && $('history').children[index] !== row) $('history').insertBefore(row,$('history').children[index] || null);
-  });
-}
-
 async function refreshStatus() {
   try {
     const s = await api('status');
@@ -1635,7 +1257,7 @@ async function refreshStatus() {
     $('nativeDriveAuthBox').classList.toggle('hidden', !nativeAuth?.pending);
     if (nativeAuth?.pending) {
       $('nativeDriveGoogleLink').href = nativeAuth.url;
-      if (lastNativeDrivePrompt !== nativeAuth.url) $('connectionPageTab').click();
+      if (lastNativeDrivePrompt !== nativeAuth.url) $('computePageTab').click();
       lastNativeDrivePrompt = nativeAuth.url;
     } else lastNativeDrivePrompt = null;
     $('confirmNativeDrive').disabled = !!nativeAuth?.confirmed;
@@ -1650,6 +1272,7 @@ async function refreshStatus() {
     }
     $('connection').textContent = s.active ? 'Colab 正在生成' : s.managed_gpu ? 'GPU 已保留，仍在计费' : authorized ? 'Google 已连接 · 按需启动 GPU' : '首次使用请连接 Google';
     $('connection').classList.toggle('ok', authorized);
+    window.Workspace?.updateCompute(s);
     serverActive = !!s.active;
     activeJobId = s.active || null;
     recoveryJob = s.jobs.find(j => j.can_retry || j.can_cancel && j.cancel_requested) || null;
@@ -1660,13 +1283,8 @@ async function refreshStatus() {
     $('balanceRefresh').disabled = !authorized || accountBusy;
     if (!authorized) renderBalance(null);
     else if (!wasAuthorized) renderBalance(lastAccountData);
-    if (s.active && followActive) selectedJob = s.active;
-    const chosen = s.jobs.find(j => j.id === selectedJob);
-    if (chosen) render(chosen);
-    else if (current?.history_hidden || current && !s.jobs.some(j => j.id === current.id)) clearResultPreview();
     $('clearHistory').disabled = historyBusy || !(s.history?.clearable ?? s.jobs.filter(j => (j.file || j.drive) && j.can_clear_history).length);
     renderTaskStream(s.jobs);
-    renderHistory(s.jobs);
     const accountChanged = s.active !== lastActive || s.managed_gpu !== lastManaged || authorized !== wasAuthorized;
     lastActive = s.active; lastManaged = s.managed_gpu;
     if (authorized && accountChanged) refreshAccount(true);
@@ -1676,6 +1294,7 @@ async function refreshStatus() {
 function generationConfig() {
   const seed = $('seed').value.trim();
   return {
+    app_id: 'h3', provider_id: 'colab',
     aspect_ratio: selectedRatio(),
     generation_type: studioMode, references: studioMode === 'image' ? referenceData() : [], reference_size: $('referenceSize').value,
     performance: $('performance').checked,
@@ -1687,7 +1306,7 @@ function generationConfig() {
     duration: Number($('duration').value), count: Number($('count').value), seed: seed === '' ? (typeof crypto !== 'undefined' ? crypto.getRandomValues(new Uint32Array(1))[0] : Math.floor(Math.random() * 2**32)) : Number(seed),
     people: $('performance').checked && !referenceModelActive && $('peopleEnhancement').checked, strength: Number($('strength').value), veda: $('performance').checked && $('veda').checked,
     release_mode: selectedReleaseMode(), idle_minutes: Number($('idleMinutes').value),
-    auto_release: selectedReleaseMode() === 'always', gpu: $('gpu').value, endpoint: $('endpoint').value || null
+    gpu: $('gpu').value, endpoint: $('endpoint').value || null
   };
 }
 
@@ -1701,7 +1320,10 @@ referenceDrop.ondrop = e => { e.preventDefault(); referenceDrop.classList.remove
 $('peopleEnhancement').onchange = () => { updateEnhancement(); saveDraft(); };
 $('qwenFormatting').onchange = saveDraft;
 $('performance').onchange = () => { updatePerformance(); saveDraft(); };
-$('gpu').onchange = () => { $('endpoint').value = ''; renderRuntimes(lastAccountData); renderBalance(lastAccountData); saveDraft(); };
+$('gpu').onchange = () => {
+  $('endpoint').value = ''; renderRuntimes(lastAccountData); renderBalance(lastAccountData);
+  try { localStorage.setItem('lstudio-compute-v1',JSON.stringify({provider_id:'colab',gpu:$('gpu').value})); } catch (_) {}
+};
 document.querySelectorAll('input[name="aspectRatio"]').forEach(input => { input.onchange = () => { updateFormat(); saveDraft(); }; });
 for (const id of ['resolution','duration','count']) $(id).onchange = () => { updateFormat(); saveDraft(); };
 function adjustCount(delta) {
@@ -1718,15 +1340,12 @@ $('count').onkeydown = event => {
 $('resetAdvanced').onclick = () => {
   nonReferencePeople = false;
   $('mode').value = 'pdd'; $('referenceSize').value = 'match'; $('seed').value = ''; $('strength').value = '.7';
-  $('endpoint').value = ''; $('peopleEnhancement').checked = false;
+  $('peopleEnhancement').checked = false;
   $('performance').checked = true; $('encoder').value = 'heretic_int8';
   $('quantizedModel').checked = $('quantizedVae').checked = true;
   $('veda').checked = true;
   updatePerformance();
   $('qwenFormatting').checked = true;
-  document.querySelectorAll('input[name="releaseMode"]').forEach(input => { input.checked = input.value === 'idle'; });
-  $('idleMinutes').value = '10';
-  saveReleasePolicy();
   updateEnhancement(); saveDraft();
 };
 $('generateForm').addEventListener('input', saveDraft);
@@ -1738,7 +1357,7 @@ $('login').onclick = async () => {
   try {
     const d = await api('authorize/start', {method:'POST'});
     $('googleLink').href = d.url;
-    $('authBox').classList.remove('hidden'); $('connectionPageTab').click(); connectionError('');
+    $('authBox').classList.remove('hidden'); $('computePageTab').click(); connectionError('');
   } catch (e) { connectionError(e.message); }
 };
 $('finishAuth').onclick = async () => {
@@ -1760,7 +1379,7 @@ $('driveLogin').onclick = async () => {
     const data = await api('drive-cache/authorize/start', {method:'POST'});
     if (data.reused) return await refreshStatus();
     $('driveGoogleLink').href = data.url;
-    $('driveAuthBox').classList.remove('hidden'); $('connectionPageTab').click(); connectionError('');
+    $('driveAuthBox').classList.remove('hidden'); $('computePageTab').click(); connectionError('');
   } catch (e) { connectionError(e.message); }
 };
 $('finishDriveAuth').onclick = async () => {
@@ -1798,27 +1417,6 @@ if ($('startDriveBackup')) {
 }
 
 
-const balancePanel = document.querySelector('.balance-panel');
-let balancePinned = false;
-function showBalanceDetails(open) {
-  balancePanel.classList.toggle('open', open);
-  $('balanceToggle').setAttribute('aria-expanded', String(open));
-}
-balancePanel.onmouseenter = () => showBalanceDetails(true);
-balancePanel.onmouseleave = () => {
-  if (!balancePinned && !balancePanel.contains(document.activeElement)) showBalanceDetails(false);
-};
-balancePanel.addEventListener('focusin', () => showBalanceDetails(true));
-balancePanel.addEventListener('focusout', e => {
-  if (!balancePinned && !balancePanel.contains(e.relatedTarget) && !balancePanel.matches(':hover')) showBalanceDetails(false);
-});
-$('balanceToggle').onclick = () => { balancePinned = !balancePinned; showBalanceDetails(balancePinned); };
-document.addEventListener('click', e => {
-  if (!balancePanel.contains(e.target)) { balancePinned = false; showBalanceDetails(false); }
-});
-document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') { balancePinned = false; showBalanceDetails(false); }
-});
 
 $('referenceHelpToggle').onclick = () => {
   const open = $('referenceHelpToggle').getAttribute('aria-expanded') !== 'true';
@@ -1831,7 +1429,6 @@ $('confirmClearHistory').onclick = () => clearHistoryRecords();
 $('cancelClearHistory').onclick = closeHistoryRemoval;
 document.addEventListener('click',event=>{ if (!event.target.closest('.history-clear,.history-remove-confirm,.history-clear-group,.btn-remove')) closeHistoryRemoval(); });
 document.addEventListener('keydown',event=>{ if (event.key === 'Escape') closeHistoryRemoval(); });
-$('toggleHistory').onclick = () => { historyExpanded = !historyExpanded; renderHistory(latestJobs); };
 $('balanceRefresh').onclick = () => refreshAccount(true);
 $('generateForm').onsubmit = async e => {
   e.preventDefault(); error('');
@@ -1843,39 +1440,31 @@ $('generateForm').onsubmit = async e => {
     if (studioMode === 'image' && (!references.length && !window.H3Characters?.used().length || references.some(r => !r.image_id || r.pending || r.error))) return error('请先上传图片或引用角色，并替换或移除未就绪的图片。');
     submitting = true;
     const started = Date.now();
-    pendingRun = {created:started / 1000,status:'running',message:'正在提交任务…',events:[]};
-    updateRunMonitor();
     updateGenerate();
-    selectedJob = (await api('jobs', {method:'POST',body:JSON.stringify(generationConfig())})).id;
-    pendingRun.id = selectedJob; pendingRun.message = '任务已提交，等待开始';
-    runStarts[selectedJob] = started;
+    const jobId = (await api('jobs', {method:'POST',body:JSON.stringify(generationConfig())})).id;
+    runStarts[jobId] = started;
     runStarts = Object.fromEntries(Object.entries(runStarts).sort((a,b)=>b[1]-a[1]).slice(0,100));
-    try { localStorage.setItem('h3-run-starts-v1',JSON.stringify(runStarts)); } catch (_) {}
-    followActive = true;
+    try { localStorage.setItem('lstudio-h3-run-starts-v1',JSON.stringify(runStarts)); } catch (_) {}
     startSubmitCooldown(5);
     saveDraft(); await refreshStatus();
-  } catch (e) { pendingRun = null; updateRunMonitor(); error(e.message); await refreshStatus(); }
+  } catch (e) { error(e.message); await refreshStatus(); }
   finally { submitting = false; updateGenerate(); }
 };
 async function retryJob(id) {
-  const targetJob = latestJobs.find(j => j.id === id) || current;
+  const targetJob = latestJobs.find(j => j.id === id);
   const isDriveDownload = !!(targetJob?.drive && !targetJob?.local_file);
   if (!id || retrying || (!isDriveDownload && serverActive)) return;
-  retrying = true; $('retry').disabled = true; updateGenerate(); error('');
-  try { selectedJob = (await api('jobs/' + id + '/retry', {method:'POST'})).id; followActive = true; await refreshStatus(); }
+  retrying = true; updateGenerate(); error('');
+  try { await api('jobs/' + id + '/retry', {method:'POST'}); await refreshStatus(); }
   catch (e) { error(e.message); }
   finally { retrying = false; await refreshStatus(); updateGenerate(); }
 }
-$('retry').onclick = () => retryJob(current?.id);
 async function resubmitJob(id) {
   if (!id || resubmitting || submitting || retrying || cancelling) return;
   resubmitting = true;
-  if ($('resubmit')) $('resubmit').disabled = true;
   error('');
   try {
-    const res = await api('jobs/' + encodeURIComponent(id) + '/resubmit', {method: 'POST'});
-    selectedJob = res.id || id;
-    followActive = true;
+    await api('jobs/' + encodeURIComponent(id) + '/resubmit', {method: 'POST'});
     await refreshStatus();
   } catch (e) {
     error('重新提交失败：' + e.message);
@@ -1885,15 +1474,13 @@ async function resubmitJob(id) {
     updateGenerate();
   }
 }
-if ($('resubmit')) $('resubmit').onclick = () => resubmitJob(current?.id);
 async function cancelTask(id) {
   if (!id || cancelling) return;
-  cancelling = true; $('cancelJob').disabled = true; updateGenerate(); error('');
-  try { await api('jobs/' + id + '/cancel',{method:'POST',body:'{}'}); selectedJob = id; followActive = true; await refreshStatus(); }
+  cancelling = true; updateGenerate(); error('');
+  try { await api('jobs/' + id + '/cancel',{method:'POST',body:'{}'}); await refreshStatus(); }
   catch (e) { error(e.message); }
   finally { cancelling = false; await refreshStatus(); updateGenerate(); }
 }
-$('cancelJob').onclick = () => cancelTask(current?.id);
 async function applyCreation(config, focus = true) {
   if (!config?.prompt) return;
   setMode('text');
@@ -1910,10 +1497,9 @@ async function applyCreation(config, focus = true) {
   $('veda').checked = config.veda === true;
   updatePerformance();
   $('qwenFormatting').checked = config.prompt_processing !== 'direct';
-  $('gpu').value = config.gpu || 'A100'; $('endpoint').value = ''; renderRuntimes(lastAccountData); renderBalance(lastAccountData);
   $('referenceSize').value = config.reference_size || 'match';
   await restoreReferences((config.references || []).filter(r => !r.character_id));
-  setMode(config.generation_type === 'image' || config.references?.length || config.has_image || window.H3Characters?.used().length ? 'image' : 'text');
+  setMode(config.generation_type === 'image' || config.references?.length || window.H3Characters?.used().length ? 'image' : 'text');
   window.H3Characters?.refreshUse();
   updateEnhancement(); updateFormat(); saveDraft(); error('');
   if (focus) {
@@ -1921,7 +1507,6 @@ async function applyCreation(config, focus = true) {
     $('prompt').focus({preventScroll:true});
   }
 }
-$('reuseSettings').onclick = () => applyCreation(current?.creation).catch(e=>error(e.message));
 async function checkAndRelease() {
   releaseActionBusy = true; updateReleaseUI(); error('');
   try {

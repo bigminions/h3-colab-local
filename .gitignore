@@ -1,22 +1,60 @@
 # User data and runtime output
-/.private/
-/videos/
-/log/
+.private/
+videos/
+materials/
+log/
 
-# Local secrets
+# Local secrets and credentials
 .env
 .env.*
 !.env.example
+*.dat
+*.token
+*.key
+*.pem
 
-# Python environments and caches
+# Python environments, bytecode and caches
 .venv/
 .venv-*/
 venv/
-.pytest_cache/
+env/
 __pycache__/
 *.py[cod]
+*$py.class
 
-# Build output and temporary downloads
-/dist/
+# Testing and coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# IDE and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Operating system files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Build output and archives
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Temporary files and runtime caches
 *.log
 *.partial
+*.drive-partial
+*.tmp
+*.bak
+*.orig
+.h3-prompt-cache/
+scratch/

@@ -34,7 +34,7 @@ class ReleaseTests(unittest.TestCase):
         self.temp.cleanup()
     def finish(self, mode='idle', minutes=5):
         self.c.configure_release(app.ReleasePolicy(mode=mode,idle_minutes=minutes))
-        config = app.JobConfig(prompt='test',release_mode=mode,idle_minutes=minutes).model_dump()
+        config = app.H3JobConfig(prompt='test',release_mode=mode,idle_minutes=minutes).model_dump()
         job = dict(id='a'*32,config=config,events=[],status='running',created=self.clock)
         self.c.jobs[job['id']] = job; self.c.active = job['id']; self.c.run(job)
         return job
@@ -52,7 +52,7 @@ class ReleaseTests(unittest.TestCase):
     def test_running_job_cancels_timeout_and_completion_restarts_it(self):
         self.finish(); self.clock=1290
         with patch.object(app.threading,'Thread'):
-            job_id = self.c.start(app.JobConfig(prompt='next',release_mode='idle'))
+            job_id = self.c.start(app.H3JobConfig(prompt='next',release_mode='idle'))
         self.assertIsNone(self.c.release_status()['deadline'])
         self.clock=1400; self.c.idle_tick(); self.assertNotIn('release',self.fake.calls)
         self.c.run(self.c.jobs[job_id]); self.assertEqual(self.c.release_status()['deadline'],2000)
@@ -99,21 +99,20 @@ class ReleaseTests(unittest.TestCase):
     def test_no_managed_gpu_check_is_read_only(self):
         result=self.c.check_and_release()
         self.assertTrue(result['ok']); self.assertIn('无需释放',result['message']); self.assertEqual(self.fake.calls,[])
-    def test_explicit_legacy_discard_clears_pending_after_runtime_is_gone(self):
+    def test_explicit_discard_clears_pending_after_runtime_is_gone(self):
         self.c.jobs['pending']={'status':'interrupted'}
         self.c.check_and_release(discard_pending=True)
         self.assertEqual(self.c.jobs['pending']['status'],'discarded')
-    def test_legacy_flag_and_validation(self):
+    def test_release_policy_defaults_and_validation(self):
         self.assertEqual(app.ReleasePolicy().mode, 'idle')
         self.assertEqual(app.ReleasePolicy().idle_minutes, 10)
         self.assertEqual(self.c.release_policy.mode, 'idle')
         self.assertEqual(self.c.release_policy.idle_minutes, 10)
-        default_job = app.JobConfig(prompt='test')
+        default_job = app.H3JobConfig(prompt='test')
         self.assertEqual(default_job.release_mode, 'idle')
         self.assertEqual(default_job.idle_minutes, 10)
-        self.assertFalse(default_job.auto_release)
-        self.assertTrue(app.JobConfig(prompt='test',release_mode='always',auto_release=False).auto_release)
-        self.assertFalse(app.JobConfig(prompt='test',release_mode='idle').auto_release)
+        self.assertEqual(app.H3JobConfig(prompt='test',release_mode='always').release_mode,'always')
+        self.assertEqual(app.H3JobConfig(prompt='test',release_mode='idle').release_mode,'idle')
         for minutes in (0,121):
             with self.assertRaises(ValidationError): app.ReleasePolicy(mode='idle',idle_minutes=minutes)
 
@@ -121,7 +120,7 @@ class ReleaseTests(unittest.TestCase):
 class RemoteCheckTests(unittest.TestCase):
     def transport(self):
         control=MagicMock(session={'endpoint':'owned','url':'https://example.invalid','token':'test-only','name':'test','variant':'GPU','accelerator':'G4','machine_shape':'HIGH_RAM','kernel_id':'k','session_id':None})
-        transport=app.GoogleTransport(control); client=MagicMock()
+        transport=app.ColabProvider(control, app.runtime_services); client=MagicMock()
         assignment=MagicMock(endpoint='owned'); assignment.runtime_proxy_info.url='https://example.invalid'; assignment.runtime_proxy_info.token='test-only'
         client.list_assignments.return_value=[assignment]; transport.client=lambda:client
         return control,transport,client

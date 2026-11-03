@@ -53,7 +53,7 @@ class BatchTests(unittest.TestCase):
 
     def start(self, count=2, mode='always', seed=17):
         with patch.object(app.threading, 'Thread'):
-            first = self.c.start(app.JobConfig(prompt='test', count=count, seed=seed, release_mode=mode))
+            first = self.c.start(app.H3JobConfig(prompt='test', count=count, seed=seed, release_mode=mode))
         return sorted((j for j in self.c.jobs.values() if j.get('batch_id') == first), key=lambda j: j['batch_index'])
 
     def resume(self, job):
@@ -92,8 +92,8 @@ class BatchTests(unittest.TestCase):
         batch = self.start(count=8, seed=2**53-1)
         self.assertEqual([j['config']['seed'] for j in batch], [2**53-1,0,1,2,3,4,5,6])
         for value in (0,9,1.5,True,'2'):
-            with self.assertRaises(ValidationError): app.JobConfig(prompt='test', count=value)
-        self.assertEqual(app.JobConfig(prompt='test').count, 1)
+            with self.assertRaises(ValidationError): app.H3JobConfig(prompt='test', count=value)
+        self.assertEqual(app.H3JobConfig(prompt='test').count, 1)
 
     def test_idle_timer_begins_after_last_variant_and_manual_keeps_gpu(self):
         for mode in ('idle','manual'):
@@ -123,7 +123,7 @@ class BatchTests(unittest.TestCase):
         self.assertNotIn('release', self.fake.calls)
         self.c.idle_tick()
         self.assertNotIn('release', self.fake.calls)
-        with self.assertRaises(app.HTTPException): self.c.start(app.JobConfig(prompt='new'))
+        with self.assertRaises(app.HTTPException): self.c.start(app.H3JobConfig(prompt='new'))
         self.fake.fail_index = None
         self.resume(batch[2])  # Picking a later waiting variant still resumes the earliest missing one.
         self.assertEqual([seed for _,seed in self.fake.executed], [17,18,18,19])

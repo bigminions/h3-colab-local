@@ -78,13 +78,8 @@
       coverURLs.delete(id); pending.then(url => URL.revokeObjectURL(url),() => {});
     }
   }
-  const pages = [['toolPageTab','toolPage','tool'],['manageCharacters','characterPage','characters'],['connectionPageTab','connectionPage','connections']];
   function showPage(page) {
-    for (const [tabId,panelId,name] of pages) {
-      const selected = page === name;
-      $(panelId).hidden = !selected; $(panelId).classList.toggle('hidden',!selected);
-      $(tabId).setAttribute('aria-selected',String(selected)); $(tabId).tabIndex = selected ? 0 : -1;
-    }
+    window.Workspace.show(page);
     closeMenu();
   }
   function closeEditor() {
@@ -265,7 +260,7 @@
     $('saveCharacter').classList.toggle('hidden',viewing);
   }
   async function assetURL(kind,id) {
-    const response = await fetch('/api/'+kind+'/'+id,{headers:{'X-H3-Key':KEY}});
+    const response = await fetch('/api/'+kind+'/'+id,{headers:{'X-LStudio-Key':KEY}});
     if (!response.ok) throw Error('文件已丢失，请移除后重新上传');
     return URL.createObjectURL(await response.blob());
   }
@@ -292,7 +287,7 @@
     busy = 1; editorError(''); renderEditor();
     try {
       for (const file of files) {
-        const form = new FormData(); form.append('file',file);
+        const form = new FormData(); form.append('file',file); form.append('purpose','characters');
         const data = await api(kind,{method:'POST',body:form});
         if (kind === 'audios' && editing.audios.reduce((sum,a)=>sum+a.duration,0) + data.duration > 15.0001) throw Error('声音样本总长超过 15 秒；已保留此前上传的样本，请裁剪后再添加。');
         assets.push({...data,url:URL.createObjectURL(file)}); renderEditor();
@@ -301,18 +296,7 @@
     finally { busy = 0; $('characterImages').value = $('characterAudios').value = ''; renderEditor(); }
   }
   $('newCharacter').onclick = () => openEditor();
-  $('toolPageTab').onclick = () => showPage('tool');
-  $('connectionPageTab').onclick = () => showPage('connections');
   $('manageCharacters').onclick = async () => { showPage('characters'); managerError(''); $('characterManagerStatus').textContent = ''; renderManager(); if (!editing) $('characterSearch').focus(); try { await load(); } catch (_) {} };
-  for (const [index,[id]] of pages.entries()) {
-    $(id).onkeydown = event => {
-      if (!['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) return;
-      event.preventDefault();
-      const targetIndex = event.key === 'Home' ? 0 : event.key === 'End' ? pages.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + pages.length) % pages.length;
-      const target = pages[targetIndex][0];
-      $(target).click(); $(target).focus();
-    };
-  }
   $('characterSearch').oninput = renderManager;
   $('showDeletedCharacters').onchange = renderManager;
   $('closeCharacter').onclick = () => { if (!busy) closeEditor(); };

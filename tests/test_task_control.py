@@ -14,7 +14,7 @@ class TaskControlTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.control = app.Controller(Path(self.temp.name),Path(self.temp.name))
         self.control.cancel_wakeup.wait = MagicMock()
-        self.job = dict(id='a'*32,config=app.JobConfig(prompt='test').model_dump(),
+        self.job = dict(id='a'*32,config=app.H3JobConfig(prompt='test').model_dump(),
                         status='running',events=[],created=0)
         self.control.jobs[self.job['id']] = self.job
         self.control.active = self.job['id']
@@ -129,7 +129,7 @@ class TaskControlTests(unittest.TestCase):
 
     def test_cancel_unknown_assignment_probes_without_allocating(self):
         self.control.active=None
-        self.control.transport=app.GoogleTransport(self.control)
+        self.control.transport=app.ColabProvider(self.control, app.runtime_services)
         self.job.update(status='error',assignment_pending=True,assignment_hash=self.job['id'])
         client=MagicMock()
         client._get_assignment.return_value=type('Proposal',(),{'endpoint':None})()
@@ -141,7 +141,7 @@ class TaskControlTests(unittest.TestCase):
 
     def test_cancel_unconfirmed_assignment_releases_only_its_notebook(self):
         self.control.active=None
-        self.control.transport=app.GoogleTransport(self.control)
+        self.control.transport=app.ColabProvider(self.control, app.runtime_services)
         self.job.update(status='error',assignment_pending=True,assignment_hash=self.job['id'])
         endpoint=type('Assigned',(),{'endpoint':'owned-test'})()
         client=MagicMock();client._get_assignment.return_value=endpoint
@@ -153,13 +153,13 @@ class TaskControlTests(unittest.TestCase):
 
     def test_connect_retry_reuses_same_notebook_identity(self):
         import requests
-        transport=app.GoogleTransport(self.control)
+        transport=app.ColabProvider(self.control, app.runtime_services)
         client=MagicMock();client.list_assignments.return_value=[]
         assignment=type('Assigned',(),{'endpoint':'owned-test','runtime_proxy_info':
             type('Proxy',(),{'url':'https://example.invalid','token':'test-only'})()})()
         client.assign.side_effect=[requests.ConnectionError('offline'),assignment]
         transport.client=lambda:client
-        self.control.connected_operation(self.job,lambda:transport.connect(app.JobConfig(prompt='test',gpu='G4')))
+        self.control.connected_operation(self.job,lambda:transport.connect(app.H3JobConfig(prompt='test',gpu='G4')))
         self.assertEqual(client.assign.call_args_list[0].args[0],client.assign.call_args_list[1].args[0])
         self.assertFalse(self.job['assignment_pending'])
 
@@ -212,7 +212,7 @@ class TaskControlTests(unittest.TestCase):
 
         # Submitting a new job should not be blocked by this failed job
         with patch.object(threading, 'Thread'):
-            new_id = self.control.start(app.JobConfig(prompt='new job'))
+            new_id = self.control.start(app.H3JobConfig(prompt='new job'))
             self.assertIsNotNone(new_id)
 
     def test_remote_runtime_recycled_clears_pending_and_releases_session(self):

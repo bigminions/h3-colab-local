@@ -19,7 +19,7 @@ class RecoveryTests(unittest.TestCase):
         # Actual dependency loop, queues and events; only the network send is mocked.
         with tempfile.TemporaryDirectory() as temp:
             control = app.Controller(Path(temp), Path(temp))
-            job = dict(id='quiet', config=app.JobConfig(prompt='test').model_dump(),
+            job = dict(id='quiet', config=app.H3JobConfig(prompt='test').model_dump(),
                        status='running', events=[], created=0)
             control.jobs[job['id']] = job
             control.active = job['id']
@@ -151,10 +151,10 @@ class RecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             control = app.Controller(Path(temp),Path(temp))
             control.session = dict(endpoint='owned-test')
-            transport = app.GoogleTransport(control)
+            transport = app.ColabProvider(control, app.runtime_services)
             transport.refresh = lambda:SimpleNamespace(url='https://example.invalid',token='test-only',
                                                        kernel_id='kernel',session_id='session')
-            job = dict(id='test',config=app.JobConfig(prompt='test').model_dump(),events=[],status='running')
+            job = dict(id='test',config=app.H3JobConfig(prompt='test').model_dump(),events=[],status='running')
             control.jobs['test'] = job
             result = {'path':'/content/ComfyUI/output/H3/test.mp4','size':1}
             def observe(runtime, session, hook):

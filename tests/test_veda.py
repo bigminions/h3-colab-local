@@ -11,7 +11,7 @@ import remote_h3 as h3
 
 class VedaTests(unittest.TestCase):
     def config(self, **kwargs):
-        return dict(app.JobConfig(prompt='A cat walks.', people=False, **kwargs).model_dump(), job_id='test')
+        return dict(app.H3JobConfig(prompt='A cat walks.', people=False, **kwargs).model_dump(), job_id='test')
 
     def test_default_enables_veda(self):
         config = self.config()

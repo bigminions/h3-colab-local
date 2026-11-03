@@ -1,20 +1,11 @@
 (function (root) {
   'use strict';
-  const DAY = 86400000, OFFSET = 8 * 3600000;
   const activeStates = new Set(['queued','running','cancelling']);
   const valid = value => typeof value === 'number' && Number.isFinite(value);
   function lastEvent(job) {
-    let cursor = valid(job.created) ? job.created * 1000 : null, latest = null;
+    let latest = null;
     for (const event of job.events || []) {
-      let at = valid(event.timestamp) ? event.timestamp * 1000 : null;
-      // Older records contain only a China-local clock; walk forward across midnight.
-      const clock = /^(\d{2}):(\d{2}):(\d{2})$/.exec(event.time || '');
-      if (at === null && clock && cursor !== null) {
-        at = Math.floor((cursor + OFFSET) / DAY) * DAY - OFFSET +
-          (+clock[1] * 3600 + +clock[2] * 60 + +clock[3]) * 1000;
-        if (at + 1000 <= cursor) at += DAY;
-      }
-      if (at !== null) cursor = at;
+      const at = valid(event.timestamp) ? event.timestamp * 1000 : null;
       latest = {at, message:event.message || ''};
     }
     return latest;

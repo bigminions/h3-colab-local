@@ -22,7 +22,7 @@ class DriveStorageTests(unittest.TestCase):
         self.data = b'video'
         self.sha = hashlib.sha256(self.data).hexdigest()
         self.md5 = hashlib.md5(self.data).hexdigest()
-        self.job = dict(id='a'*32, created=1, config=app.JobConfig(prompt='test').model_dump(),
+        self.job = dict(id='a'*32, created=1, config=app.H3JobConfig(prompt='test').model_dump(),
                         status='running', events=[], remote_result=dict(path='/content/ComfyUI/output/test.mp4',
                         size=5, sha256=self.sha, width=640, height=480, duration=5, audio=1))
         self.stored = dict(provider='drive', file_id='file1', job_id=self.job['id'], size=5,
@@ -49,7 +49,7 @@ class DriveStorageTests(unittest.TestCase):
         self.auth.quota.return_value = {'limit': '10', 'usage': '10'}
         with patch.object(app, 'drive_cache', enabled=False):
             with self.assertRaises(app.HTTPException):
-                self.c.start(app.JobConfig(prompt='new'))
+                self.c.start(app.H3JobConfig(prompt='new'))
         self.assertEqual(self.fake.calls, [])
 
     def test_resume_reuses_id_without_creating_another_file(self):
@@ -95,7 +95,7 @@ class DriveStorageTests(unittest.TestCase):
                     with self.assertRaises(RuntimeError): self.store.confirm_stored(self.stored)
 
     def test_direct_upload_checks_probe_and_confirmation(self):
-        transport = app.GoogleTransport(self.c)
+        transport = app.ColabProvider(self.c, app.runtime_services)
         probe = {'size': 5, 'sha256': self.sha, 'md5': self.md5}
         with patch.object(self.store, 'ensure_file', return_value='file1'), \
              patch.object(self.store, 'upload_target', return_value={'file_id': 'file1',

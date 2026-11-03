@@ -133,7 +133,7 @@ class HistoryRecycleTests(unittest.TestCase):
             self.restored_folder()
             self.assertEqual(len(app.status()['jobs']),1)
 
-    def test_bulk_partial_failure_retains_failed_work_and_protects_legacy_restore(self):
+    def test_bulk_partial_failure_retains_failed_work_and_protects_unverified_restore(self):
         other = {**self.job,'id':'b'*32}; self.control.jobs[other['id']] = other
         sender = self.control.history_recycle.sender
         def partial(folder):

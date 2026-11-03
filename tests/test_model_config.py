@@ -54,7 +54,7 @@ class ModelConfigTests(unittest.TestCase):
     def test_default_routes_download_and_load_community_encoder(self):
         base = dict(prompt='A cat walks.', mode='pdd', people=False,
                     resolution='480p', duration=5, seed=1, job_id='test')
-        variants = [base, dict(base, image_name='cat.png'),
+        variants = [base, dict(base, references=[dict(slot=1,image_id='cat.png',frame='first',role='other',description='')]),
                     dict(base, references=[dict(slot=1, image_id='cat.png',
                                                role='character', description='cat')])]
         for config in variants:

@@ -12,6 +12,7 @@ import wave
 from fastapi import HTTPException, UploadFile
 from pydantic import ValidationError
 import app
+from asset_library import AssetLibrary
 from characters import AudioAsset, CharacterLibrary, CharacterProfile, expand_characters, inspect_audio, mention_names
 from remote_h3 import build_graph, files_for, reference_prompt, REF_UNET
 
@@ -28,11 +29,12 @@ class CharacterTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(dir=app.PRIVATE)
         self.directory = Path(self.temp.name)
-        self.library = CharacterLibrary(self.directory)
+        self.assets = AssetLibrary(self.directory/'materials')
+        self.library = CharacterLibrary(self.directory, self.assets)
         self.images = [f'{i:032x}.png' for i in (1,2,3)]
         for name in self.images:
-            (self.directory / name).write_bytes(b'image-test')
-        self.patches = [patch.object(app,'PRIVATE',self.directory),patch.object(app,'character_library',self.library)]
+            self.assets.store(name, b'image-test')
+        self.patches = [patch.object(app,'PRIVATE',self.directory),patch.object(app,'asset_library',self.assets),patch.object(app,'character_library',self.library)]
         for p in self.patches: p.start()
 
     def tearDown(self):
@@ -48,7 +50,7 @@ class CharacterTests(unittest.TestCase):
 
     def test_library_is_persistent_editable_and_rejects_duplicates_or_missing_assets(self):
         p = self.profile()
-        self.assertEqual(CharacterLibrary(self.directory).list()[0].name,'男主')
+        self.assertEqual(CharacterLibrary(self.directory,self.assets).list()[0].name,'男主')
         p.description = 'new description'; self.library.save(p)
         self.assertEqual(len(self.library.list()),1)
         self.assertEqual(self.library.list()[0].description,'new description')
@@ -58,16 +60,16 @@ class CharacterTests(unittest.TestCase):
 
     def test_delete_restore_lookup_and_snapshot_preserve_assets(self):
         p=self.profile()
-        c=app.JobConfig(prompt='@男主 看镜头').model_dump()
+        c=app.H3JobConfig(prompt='@男主 看镜头').model_dump()
         deleted=self.library.delete(p.id)
         self.assertTrue(deleted.deleted)
         self.assertFalse(self.library.list())
         self.assertTrue(self.library.get(p.id,include_deleted=True).deleted)
-        self.assertTrue((self.directory/self.images[0]).is_file())
+        self.assertTrue(self.assets.resolve(self.images[0]).is_file())
         with self.assertRaises(KeyError): self.library.get(p.id)
         with self.assertRaises(KeyError): self.library.delete(p.id)
-        with self.assertRaises(ValidationError): app.JobConfig(prompt='@男主 看镜头')
-        self.assertEqual(app.JobConfig(**c).model_dump(),c)
+        with self.assertRaises(ValidationError): app.H3JobConfig(prompt='@男主 看镜头')
+        self.assertEqual(app.H3JobConfig(**c).model_dump(),c)
         restored=self.library.restore(p.id)
         self.assertFalse(restored.deleted)
         self.assertEqual(self.library.get(p.id).name,'男主')
@@ -95,7 +97,7 @@ class CharacterTests(unittest.TestCase):
         self.profile()
         text = '@图片3作为场景参考，@男主 在其中行走'
         self.assertEqual(mention_names(text), ['男主'])
-        c = app.JobConfig(prompt=text, references=[dict(slot=3,image_id=self.images[1])]).model_dump()
+        c = app.H3JobConfig(prompt=text, references=[dict(slot=3,image_id=self.images[1])]).model_dump()
         self.assertEqual([p['name'] for p in c['characters']], ['男主'])
         self.assertEqual(c['references'][1]['role'], 'other')
         self.assertIn('<Picture 2>作为场景参考', reference_prompt(c))
@@ -106,12 +108,12 @@ class CharacterTests(unittest.TestCase):
         for mode in ('direct', 'faithful'):
             for text in ('@图片1 作为场景参考', '@图片1 作为场景参考，@男主 行走'):
                 with self.subTest(mode=mode,text=text), self.assertRaisesRegex(ValidationError,'未上传的图片'):
-                    app.JobConfig(prompt=text,prompt_processing=mode)
+                    app.H3JobConfig(prompt=text,prompt_processing=mode)
 
     def test_image_only_request_keeps_freeform_purpose_in_both_prompt_paths(self):
         text = '@图片3 @图片7 作为场景参考，生成雨夜街道'
         for mode in ('direct', 'faithful'):
-            c = app.JobConfig(prompt=text,prompt_processing=mode,references=[
+            c = app.H3JobConfig(prompt=text,prompt_processing=mode,references=[
                 dict(slot=3,image_id=self.images[0]),dict(slot=7,image_id=self.images[1])]).model_dump()
             self.assertEqual(c['characters'], [])
             self.assertTrue(all(r['role'] == 'other' for r in c['references']))
@@ -123,7 +125,7 @@ class CharacterTests(unittest.TestCase):
         audio1, audio2 = self.audio(),self.audio(3)
         p = self.profile(images=self.images[:2],audios=[audio1,audio2])
         unused = self.profile('路人',[self.images[2]])
-        c = app.JobConfig(prompt='让@男主 说：“我回来了。”',generation_type='text').model_dump()
+        c = app.H3JobConfig(prompt='让@男主 说：“我回来了。”',generation_type='text').model_dump()
         self.assertEqual(c['generation_type'],'image'); self.assertEqual(c['mode'],'pdd')
         self.assertEqual([a['character_id'] for a in c['audio_references']],[p.id,p.id])
         self.assertEqual(len(c['references']),2)
@@ -141,7 +143,7 @@ class CharacterTests(unittest.TestCase):
 
     def test_character_can_be_silent_and_mix_with_first_last_frames(self):
         self.profile()
-        c = app.JobConfig(prompt='@男主 默默看向远处',references=[dict(slot=2,image_id=self.images[1],frame='first'),
+        c = app.H3JobConfig(prompt='@男主 默默看向远处',references=[dict(slot=2,image_id=self.images[1],frame='first'),
                            dict(slot=3,image_id=self.images[2],frame='last')]).model_dump()
         self.assertFalse(c['audio_references'])
         g = build_graph(dict(c,job_id='test'))
@@ -151,26 +153,26 @@ class CharacterTests(unittest.TestCase):
 
     def test_repeated_mentions_and_shared_image_are_uploaded_once(self):
         self.profile()
-        c = app.JobConfig(prompt='@男主 看镜头。@男主 转身。',references=[dict(slot=5,image_id=self.images[0],frame='first')]).model_dump()
+        c = app.H3JobConfig(prompt='@男主 看镜头。@男主 转身。',references=[dict(slot=5,image_id=self.images[0],frame='first')]).model_dump()
         self.assertEqual(len(c['references']),1)
         self.assertEqual(len(c['characters']),1)
         self.assertEqual(build_graph(dict(c,job_id='test'))['1']['inputs']['unet_name'],REF_UNET)
 
     def test_unknown_name_and_global_limits_rejected_before_allocation(self):
-        with self.assertRaises(ValidationError): app.JobConfig(prompt='@不存在 说话')
+        with self.assertRaises(ValidationError): app.H3JobConfig(prompt='@不存在 说话')
         p = self.profile(audios=[self.audio(),self.audio()])
         self.profile('女主',[self.images[1]],audios=[self.audio(),self.audio()])
-        with self.assertRaisesRegex(ValidationError,'最多 3 段'): app.JobConfig(prompt='@男主 对@女主 说话')
+        with self.assertRaisesRegex(ValidationError,'最多 3 段'): app.H3JobConfig(prompt='@男主 对@女主 说话')
         refs = [dict(slot=i,image_id=f'{i+50:032x}.png') for i in range(1,10)]
-        with self.assertRaisesRegex(ValidationError,'最多 9 张'): app.JobConfig(prompt='@男主 看镜头',references=refs)
+        with self.assertRaisesRegex(ValidationError,'最多 9 张'): app.H3JobConfig(prompt='@男主 看镜头',references=refs)
         p.audios=[AudioAsset(**self.audio(8)),AudioAsset(**self.audio(8))]
         with self.assertRaises(ValueError): self.library.save(p)
 
     def test_job_snapshot_survives_role_library_changes(self):
         p = self.profile()
-        c = app.JobConfig(prompt='@男主 看镜头').model_dump()
+        c = app.H3JobConfig(prompt='@男主 看镜头').model_dump()
         p.name='改名'; p.image_ids=[self.images[1]]; self.library.save(p)
-        retry = app.JobConfig(**c).model_dump()
+        retry = app.H3JobConfig(**c).model_dump()
         self.assertEqual(retry,c)
         self.assertEqual(retry['characters'][0]['name'],'男主')
 
@@ -179,8 +181,8 @@ class CharacterTests(unittest.TestCase):
         p=self.profile(audios=[dict(a,duration=2)])
         self.assertEqual(p.audios[0].duration,8)
         self.profile('女主',[self.images[1]],audios=[self.audio(8)])
-        with self.assertRaisesRegex(ValidationError,'15 秒'): app.JobConfig(prompt='@男主 与@女主 交谈')
-        (self.directory/a['audio_id']).write_bytes(b'changed')
+        with self.assertRaisesRegex(ValidationError,'15 秒'): app.H3JobConfig(prompt='@男主 与@女主 交谈')
+        app.asset_library.resolve(a['audio_id']).write_bytes(b'changed')
         with self.assertRaises(ValueError): self.library.save(p)
 
     def test_audio_duration_is_decoded_and_bad_audio_is_rejected(self):
@@ -195,15 +197,15 @@ class CharacterTests(unittest.TestCase):
 
     def test_lost_audio_blocks_job_without_starting_transport(self):
         a=self.audio(); self.profile(audios=[a])
-        c=app.JobConfig(prompt='@男主 说话')
-        (self.directory/'google-token.dat').touch(); (self.directory/a['audio_id']).unlink()
+        c=app.H3JobConfig(prompt='@男主 说话')
+        (self.directory/'google-token.dat').touch(); app.asset_library.resolve(a['audio_id']).unlink()
         with patch.object(app.controller,'start') as start, self.assertRaises(HTTPException): app.create_job(c)
         start.assert_not_called()
 
     def test_transport_uploads_audio_and_images_and_history_preserves_roles(self):
         a=self.audio(); self.profile(audios=[a])
-        c=app.JobConfig(prompt='@男主 看镜头').model_dump()
-        control=MagicMock(session={}); transport=app.GoogleTransport(control)
+        c=app.H3JobConfig(prompt='@男主 看镜头').model_dump()
+        control=MagicMock(session={}); transport=app.ColabProvider(control, app.runtime_services)
         transport.refresh=lambda:SimpleNamespace(url='https://example.invalid',token='test-only',kernel_id=None,session_id=None)
         with patch.object(app,'TimedContents') as contents,patch.object(app,'ColabRuntime') as runtime:
             runtime.return_value.execute_code.return_value=[dict(text='H3_EVENT '+json.dumps(dict(stage='result',message='test',result={'path':'test'})))]

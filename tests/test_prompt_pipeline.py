@@ -9,19 +9,17 @@ import remote_h3 as h3
 
 
 class DirectPromptTests(unittest.TestCase):
-    def test_legacy_flags_cannot_enable_rewrite_or_override_original(self):
+    def test_direct_mode_preserves_original_prompt_without_rewriting(self):
         text = '[0s-4s] 二维墨线。手机显示“妈妈”。[4s-10s] 她说：“图片9很好看。”'
-        for legacy in (True, False):
-            c = app.JobConfig(prompt=text, people=False, prompt_enhance=legacy, prompt_processing='direct').model_dump()
-            self.assertNotIn('prompt_enhance', c)
-            c.update(job_id='test', prompt_enhance=legacy, _compiled_prompt='WRONG', _input_audio_indices=[])
-            self.assertEqual(h3.build_graph(c)['5']['inputs']['prompt'], text)
-            self.assertFalse(any('generation_tail' in name for _, name, _ in h3.files_for(c)))
-            self.assertIn(h3.CLIP, [name for _,name,_ in h3.files_for(c)])
+        c = app.H3JobConfig(prompt=text, people=False, prompt_processing='direct').model_dump()
+        c.update(job_id='test')
+        self.assertEqual(h3.build_graph(c)['5']['inputs']['prompt'], text)
+        self.assertFalse(any('generation_tail' in name for _,name,_ in h3.files_for(c)))
+        self.assertIn(h3.CLIP,[name for _,name,_ in h3.files_for(c)])
 
     def test_explicit_picture_mapping_preserves_prose_and_timestamps(self):
         text = '@图片3 作为场景。[0s-4s] 二维墨线，手机显示“妈妈”。[4s-10s] 女人说：“图片9很好看。”'
-        c = app.JobConfig(prompt=text, references=[dict(slot=3,image_id='a'*32+'.png')]).model_dump()
+        c = app.H3JobConfig(prompt=text, references=[dict(slot=3,image_id='a'*32+'.png')]).model_dump()
         actual = h3.build_graph(dict(c,job_id='test'))['5']['inputs']['prompt']
         self.assertTrue(actual.endswith(text.replace('@图片3', '<Picture 1>')))
         self.assertNotIn('[Shot', actual)
@@ -58,7 +56,7 @@ class DirectPromptTests(unittest.TestCase):
 
 
     def test_pipeline_files_splits_qwen_and_diffusion_models(self):
-        c = app.JobConfig(prompt='测试', prompt_processing='faithful').model_dump()
+        c = app.H3JobConfig(prompt='测试', prompt_processing='faithful').model_dump()
         qwen, other = h3.pipeline_files(c)
         all_files = h3.files_for(c)
         self.assertEqual(len(qwen), 2)
@@ -70,7 +68,7 @@ class DirectPromptTests(unittest.TestCase):
         self.assertNotIn(tail, other)
 
     def test_pipeline_files_direct_mode_returns_all_in_other(self):
-        c = app.JobConfig(prompt='测试', prompt_processing='direct').model_dump()
+        c = app.H3JobConfig(prompt='测试', prompt_processing='direct').model_dump()
         qwen, other = h3.pipeline_files(c)
         self.assertEqual(qwen, [])
         self.assertEqual(other, h3.files_for(c))

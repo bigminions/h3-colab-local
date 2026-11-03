@@ -17,7 +17,7 @@ class TransportGpuTests(unittest.TestCase):
     def setUp(self):
         self.control=MagicMock(session={'endpoint':'owned','url':'https://example.invalid','token':'test-only',
             'name':'test','variant':'GPU','accelerator':'G4','machine_shape':'HIGH_RAM','kernel_id':'k','session_id':None})
-        self.transport=app.GoogleTransport(self.control)
+        self.transport=app.ColabProvider(self.control, app.runtime_services)
         self.client=MagicMock(); self.transport.client=lambda:self.client
 
     def test_detection_is_fresh_and_filters_cpu_tpu(self):

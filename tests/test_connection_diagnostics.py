@@ -57,9 +57,9 @@ class ConnectionDiagnosticsTests(unittest.TestCase):
             control = app.Controller(Path(tmp), Path(tmp))
             control.cancel_wakeup.wait = MagicMock()
             job = dict(id='d'*32, created=0, status='running', events=[],
-                       config=app.JobConfig(prompt='test', gpu='G4').model_dump())
+                       config=app.H3JobConfig(prompt='test', gpu='G4').model_dump())
             control.jobs[job['id']] = job; control.active = job['id']
-            transport = app.GoogleTransport(control)
+            transport = app.ColabProvider(control, app.runtime_services)
             client = MagicMock(); client.list_assignments.return_value = []
             client.assign.side_effect = requests.ReadTimeout('token=must-never-appear')
             transport.client = lambda: client
@@ -85,7 +85,7 @@ class ConnectionDiagnosticsTests(unittest.TestCase):
             control = app.Controller(Path(tmp), Path(tmp))
             control.cancel_wakeup.wait = MagicMock()
             job = dict(id='e'*32, created=0, status='running', events=[],
-                       config=app.JobConfig(prompt='test').model_dump())
+                       config=app.H3JobConfig(prompt='test').model_dump())
             control.jobs[job['id']] = job; control.active = job['id']
             fake = FakeTransport(control)
             fake.download = MagicMock(side_effect=requests.ConnectionError('offline'))
@@ -107,7 +107,7 @@ class ConnectionDiagnosticsTests(unittest.TestCase):
                     progress_seen.set()
             control.event = event
             with patch.object(app, 'CONNECT_PROGRESS_INTERVAL', .01):
-                result = app.GoogleTransport(control).connection_step('申请并启动 G4 显卡',
+                result = app.ColabProvider(control, app.runtime_services).connection_step('申请并启动 G4 显卡',
                                                                       lambda: progress_seen.wait(2))
             self.assertTrue(result)
             self.assertIn('完成', job['events'][-1]['message'])

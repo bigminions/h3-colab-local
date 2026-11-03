@@ -18,18 +18,14 @@ test('completed duration freezes at the final event, even after a reload', () =>
   assert.equal(snapshot(task).elapsed,70000);
   assert.equal(snapshot(task).running,false);
 });
-test('legacy clock records continue across midnight and keep the final log line', () => {
-  const task = job({status:'done',events:[{time:'23:59:40',message:'开始'},
-    {time:'00:01:10',message:'准备完成\n视频已保存'}]});
+test('timestamps keep durations accurate across midnight', () => {
+  const task = job({status:'done',events:[{timestamp:(start + 10000) / 1000,message:'开始'},
+    {timestamp:(start + 100000) / 1000,message:'准备完成\n视频已保存'}]});
   const result = snapshot(task);
   assert.equal(result.elapsed,100000);
   assert.equal(result.message,'视频已保存');
 });
-test('same-second legacy events do not turn into an extra day', () => {
-  const task = job({created:start / 1000 + .5,status:'done',events:[{time:'23:59:30',message:'开始'},
-    {time:'23:59:30',message:'失败'}]});
-  assert.equal(snapshot(task).elapsed,0);
-});
+
 test('selecting an earlier batch result still shows the current batch runtime', () => {
   const first = job({batch_id:'batch',status:'done',events:[{timestamp:(start + 20000) / 1000,message:'第一条已保存'}]});
   const second = job({id:'second',batch_id:'batch',created:(start + 1) / 1000,message:'正在生成第二条'});

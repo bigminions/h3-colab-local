@@ -1,4 +1,4 @@
-# 开发与公开源码范围
+# LStudio 开发与公开源码范围
 
 ## 应提交的文件
 
@@ -6,10 +6,11 @@
 | --- | --- |
 | 文档和依赖 | `README.md`、`CONTRIBUTING.md`、`.gitignore`、`requirements.txt`、`requirements-cached.txt` |
 | 启动 | `start.cmd`、`launch.py`、`app.py` |
-| 远程生成与提示词 | `remote_h3.py`、`h3_prompt.py`、`h3_prompt_worker.py` |
-| 角色与历史 | `characters.py`、`history_recycle.py` |
+| 应用模块 (`apps/`) | `apps/h3/`（`application.py`、`remote_h3.py`、`characters.py`、`h3_prompt.py`、`h3_prompt_worker.py`）及根目录兼容垫片 |
+| 历史与回收 | `history_recycle.py` |
 | Drive | `drive_storage.py`、`drive_cache.py`、`drive_cache_remote.py`、`mounted_drive_cache.py`、`native_drive_mount.py`、`seed_drive_cache.py` |
 | 运行时恢复 | `runtime_recovery.py`、`runtime_watchdog.py` |
+| 工作台架构 | `workspace_runtime.py`、`compute_colab.py`、`asset_library.py`、`ARCHITECTURE.md` |
 | 网页 | `studio.html`、`static/` 下的 CSS 和 JavaScript |
 | 本地回归验证 | `tests/`：离线 Python 和前端回归测试 |
 
@@ -17,7 +18,7 @@
 
 ## 用户数据与生成文件
 
-- `.private/`、`videos/`、`log/`、虚拟环境和 `.env`：用户资料、凭据、会话、本机配置和产物。
+- `.private/`、`materials/`、`log/`、虚拟环境和 `.env`：用户资料、凭据、会话、本机配置和产物。
 - 新的运行产物应写入对应的用户数据目录，避免散落在源码根目录。
 - 历史截图、音视频、转录、实测报告、一次性诊断脚本和上游研究副本已移除，不为这些旧文件保留忽略规则。
 

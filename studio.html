@@ -2,35 +2,81 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
+  <meta name="application-name" content="LStudio">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>H3 Studio · 视频工作台</title>
+  <title>LStudio · LocalStudio</title>
+  <link rel="stylesheet" href="/static/daisyui.min.css">
+  <script src="/static/tailwind.js"></script>
+  <script>
+    tailwind.config = { corePlugins: { preflight: false } };
+  </script>
   <link rel="stylesheet" href="/static/workbench.css">
+  <link rel="stylesheet" href="/static/workspace.css">
+  <link rel="stylesheet" href="/static/daisy-theme.css">
   <script src="/static/completion-sound.js" defer></script>
   <script src="/static/job-progress.js" defer></script>
   <script src="/static/workbench.js" defer></script>
+  <script src="/static/workspace.js" defer></script>
   <script src="/static/characters.js" defer></script>
 </head>
 <body>
-  <header>
-    <div class="topbar">
-      <div class="brand"><div class="logo" aria-hidden="true">H3</div><h1>H3 Studio</h1></div>
-      <nav class="page-tabs" role="tablist" aria-label="工作台页面">
-        <button id="toolPageTab" class="page-tab" type="button" role="tab" aria-selected="true" aria-controls="toolPage">创作</button>
-        <button id="manageCharacters" class="page-tab" type="button" role="tab" aria-selected="false" aria-controls="characterPage" tabindex="-1">角色管理</button>
-        <button id="connectionPageTab" class="page-tab" type="button" role="tab" aria-selected="false" aria-controls="connectionPage" tabindex="-1">设置</button>
-      </nav>
-      <div class="balance-panel">
-        <button id="balanceToggle" class="balance-trigger" type="button" aria-label="查看剩余单元详情" aria-expanded="false" aria-controls="balanceDropdown"><span id="balance">—</span><span class="unit">单元</span></button>
-        <section id="balanceDropdown" class="balance-dropdown" aria-label="计算单元完整信息">
-          <div class="balance-heading"><span>计算单元详情</span><button id="balanceRefresh" class="balance-refresh" type="button" aria-label="刷新剩余计算单元" title="刷新剩余计算单元" disabled>↻</button></div>
-          <div id="connection" class="connection">正在连接本地服务…</div>
-          <dl><div><dt>剩余单元</dt><dd id="balanceFull">—</dd></div><div><dt id="estimateLabel">G4 预估可用</dt><dd id="remainingTime" class="balance-time">—</dd></div></dl>
-          <div id="estimateDetail" class="balance-detail"><span id="estimateBasis"></span></div><div id="balanceInfo" class="balance-info">读取中…</div>
-          <p class="balance-note">累计 GPU 使用时长，包含模型准备时间。</p>
-        </section>
-      </div>
+  <aside id="workspaceSidebar" class="workspace-sidebar" aria-label="工作台导航">
+    <div class="sidebar-brand">
+      <span class="workspace-mark" aria-hidden="true">L</span>
+      <span class="sidebar-label">LStudio</span>
+      <button id="sidebarToggle" class="sidebar-toggle" type="button" aria-label="收起应用列表" aria-expanded="true" aria-controls="sidebarNavigation">‹</button>
     </div>
-  </header>
+    <nav id="sidebarNavigation" class="sidebar-navigation" aria-label="应用与工作区">
+      <div class="sidebar-group-label sidebar-label">应用</div>
+      <div id="applicationList">
+        <button id="h3AppTab" class="workspace-nav active" type="button" aria-current="page" title="H3 视频">
+          <span class="nav-icon app-icon" aria-hidden="true">H3</span>
+          <span class="sidebar-label nav-copy"><strong>H3 视频</strong><small>视频创作与角色</small></span>
+        </button>
+      </div>
+      <div class="sidebar-divider"></div>
+      <button id="libraryPageTab" class="workspace-nav" type="button" title="素材库">
+        <span class="nav-icon" aria-hidden="true">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="7" x="3" y="3" rx="1.5"/><rect width="7" height="7" x="14" y="3" rx="1.5"/><rect width="7" height="7" x="14" y="14" rx="1.5"/><rect width="7" height="7" x="3" y="14" rx="1.5"/></svg>
+        </span>
+        <span class="sidebar-label">素材库</span>
+      </button>
+      <div class="sidebar-spacer"></div>
+      <button id="computePageTab" class="sidebar-compute-card" type="button" aria-label="打开算力配置" aria-controls="computePage" title="打开算力配置">
+        <span class="compute-card-icon" aria-hidden="true">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="16" height="16" x="4" y="4" rx="3"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/><path d="M2 9h2"/><path d="M20 15h2"/><path d="M20 9h2"/><path d="M9 2v2"/><path d="M9 20v2"/></svg>
+          <span id="computeIndicator" class="compute-dot"></span>
+        </span>
+        <span class="compute-card-content sidebar-label">
+          <span class="compute-card-heading">
+            <strong>算力</strong>
+            <span class="compute-arrow" aria-hidden="true"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7"/><path d="M7 7h10v10"/></svg></span>
+          </span>
+          <span id="computeProviderName" class="compute-card-provider">Google Colab</span>
+          <span id="computeGpuName" class="compute-card-gpu">G4 · 按需启动</span>
+          <span id="computeSummary" class="compute-card-state">未连接账号</span>
+          <span class="compute-card-metrics">
+            <span><small>剩余单元</small><strong id="balance">—</strong></span>
+            <span><small>预估可用</small><strong id="computeRemaining">—</strong></span>
+          </span>
+        </span>
+      </button>
+      <button id="connectionPageTab" class="workspace-nav" type="button" title="设置">
+        <span class="nav-icon" aria-hidden="true">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+        </span>
+        <span class="sidebar-label">设置</span>
+      </button>
+    </nav>
+    <div class="sidebar-foot sidebar-label">本地管理 · 云端运行</div>
+  </aside>
+  <div class="workspace-main">
+  <section id="applicationHeading" class="application-heading" aria-label="H3 视频应用">
+    <nav class="page-tabs" role="tablist" aria-label="H3 应用页面">
+      <button id="toolPageTab" class="page-tab" type="button" role="tab" aria-selected="true" aria-controls="toolPage">创作</button>
+      <button id="manageCharacters" class="page-tab" type="button" role="tab" aria-selected="false" aria-controls="characterPage" tabindex="-1">角色管理</button>
+    </nav>
+  </section>
   <main id="toolPage" role="tabpanel" aria-labelledby="toolPageTab">
     <section class="creation-section" aria-label="视频生成设置">
       <div class="card creation-card">
@@ -41,7 +87,7 @@
         <form id="generateForm">
           <div class="creation-input">
           <div id="imagePanel" class="hidden">
-            <div class="reference-heading"><div class="reference-title"><span class="field-label">参考素材</span><button id="referenceHelpToggle" class="reference-help-toggle" type="button" aria-label="图片使用说明" aria-expanded="false" aria-controls="referenceHelp">?</button></div><span id="referenceCount" class="hint">0 / 9 张</span></div>
+            <div class="reference-heading"><button id="chooseLibraryImage" class="library-pick-button" type="button">从素材库选择</button><div class="reference-title"><span class="field-label">参考素材</span><button id="referenceHelpToggle" class="reference-help-toggle" type="button" aria-label="图片使用说明" aria-expanded="false" aria-controls="referenceHelp">?</button></div><span id="referenceCount" class="hint">0 / 9 张</span></div>
             <div id="referenceHelp" class="reference-help hidden">
               <p class="hint reference-guide">每张图片可设为参考图、首帧或尾帧。首帧与尾帧各限一张，可同时搭配其他参考图。</p>
               <p class="hint reference-guide">在下方输入 @ 选择图片，直接描述参考用途，例如“@图片1 作为场景参考，@图片2 作为人物参考，生成一段人物在雨中行走的视频”。首尾帧按视频比例居中裁剪；参考图保留原有比例。</p>
@@ -95,21 +141,9 @@
             <label class="check"><input id="peopleEnhancement" type="checkbox">人物写实增强</label>
             <div class="row"><div><label class="field-label" for="seed">随机种子</label><input id="seed" type="number" min="0" max="9007199254740991" placeholder="自动随机"></div><div><label class="field-label" for="strength">人物写实强度</label><input id="strength" type="number" value="0.7" min="0" max="1" step="0.1" disabled></div></div>
             <div class="hint">留空自动随机；多条生成时，仅第一条使用指定种子。</div>
-            <label class="field-label" for="gpu">Colab 显卡</label><select id="gpu"><option value="G4" selected>G4 · Blackwell · 96GB</option><option value="A100">A100 · 需要 80GB</option></select>
-            <label class="field-label" for="endpoint">Colab 运行时</label><select id="endpoint"><option value="">自动申请 G4 · 按需连接</option></select><div class="hint">可复用同型号运行时；切换型号前请释放 GPU。</div>
-          <fieldset class="release-config"><legend>显卡释放</legend>
-            <label class="release-choice"><input type="radio" name="releaseMode" value="always">整批生成后释放</label>
-            <div class="release-option"><label class="release-choice"><input type="radio" name="releaseMode" value="idle" checked>闲置后释放 <span>默认</span></label><div id="idleReleaseOptions" class="idle-release-options"><label for="idleMinutes">闲置</label><input id="idleMinutes" type="number" min="1" max="120" step="1" value="10"><span>分钟</span></div></div>
-            <div class="release-option"><label class="release-choice"><input type="radio" name="releaseMode" value="manual">手动释放</label><button id="manualRelease" class="secondary hidden" type="button">检查并释放</button></div>
-            <div id="releaseHelp" class="hint">整批完成后计时，保留期间仍计费。请保持本地后台运行。</div>
-            <div id="releaseStatus" class="release-status" role="status">读取释放配置…</div>
-          </fieldset>
-          <div class="completion-sound-row" style="display:flex;align-items:center;justify-content:space-between;margin-top:16px;">
-            <label class="check completion-sound" style="margin-top:0;" title="任务完成或异常失败时播放提示音与桌面通知；点击页面可启用声音与通知。"><input id="completionSound" type="checkbox" checked>完成与失败提示音 / 桌面通知</label>
-            <button type="button" id="testNotification" class="preset-reset" style="margin-top:0;padding:2px 8px;font-size:11px;" title="测试提示音并请求浏览器桌面通知权限">试听与测试通知</button>
-          </div>
             <button type="button" id="resetAdvanced" class="preset-reset">恢复推荐设置</button>
           </div></details>
+          <div id="error" class="error hidden" role="alert"></div>
           <button class="primary" id="generate" type="submit" disabled>请先连接 Google</button>
           </div>
         </form>
@@ -144,29 +178,6 @@
       </div>
     </section>
 
-    <div id="legacyCompatibility" hidden>
-      <span id="resultState"></span>
-      <div id="message"></div>
-      <div id="error"></div>
-      <div id="batchProgress"></div>
-      <div id="variants"></div>
-      <video id="player"></video>
-      <div id="videoPlaceholder"></div>
-      <div id="videoLabel"></div>
-      <a id="download"></a>
-      <button id="reuseSettings"></button>
-      <button id="retry"></button>
-      <button id="resubmit"></button>
-      <button id="cancelJob"></button>
-      <span id="runIndicator"></span>
-      <span id="runElapsed"></span>
-      <span id="latestLog"></span>
-      <pre id="logs"></pre>
-      <span id="historyCount">0</span>
-      <button id="toggleHistory"></button>
-      <div id="history"></div>
-      <div class="history-card"><div class="history-clear-group"></div></div>
-    </div>
   </main>
   <main id="characterPage" class="character-page hidden" role="tabpanel" aria-labelledby="manageCharacters" hidden>
   <section id="characterManager" class="card character-manager" aria-labelledby="characterManagerTitle">
@@ -196,10 +207,28 @@
     </form>
   </section>
   </main>
-  <main id="connectionPage" class="connection-page hidden" role="tabpanel" aria-labelledby="connectionPageTab" hidden>
+  <main id="computePage" class="compute-page workspace-page hidden" aria-labelledby="computePageTitle" hidden>
+    <div class="workspace-page-heading"><div><span class="application-kicker">COMPUTE</span><h2 id="computePageTitle">算力</h2><p>选择运行应用的云端算力，管理连接与释放。</p></div></div>
+    <section class="provider-grid" id="providerList" aria-label="算力提供商"></section>
+    <div class="compute-columns"><section class="card compute-config"><h3 class="card-title">运行配置</h3><p class="hint">当前应用：H3 视频。开始生成时才申请显卡。</p>            <label class="field-label" for="gpu">Colab 显卡</label><select id="gpu"><option value="G4" selected>G4 · Blackwell · 96GB</option><option value="A100">A100 · 需要 80GB</option></select>
+            <label class="field-label" for="endpoint">Colab 运行时</label><select id="endpoint"><option value="">自动申请 G4 · 按需连接</option></select><div class="hint">可复用同型号运行时；切换型号前请释放 GPU。</div>
+          <fieldset class="release-config"><legend>显卡释放</legend>
+            <label class="release-choice"><input type="radio" name="releaseMode" value="always">整批生成后释放</label>
+            <div class="release-option"><label class="release-choice"><input type="radio" name="releaseMode" value="idle" checked>闲置后释放 <span>默认</span></label><div id="idleReleaseOptions" class="idle-release-options"><label for="idleMinutes">闲置</label><input id="idleMinutes" type="number" min="1" max="120" step="1" value="10"><span>分钟</span></div></div>
+            <div class="release-option"><label class="release-choice"><input type="radio" name="releaseMode" value="manual">手动释放</label><button id="manualRelease" class="secondary hidden" type="button">检查并释放</button></div>
+            <div id="releaseHelp" class="hint">整批完成后计时，保留期间仍计费。请保持本地后台运行。</div>
+            <div id="releaseStatus" class="release-status" role="status">读取释放配置…</div>
+          </fieldset>
+</section><section class="card compute-account">        <section id="balanceDropdown" class="balance-dropdown" aria-label="计算单元完整信息">
+          <div class="balance-heading"><span>计算单元详情</span><button id="balanceRefresh" class="balance-refresh" type="button" aria-label="刷新剩余计算单元" title="刷新剩余计算单元" disabled>↻</button></div>
+          <div id="connection" class="connection">正在连接本地服务…</div>
+          <dl><div><dt>剩余单元</dt><dd id="balanceFull">—</dd></div><div><dt id="estimateLabel">G4 预估可用</dt><dd id="remainingTime" class="balance-time">—</dd></div></dl>
+          <div id="estimateDetail" class="balance-detail"><span id="estimateBasis"></span></div><div id="balanceInfo" class="balance-info">读取中…</div>
+          <p class="balance-note">累计 GPU 使用时长，包含模型准备时间。</p>
+        </section></section></div>
     <div id="connectionError" class="error hidden" role="alert"></div>
     <section class="connection-group" aria-labelledby="connectionsTitle">
-      <h2 id="connectionsTitle" class="config-section-title">账号与连接</h2>
+      <h2 id="connectionsTitle" class="config-section-title">连接与缓存</h2>
       <div class="connection-modules">
     <section class="card connection-card" aria-labelledby="googleConnectionTitle">
       <h3 id="googleConnectionTitle" class="card-title">Google 账号</h3>
@@ -216,13 +245,22 @@
     </section>
       </div>
     </section>
+  </main>
+  <main id="connectionPage" class="settings-page workspace-page hidden" aria-labelledby="settingsPageTitle" hidden>
+    <div class="workspace-page-heading"><div><span class="application-kicker">PREFERENCES</span><h2 id="settingsPageTitle">设置</h2><p>管理工作台偏好与本地接口。</p></div></div>
+    <section class="card"><h3 class="card-title">通知</h3>          <div class="completion-sound-row" style="display:flex;align-items:center;justify-content:space-between;margin-top:16px;">
+            <label class="check completion-sound" style="margin-top:0;" title="任务完成或异常失败时播放提示音与桌面通知；点击页面可启用声音与通知。"><input id="completionSound" type="checkbox" checked>完成与失败提示音 / 桌面通知</label>
+            <button type="button" id="testNotification" class="preset-reset" style="margin-top:0;padding:2px 8px;font-size:11px;" title="测试提示音并请求浏览器桌面通知权限">试听与测试通知</button>
+          </div>
+</section>
+    <section class="card"><h3 class="card-title">素材存储</h3><p class="muted">所有应用共用本机素材库，按应用与用途分目录保存。</p><p id="settingsLibraryPath" class="library-path"></p><button id="settingsOpenLibrary" class="secondary" type="button">查看素材库</button></section>
       <div class="card api-card"><details><summary>开发者 · 本地 API</summary><p class="muted">http://127.0.0.1:7865<br>POST /api/jobs 提交 · GET /api/jobs/{id} 查询<br>GET /api/account 查询剩余单元<br>POST /api/jobs/{id}/retry 取回 · POST /api/release 释放</p><label class="field-label" for="apiKey">本地 API Key（不要外传）</label><input id="apiKey" type="password" readonly value="__API_KEY__"><div class="actions"><button id="showKey" type="button" class="secondary">显示 / 隐藏 Key</button></div><pre>import requests, time
 base = "http://127.0.0.1:7865"
-headers = {"X-H3-Key": "粘贴本机 Key"}
+headers = {"X-LStudio-Key": "粘贴本机 Key"}
 r = requests.post(base + "/api/jobs", headers=headers,
     json={"prompt": "A cat walking in a garden, birdsong.",
           "aspect_ratio": "9:16",
-          "people": False, "auto_release": True})
+          "people": False, "release_mode": "always"})
 r.raise_for_status()
 job_id = r.json()["id"]
 while True:
@@ -234,6 +272,15 @@ while True:
         break
     time.sleep(5)</pre></details></div>
   </main>
+  <main id="libraryPage" class="library-page workspace-page hidden" aria-labelledby="libraryPageTitle" hidden>
+    <div class="workspace-page-heading"><div><span class="application-kicker">LIBRARY</span><h2 id="libraryPageTitle">素材库</h2><p>按应用和用途整理图片、视频与音频，随时跨应用引用。</p></div><div class="actions"><button id="libraryRefresh" class="secondary" type="button">刷新</button><label class="secondary asset-import" for="libraryFiles">＋ 导入素材</label><input id="libraryFiles" class="file-input" type="file" multiple accept="image/png,image/jpeg,image/webp,video/mp4,audio/*" aria-label="导入素材"></div></div>
+    <div class="library-scope-filters"><label for="libraryAppFilter">应用<select id="libraryAppFilter"><option value="">全部应用</option></select></label><label for="libraryPurposeFilter">用途<select id="libraryPurposeFilter"><option value="">全部用途</option></select></label><p id="libraryImportTarget" class="hint">导入位置：共享素材 / 导入素材</p></div>
+    <div class="library-toolbar"><nav class="library-folders" aria-label="素材文件夹"><button type="button" data-kind="" aria-pressed="true">全部素材</button><button type="button" data-kind="images" aria-pressed="false">图片</button><button type="button" data-kind="videos" aria-pressed="false">视频</button><button type="button" data-kind="audios" aria-pressed="false">音频</button></nav><input id="librarySearch" type="search" placeholder="搜索素材名称…" aria-label="搜索素材"></div>
+    <div id="libraryFeedback" class="hint" role="status"></div><div id="libraryError" class="error hidden" role="alert"></div>
+    <div id="libraryGrid" class="library-grid"></div><p id="libraryPath" class="library-path"></p>
+  </main>
+  </div>
+  <dialog id="assetViewer" class="asset-viewer" aria-labelledby="assetViewerTitle"><div class="asset-viewer-heading"><h2 id="assetViewerTitle">素材预览</h2><button id="closeAssetViewer" type="button" class="secondary">关闭</button></div><div id="assetViewerContent"></div><div id="assetViewerActions" class="actions"></div></dialog>
   <dialog id="characterImageViewer" class="character-image-viewer" aria-labelledby="characterImageTitle">
     <div class="character-image-toolbar">
       <h2 id="characterImageTitle">角色参考图</h2>

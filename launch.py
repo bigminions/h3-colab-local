@@ -16,7 +16,7 @@ def running():
     try:
         with urlopen(URL, timeout=1) as response:
             html = response.read().decode('utf-8')
-            if 'H3 Studio' not in html and 'H3 视频工作台' not in html:
+            if '<meta name="application-name" content="LStudio">' not in html:
                 raise RuntimeError('Port 7865 is occupied by another application.')
             return True
     except URLError:
