@@ -30,11 +30,11 @@ if sys.platform == 'win32':
     except Exception:
         pass
 
-from fastapi import FastAPI, Form, HTTPException, Request, UploadFile
+from fastapi import Body, FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Union
 from PIL import Image, UnidentifiedImageError
 from apps.h3 import DIMENSIONS, reference_prompt
 from apps.h3 import CharacterLibrary, CharacterProfile, AudioAsset, AUDIO_ID, inspect_audio, validate_audio_asset
@@ -44,6 +44,7 @@ from history_recycle import HistoryRecycle
 from asset_library import AssetLibrary
 from compute_colab import ColabProvider
 from apps.h3 import H3Application, H3JobConfig
+from apps.qwen_image import QwenImageApplication, QwenImageJobConfig
 from workspace_runtime import ApplicationRegistry, ProviderRegistry, ProviderSpec
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import AuthorizedSession
@@ -124,9 +125,10 @@ def load_secret(path):
     return protect(path.read_bytes(), decrypt=True)
 
 
-applications = ApplicationRegistry([H3Application()])
+COLAB_GPUS = ('G4', 'A100', 'H100', 'L4', 'T4')
+applications = ApplicationRegistry([H3Application(), QwenImageApplication()])
 providers = ProviderRegistry([
-    ProviderSpec('colab', 'Google Colab', True, '使用自己的 Colab 计算单元，按需连接运行时', ('G4', 'A100')),
+    ProviderSpec('colab', 'Google Colab', True, '使用自己的 Colab 计算单元，按需连接运行时', COLAB_GPUS),
     ProviderSpec('runpod', 'RunPod', False, '按需 GPU 实例'),
     ProviderSpec('modal', 'Modal', False, '按任务启动 GPU 容器'),
 ])
@@ -259,6 +261,26 @@ def g4_estimate(data):
             'remaining_minutes': math.floor(hours * 60) if hours is not None else None}
 
 
+def generic_gpu_estimate(data, gpu):
+    if gpu == 'A100':
+        return a100_estimate(data)
+    if gpu == 'G4':
+        return g4_estimate(data)
+    rate = data.get(f'{gpu.lower()}_rate_hourly')
+    if not valid_number(rate) or rate <= 0:
+        return {'gpu': gpu, 'rate_hourly': None, 'rate_source': 'unknown', 'hours': None, 'remaining_minutes': None}
+    consumption = data.get('consumption', {})
+    live = (len(data.get('runtimes', [])) == 1 and data['runtimes'][0].get('gpu') == gpu
+            and consumption.get('assignments_count') == 1 and consumption.get('consumption_rate_hourly') == rate and not data.get('stale'))
+    balance = consumption.get('paid_compute_units_balance')
+    hours = balance / rate if valid_number(balance) and balance >= 0 else None
+    if hours is not None and not math.isfinite(hours * 60):
+        hours = None
+    return {'gpu': gpu, 'rate_hourly': rate, 'rate_source': 'live' if live else 'last_observed',
+            'rate_updated_at': data.get(f'{gpu.lower()}_rate_updated_at'), 'hours': hours,
+            'remaining_minutes': math.floor(hours * 60) if hours is not None else None}
+
+
 class AccountCache:
     """Caches read-only account data so polling tabs do not flood Google."""
     def __init__(self, provider, path, now=time.time):
@@ -284,14 +306,21 @@ class AccountCache:
                     for key in ('a100_rate_hourly', 'a100_rate_updated_at', 'g4_rate_hourly', 'g4_rate_updated_at'):
                         if key in previous:
                             self.data[key] = previous[key]
+                    for key, val in previous.items():
+                        if (key.endswith('_rate_hourly') or key.endswith('_rate_updated_at')) and key not in self.data:
+                            self.data[key] = val
                     rate = single_a100_rate(self.data)
                     if rate is not None:
                         self.data.update(a100_rate_hourly=rate, a100_rate_updated_at=self.data['updated_at'])
                     consumption = self.data['consumption']
-                    g4_rate = consumption.get('consumption_rate_hourly')
-                    if (len(self.data['runtimes']) == 1 and self.data['runtimes'][0].get('gpu') == 'G4'
-                            and consumption.get('assignments_count') == 1 and valid_number(g4_rate) and g4_rate > 0):
-                        self.data.update(g4_rate_hourly=g4_rate, g4_rate_updated_at=self.data['updated_at'])
+                    runtimes = self.data.get('runtimes', [])
+                    active_rate = consumption.get('consumption_rate_hourly')
+                    if (len(runtimes) == 1 and consumption.get('assignments_count') == 1
+                            and valid_number(active_rate) and active_rate > 0):
+                        gpu_name = runtimes[0].get('gpu')
+                        if gpu_name:
+                            self.data[f'{gpu_name.lower()}_rate_hourly'] = active_rate
+                            self.data[f'{gpu_name.lower()}_rate_updated_at'] = self.data['updated_at']
                     self.error = None
                     atomic(self.path, json.dumps(self.data))
                 except Exception as exc:
@@ -299,8 +328,15 @@ class AccountCache:
             if self.data is None:
                 raise RuntimeError(self.error or '账户余额暂时不可用，请稍后刷新。')
             result = {**self.data, 'stale': bool(self.error) or now - self.data['updated_at'] > 90, 'error': self.error}
+            all_gpus = set(COLAB_GPUS)
+            for r in result.get('runtimes', []):
+                if r.get('gpu'):
+                    all_gpus.add(r['gpu'])
+            estimates = {g: generic_gpu_estimate(result, g) for g in all_gpus}
+            estimates['A100'] = a100_estimate(result)
+            estimates['G4'] = g4_estimate(result)
             return {**result, 'a100_estimate': a100_estimate(result),
-                    'gpu_estimates': {'A100': a100_estimate(result), 'G4': g4_estimate(result)}}
+                    'gpu_estimates': estimates}
 
 
 class Controller:
@@ -318,7 +354,7 @@ class Controller:
         self.download_threads = {}
         self.download_semaphore = threading.Semaphore(2)
         self.open_video_directory = lambda folder: os.startfile(str(folder))
-        self.history_recycle = HistoryRecycle(directory / 'recovered-works',videos,self.drive_storage)
+        self.history_recycle = HistoryRecycle(directory / 'recovered-works',videos,self.drive_storage,asset_library=asset_library)
         self.now = now
         self.release_policy = ReleasePolicy()
         self.release_revision = 0
@@ -519,15 +555,22 @@ class Controller:
             if job.get('drive'):
                 self.drive_storage.confirm_stored(job['drive'])
             if job.get('file'):
-                path = self.videos / job['file']
+                app_id = job.get('config', {}).get('app_id', 'h3')
+                application = applications.get(app_id)
+                output_folder = self.output_folder_for(application) if application else self.videos
+                path = output_folder / job['file']
                 if not path.is_file():
-                    raise HTTPException(409, '本机视频文件已丢失，运行时保留，请先取回结果。')
+                    is_video = self.app_output_kind(application) == 'video' if application else True
+                    noun = '视频' if is_video else '图片'
+                    raise HTTPException(409, f'本机{noun}文件已丢失，运行时保留，请先取回结果。')
                 result = job.get('remote_result')
                 if result:
                     with path.open('rb') as handle:
                         digest = hashlib.file_digest(handle, 'sha256').hexdigest()
                     if path.stat().st_size != result['size'] or digest != result['sha256']:
-                        raise HTTPException(409, '本机视频校验失败，运行时保留，请先取回结果。')
+                        is_video = self.app_output_kind(application) == 'video' if application else True
+                        noun = '视频' if is_video else '图片'
+                        raise HTTPException(409, f'本机{noun}校验失败，运行时保留，请先取回结果。')
 
     def release_online_gpu(self, endpoint):
         with self.lock:
@@ -831,8 +874,24 @@ class Controller:
         for t in threads:
             t.join(timeout=timeout)
 
+    def app_output_kind(self, application):
+        return getattr(getattr(application, 'spec', None), 'output_kind', getattr(application, 'output_kind', 'video'))
+
+    def output_folder_for(self, application):
+        if self.app_output_kind(application) == 'image':
+            folder = asset_library.folder('images', application.spec.id, 'outputs')
+        else:
+            folder = self.videos
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
     def open_history_folder(self, job_id):
         try:
+            job = self.jobs.get(job_id)
+            if job and job.get('config', {}).get('app_id') == 'qwen_image_2_1':
+                folder = asset_library.folder('images', 'qwen_image_2_1', 'outputs')
+                self.open_video_directory(folder)
+                return {'ok': True}
             res = self.load_history_video(job_id)
             target = self.history_recycle.video(res.get('file') or job_id + '.mp4')
             self.open_video_directory(target.parent)
@@ -840,9 +899,9 @@ class Controller:
         except HTTPException:
             raise
         except Exception as exc:
-            raise HTTPException(400,'无法打开视频文件夹：' + safe_error(exc)) from None
+            raise HTTPException(400,'无法打开文件夹：' + safe_error(exc)) from None
 
-    def recycle_history(self, job_id=None):
+    def recycle_history(self, job_id=None, app_id=None):
         with self.lock:
             if job_id is not None:
                 job = self.jobs.get(job_id)
@@ -862,7 +921,9 @@ class Controller:
                         targets = [job] if not job.get('history_hidden') else []
             else:
                 targets = [job for job in self.jobs.values() if not job.get('history_hidden')
-                           and (job.get('file') or job.get('drive')) and self.history_clearable(job)]
+                           and (job.get('file') or job.get('drive'))
+                           and (app_id is None or (job.get('config') or {}).get('app_id', 'h3') == app_id)
+                           and self.history_clearable(job)]
             self.recycling.update(job['id'] for job in targets)
         completed = []; errors = []
         try:
@@ -1115,23 +1176,27 @@ class Controller:
                 self.connected_operation(job,lambda:self.transport.execute(job))
             self.check_cancelled(job)
             result = job['remote_result']
-            if self.drive_storage.enabled:
+            output_kind = self.app_output_kind(application)
+            if self.drive_storage.enabled and output_kind == 'video':
                 self.event(job, 'download', '从 Colab 上传到 Drive，校验后自动下载到本机')
                 job['drive'] = self.connected_operation(job,lambda:self.transport.upload_drive(job), '上传视频到 Drive')
                 self.save_jobs()
             else:
-                self.event(job, 'download', '下载 MP4 到本机并校验 SHA-256')
-                partial = self.videos / (job['id'] + '.partial')
-                self.connected_operation(job,lambda:self.transport.download(result, partial), '下载视频到本机')
+                download_desc = '下载图片到本机并校验 SHA-256' if output_kind == 'image' else '下载 MP4 到本机并校验 SHA-256'
+                self.event(job, 'download', download_desc)
+                output_folder = self.output_folder_for(application)
+                partial = output_folder / (job['id'] + '.partial')
+                op_name = '下载图片到本机' if output_kind == 'image' else '下载视频到本机'
+                self.connected_operation(job,lambda:self.transport.download(result, partial), op_name)
                 with partial.open('rb') as handle:
                     digest = hashlib.file_digest(handle, 'sha256').hexdigest()
                 if partial.stat().st_size != result['size'] or digest != result['sha256']:
                     raise RuntimeError('下载校验未通过，Colab 运行时已保留，请重试取回。')
-                target = self.videos / (job['id'] + application.output_extension)
+                target = output_folder / (job['id'] + application.output_extension)
                 partial.replace(target)
                 job['file'] = target.name
-            job['metadata'] = {k: result[k] for k in application.metadata_fields}
-            saved = '视频已上传 Drive 并校验' if job.get('drive') else '视频已保存到本机'
+            job['metadata'] = {k: result[k] for k in application.metadata_fields if k in result}
+            saved = '图片已保存到本机' if output_kind == 'image' else ('视频已上传 Drive 并校验' if job.get('drive') else '视频已保存到本机')
             self.event(job, 'saved', saved)
             self.check_cancelled(job)
             last_in_batch = bool(in_batch and job.get('drive') and job.get('batch_index') == job.get('batch_total')
@@ -1221,9 +1286,39 @@ class Controller:
         active = self.jobs.get(self.active) or {}
         siblings = sorted((j for j in self.jobs.values() if job.get('batch_id') and j.get('batch_id') == job['batch_id']),
                           key=lambda j: j['batch_index'])
-        local_file = bool(job.get('file') and (self.videos / job['file']).is_file() and not job.get('local_download_error'))
+        app_id = config.get('app_id', 'h3')
+        application = applications.get(app_id)
+        is_video = self.app_output_kind(application) == 'video'
+        output_folder = self.videos if is_video else asset_library.folder('images', app_id, 'outputs')
+        local_file = bool(job.get('file') and (output_folder / job['file']).is_file() and not job.get('local_download_error'))
         is_preparing = bool(job['id'] in self.preparing_videos or job['id'] in self.download_threads)
-        return {'app_id': config.get('app_id', 'h3'), 'provider_id': config.get('provider_id', 'colab'),
+        creation_keys = (
+            'title', 'prompt', 'negative_prompt', 'prompt_processing', 'performance', 'encoder',
+            'quantized_model', 'quantized_vae', 'veda', 'aspect_ratio', 'resolution',
+            'duration', 'mode', 'seed', 'people', 'strength', 'references',
+            'generation_type', 'reference_size', 'characters',
+            'model_file', 'steps', 'cfg', 'denoise',
+        )
+        creation_data = {**{k: config[k] for k in creation_keys if k in config}, 'count': job.get('batch_total', 1), 'gpu': config.get('gpu', 'A100')}
+        if 'references' in creation_data and isinstance(creation_data['references'], list):
+            enriched_refs = []
+            for r in creation_data['references']:
+                ref_dict = dict(r) if isinstance(r, dict) else r.model_dump()
+                img_id = ref_dict.get('image_id')
+                if img_id and not ref_dict.get('name'):
+                    try:
+                        resolved_path = asset_library.resolve(img_id)
+                        meta_file = resolved_path.with_suffix(resolved_path.suffix + '.json')
+                        if meta_file.is_file():
+                            meta = json.loads(meta_file.read_text(encoding='utf-8'))
+                            if meta.get('name'):
+                                ref_dict['name'] = meta['name']
+                    except Exception:
+                        pass
+                enriched_refs.append(ref_dict)
+            creation_data['references'] = enriched_refs
+
+        return {'app_id': app_id, 'provider_id': config.get('provider_id', 'colab'),
                 **{k: v for k, v in job.items() if k not in ('remote_result', 'config', 'safe_release', 'drive_upload_id')},
                 'local_file': local_file,
                 'is_preparing': is_preparing,
@@ -1231,7 +1326,7 @@ class Controller:
                 'batch': {'id': job['batch_id'], 'total': job['batch_total'],
                           'completed': sum(bool(j.get('file') and not j.get('local_download_error')) for j in siblings),
                           'finished': bool(job.get('batch_complete')), 'ids': [j['id'] for j in siblings]} if siblings else None,
-                'creation': {**{k: config[k] for k in ('title', 'prompt', 'prompt_processing', 'performance', 'encoder', 'quantized_model', 'quantized_vae', 'veda', 'aspect_ratio', 'resolution', 'duration', 'mode', 'seed', 'people', 'strength', 'references', 'generation_type', 'reference_size', 'characters') if k in config}, 'count': job.get('batch_total', 1), 'gpu': config.get('gpu', 'A100')},
+                'creation': creation_data,
                 'can_clear_history': self.history_clearable(job),
                 'drive': self.public_drive(job.get('drive')),
                 'recovery_kind': 'download' if job.get('drive') else 'retrieve' if job.get('remote_result') else 'resume',
@@ -1259,6 +1354,10 @@ async def lifespan(application):
 
 app = FastAPI(title='LStudio · LocalStudio', docs_url=None, redoc_url=None, lifespan=lifespan)
 app.mount('/static', StaticFiles(directory=BASE / 'static'), name='static')
+for app_inst in applications:
+    app_web = getattr(app_inst, 'web_dir', None) or (BASE / 'apps' / app_inst.spec.id / 'web')
+    if app_web and app_web.is_dir():
+        app.mount(f'/apps/{app_inst.spec.id}/web', StaticFiles(directory=app_web), name=f'{app_inst.spec.id}_web')
 oauth_flow = None
 
 
@@ -1274,13 +1373,37 @@ async def local_only(request: Request, call_next):
     response.headers['Cache-Control'] = 'no-store'
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['Referrer-Policy'] = 'no-referrer'
-    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
     return response
+
+
+def render_studio_html():
+    raw_html = (BASE / 'studio.html').read_text(encoding='utf-8')
+    app_styles, app_scripts, app_contents = [], [], []
+    for app_inst in applications:
+        app_id = app_inst.spec.id
+        app_web = getattr(app_inst, 'web_dir', None) or (BASE / 'apps' / app_id / 'web')
+        if not app_web or not app_web.is_dir():
+            continue
+        content_path = app_web / 'content.html'
+        if content_path.is_file():
+            app_contents.append(content_path.read_text(encoding='utf-8'))
+        for css in sorted(app_web.glob('*.css')):
+            app_styles.append(f'<link rel="stylesheet" href="/apps/{app_id}/web/{css.name}">')
+        js_files = sorted(app_web.glob('*.js'), key=lambda p: (0 if 'workbench' in p.name else 1, p.name))
+        for js in js_files:
+            app_scripts.append(f'<script src="/apps/{app_id}/web/{js.name}" defer></script>')
+
+    output = raw_html.replace('__API_KEY__', API_KEY)
+    output = output.replace('<!-- APP_STYLES -->', '\n  '.join(app_styles))
+    output = output.replace('<!-- APP_SCRIPTS -->', '\n  '.join(app_scripts))
+    output = output.replace('<!-- APP_CONTENTS -->', '\n\n  '.join(app_contents))
+    return output
 
 
 @app.get('/', response_class=HTMLResponse)
 def index():
-    return (BASE / 'studio.html').read_text(encoding='utf-8').replace('__API_KEY__', API_KEY)
+    return render_studio_html()
 
 
 @app.get('/api/status')
@@ -1403,11 +1526,12 @@ def clear_history():
 
 class HistoryRecycleRequest(BaseModel):
     job_id: str | None = Field(default=None,min_length=1,max_length=128)
+    app_id: str | None = Field(default=None,max_length=64)
 
 
 @app.post('/api/history/recycle')
 def recycle_history(payload: HistoryRecycleRequest):
-    return controller.recycle_history(payload.job_id)
+    return controller.recycle_history(payload.job_id, app_id=payload.app_id)
 
 
 @app.delete('/api/history/{job_id}')
@@ -1593,8 +1717,11 @@ def authorize_finish(payload: AuthCode):
         raise HTTPException(400, '授权未完成，授权码可能过期；请重新打开 Google 授权链接。') from None
 
 
+JobConfig = Annotated[Union[H3JobConfig, QwenImageJobConfig], Body(...)]
+
+
 @app.post('/api/jobs', status_code=202)
-def create_job(config: H3JobConfig):
+def create_job(config: JobConfig):
     if not (PRIVATE / 'google-token.dat').exists():
         raise HTTPException(401, '请先授权 Google 账号')
     if not config.prompt.strip():
@@ -1622,7 +1749,7 @@ def create_job(config: H3JobConfig):
     for existing in controller.jobs.values():
         if existing.get('status') in ('queued', 'running') and (now_ts - existing.get('created', 0)) < 3.0:
             cfg = existing.get('config') or {}
-            if cfg.get('prompt') == config.prompt and cfg.get('count', 1) == config.count and cfg.get('seed') == config.seed and cfg.get('aspect_ratio') == config.aspect_ratio:
+            if cfg.get('app_id', 'h3') == app_id and cfg.get('prompt') == config.prompt and cfg.get('count', 1) == config.count and cfg.get('seed') == config.seed and cfg.get('aspect_ratio') == getattr(config, 'aspect_ratio', None):
                 batch_id = existing.get('batch_id')
                 return {'id': existing['id'], 'ids': [j['id'] for j in controller.jobs.values() if j.get('batch_id') == batch_id] if batch_id else [existing['id']]}
     job_id = controller.start(config)
@@ -1677,8 +1804,8 @@ def release(config: ReleaseConfig):
 
 
 @app.post('/api/images')
-async def upload_image(file: UploadFile, purpose: Annotated[str, Form()] = 'references'):
-    return await save_image(file, 'h3', purpose)
+async def upload_image(file: UploadFile, purpose: Annotated[str, Form()] = 'references', app_id: Annotated[str, Form()] = 'h3'):
+    return await save_image(file, app_id, purpose)
 
 
 async def save_image(file, app_id, purpose):
@@ -1784,7 +1911,7 @@ def audio_preview(audio_id: str):
 
 @app.get('/api/images/{image_id}')
 def image_preview(image_id: str):
-    if not re.fullmatch(r'[0-9a-f]{32}\.(png|jpg|webp)', image_id):
+    if not re.fullmatch(r'[0-9a-f]{32}\.(png|jpg|jpeg|webp)', image_id, re.IGNORECASE):
         raise HTTPException(404, '图片不存在')
     try:
         path = asset_library.resolve(image_id)
@@ -1792,7 +1919,8 @@ def image_preview(image_id: str):
         raise HTTPException(404, '图片不存在') from None
     if not path.is_file():
         raise HTTPException(404, '图片不存在')
-    media = {'png': 'image/png', 'jpg': 'image/jpeg', 'webp': 'image/webp'}[path.suffix[1:]]
+    ext = path.suffix.lower().lstrip('.')
+    media = {'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'webp': 'image/webp'}.get(ext, 'application/octet-stream')
     return FileResponse(path, media_type=media)
 
 
@@ -1820,6 +1948,21 @@ def video(filename: str, request: Request, download: bool = False):
     if not path.is_file():
         raise HTTPException(404)
     return FileResponse(path, media_type='video/mp4', filename=filename if download else None)
+
+
+@app.get('/image/{filename}')
+def image_file(filename: str, download: bool = False):
+    if not re.fullmatch(r'[0-9a-f]{32}\.(png|jpg|jpeg|webp)', filename, re.IGNORECASE):
+        raise HTTPException(404, '图片不存在')
+    try:
+        path = asset_library.resolve(filename)
+    except (ValueError, FileNotFoundError):
+        raise HTTPException(404, '图片不存在') from None
+    if not path.is_file():
+        raise HTTPException(404, '图片不存在')
+    ext = path.suffix.lower().lstrip('.')
+    media = {'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'webp': 'image/webp'}.get(ext, 'application/octet-stream')
+    return FileResponse(path, media_type=media, filename=filename if download else None)
 
 
 if __name__ == '__main__':

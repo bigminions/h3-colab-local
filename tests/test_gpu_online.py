@@ -72,6 +72,25 @@ class TransportGpuTests(unittest.TestCase):
         self.client.unassign.assert_called_once_with('other')
 
 
+    def test_dynamic_gpu_discovery_and_connect_shapes(self):
+        self.control.session = None
+        self.control.jobs = {}
+        h100_assign = assignment('h100-node', app.Accelerator.H100)
+        self.client.list_assignments.return_value = [h100_assign]
+        cfg = app.H3JobConfig(prompt='test prompt', gpu='H100', endpoint='h100-node')
+        session = self.transport.connect(cfg)
+        self.assertEqual(session.accelerator, 'H100')
+        self.assertEqual(session.machine_shape, 'HIGH_RAM')
+
+        self.control.session = None
+        l4_assign = assignment('l4-node', app.Accelerator.L4)
+        self.client.list_assignments.return_value = [l4_assign]
+        cfg_l4 = app.H3JobConfig(prompt='test prompt', gpu='L4', endpoint='l4-node')
+        session_l4 = self.transport.connect(cfg_l4)
+        self.assertEqual(session_l4.accelerator, 'L4')
+        self.assertEqual(session_l4.machine_shape, 'STANDARD')
+
+
 class ControllerGpuTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory(dir=app.PRIVATE)

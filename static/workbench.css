@@ -1142,3 +1142,715 @@ main.hidden,
     min-height: auto !important;
   }
 }
+
+
+/* Scoped stepper rules for H3 tool page to guarantee perfect fit without clipping */
+#toolPage .generation-fields .count-stepper {
+  display: grid !important;
+  grid-template-columns: 20px minmax(0, 1fr) 20px !important;
+  align-items: stretch !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  height: 38px !important;
+  overflow: hidden !important;
+  border: 1px solid #3a4252 !important;
+  border-radius: 8px !important;
+  background: #11151d !important;
+  box-sizing: border-box !important;
+}
+
+#toolPage .generation-fields .count-stepper button {
+  width: 20px !important;
+  min-width: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+  color: #c8d8f4 !important;
+  font-size: 16px !important;
+  cursor: pointer !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+
+#toolPage .generation-fields .count-stepper button:hover:not(:disabled) {
+  background: #2b3547 !important;
+}
+
+#toolPage .generation-fields .count-stepper button:disabled {
+  color: #556277 !important;
+  cursor: default !important;
+}
+
+#toolPage .generation-fields .count-stepper #count {
+  width: 100% !important;
+  min-width: 0 !important;
+  height: 100% !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+  text-align: center !important;
+  font-size: 12.5px !important;
+  font-weight: 600 !important;
+  color: #edf1f8 !important;
+  appearance: textfield !important;
+  box-shadow: none !important;
+}
+
+#toolPage .generation-fields .count-stepper #count::-webkit-inner-spin-button,
+#toolPage .generation-fields .count-stepper #count::-webkit-outer-spin-button {
+  appearance: none !important;
+  margin: 0 !important;
+}
+
+
+/* H3 Modern Segmented Ratio Bar */
+#toolPage .h3-format-field {
+  border: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  min-width: 0 !important;
+}
+
+#toolPage .h3-format-header {
+  display: flex !important;
+  align-items: baseline !important;
+  justify-content: space-between !important;
+  gap: 10px !important;
+  margin-bottom: 8px !important;
+}
+
+#toolPage .h3-format-header .field-label {
+  margin: 0 !important;
+  font-size: 13px !important;
+  font-weight: 550 !important;
+  color: #c6cfdf !important;
+}
+
+#toolPage .h3-format-note {
+  font-size: 11.5px !important;
+  color: #8da1bf !important;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important;
+  white-space: nowrap !important;
+  margin: 0 !important;
+}
+
+#toolPage .h3-ratio-bar {
+  display: flex !important;
+  align-items: stretch !important;
+  background: #141822 !important;
+  border: 1px solid #2a3344 !important;
+  border-radius: 12px !important;
+  padding: 4px !important;
+  gap: 2px !important;
+  width: 100% !important;
+  box-sizing: border-box !important;
+}
+
+#toolPage .h3-ratio-item {
+  flex: 1 1 0 !important;
+  min-width: 0 !important;
+  position: relative !important;
+  cursor: pointer !important;
+  user-select: none !important;
+  margin: 0 !important;
+}
+
+#toolPage .h3-ratio-item input {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+#toolPage .h3-ratio-box {
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+  justify-content: center !important;
+  height: 50px !important;
+  padding: 4px 2px !important;
+  border-radius: 9px !important;
+  background: transparent !important;
+  color: #8b99ae !important;
+  transition: all 0.15s ease !important;
+  box-sizing: border-box !important;
+}
+
+#toolPage .h3-icon-stage {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 22px !important;
+  height: 20px !important;
+}
+
+#toolPage .h3-ratio-rect {
+  display: block !important;
+  border: 1.6px solid currentColor !important;
+  border-radius: 3px !important;
+  box-sizing: border-box !important;
+  transition: all 0.15s ease !important;
+}
+
+/* Specific aspect ratio dimensions */
+#toolPage .h3-ratio-rect.r-16-9 { width: 19px; height: 11px; }
+#toolPage .h3-ratio-rect.r-9-16 { width: 11px; height: 19px; }
+#toolPage .h3-ratio-rect.r-1-1  { width: 14px; height: 14px; }
+#toolPage .h3-ratio-rect.r-4-5  { width: 13px; height: 16px; }
+#toolPage .h3-ratio-rect.r-3-4  { width: 12px; height: 16px; }
+
+#toolPage .h3-ratio-label {
+  font-size: 11px !important;
+  line-height: 1 !important;
+  margin-top: 5px !important;
+  font-weight: 500 !important;
+  letter-spacing: 0.2px !important;
+  white-space: nowrap !important;
+}
+
+/* Hover state */
+#toolPage .h3-ratio-item:hover .h3-ratio-box {
+  background: rgba(255, 255, 255, 0.04) !important;
+  color: #c9d6ea !important;
+}
+
+/* Active / Selected state - matches user's screenshot */
+#toolPage .h3-ratio-item input:checked + .h3-ratio-box {
+  background: #343c4e !important;
+  color: #ffffff !important;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3) !important;
+}
+
+#toolPage .h3-ratio-item input:checked + .h3-ratio-box .h3-ratio-rect {
+  border-color: #ffffff !important;
+}
+
+#toolPage .h3-ratio-item input:checked + .h3-ratio-box .h3-ratio-label {
+  color: #ffffff !important;
+  font-weight: 700 !important;
+}
+
+#toolPage .h3-ratio-item input:focus-visible + .h3-ratio-box {
+  outline: 2px solid #8cb7ff !important;
+  outline-offset: 1px !important;
+}
+
+
+/* H3 GPU Card Above Generate Button */
+#toolPage .h3-gpu-card-wrap {
+  margin-top: auto !important;
+  padding-top: 14px !important;
+  margin-bottom: 10px !important;
+}
+
+#toolPage .h3-gpu-card {
+  position: relative !important;
+  display: flex !important;
+  flex-direction: column !important;
+  background: #141824 !important;
+  border: 1px solid #2b3548 !important;
+  border-radius: 10px !important;
+  padding: 9px 12px !important;
+  box-sizing: border-box !important;
+  cursor: pointer !important;
+  transition: all 0.18s ease !important;
+  overflow: hidden !important;
+}
+
+#toolPage .h3-gpu-card:hover {
+  background: #181e2e !important;
+  border-color: #4a5c7d !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25) !important;
+}
+
+#toolPage .h3-gpu-card:has(.h3-gpu-select:focus-visible),
+#toolPage .h3-gpu-card:has(#h3Gpu:focus-visible) {
+  border-color: #8cb7ff !important;
+  box-shadow: 0 0 0 2px rgba(140, 183, 255, 0.25) !important;
+}
+
+#toolPage .h3-gpu-card-header {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  margin-bottom: 4px !important;
+}
+
+#toolPage .h3-gpu-badge {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 5px !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  color: #8da1bf !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.5px !important;
+}
+
+#toolPage .h3-gpu-icon {
+  color: #8cb7ff !important;
+}
+
+#toolPage .h3-gpu-action {
+  font-size: 11.5px !important;
+  font-weight: 500 !important;
+  color: #7b8fae !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 2px !important;
+  transition: color 0.15s ease !important;
+}
+
+#toolPage .h3-gpu-card:hover .h3-gpu-action {
+  color: #cdddfc !important;
+}
+
+#toolPage .h3-gpu-card-body {
+  display: flex !important;
+  align-items: baseline !important;
+  justify-content: space-between !important;
+  gap: 8px !important;
+}
+
+#toolPage .h3-gpu-name {
+  font-size: 13.5px !important;
+  font-weight: 650 !important;
+  color: #f0f4fc !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  letter-spacing: 0.2px !important;
+}
+
+#toolPage .h3-gpu-status {
+  font-size: 11px !important;
+  font-weight: 500 !important;
+  color: #8da1bf !important;
+  white-space: nowrap !important;
+  flex-shrink: 0 !important;
+}
+
+#toolPage .h3-gpu-status.status-online {
+  color: #4ade80 !important;
+  font-weight: 600 !important;
+}
+
+#toolPage .h3-gpu-select,
+#toolPage #h3Gpu {
+  position: absolute !important;
+  top: 0 !important;
+  left: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  opacity: 0 !important;
+  cursor: pointer !important;
+  z-index: 10 !important;
+  border: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  background: transparent !important;
+  box-sizing: border-box !important;
+  -webkit-appearance: none !important;
+  appearance: none !important;
+}
+
+#toolPage .creation-settings > .primary,
+#toolPage #generate {
+  margin-top: 0 !important;
+  width: 100% !important;
+  flex-shrink: 0 !important;
+}
+
+
+/* --- UI Enhancement: Heading, Dropzone, Caret-following Mention, and Modal --- */
+.creation-heading {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: flex-start !important;
+  gap: 16px !important;
+  margin-bottom: 16px !important;
+}
+
+.creation-heading-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.creation-heading-left .card-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.creation-heading-left .tabs {
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
+  margin: 0;
+  background: #10131b;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.creation-heading-left .tab {
+  padding: 6px 12px;
+  flex: none;
+  font-size: 12px;
+  border-radius: 6px;
+}
+
+.character-manage-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 8px;
+  background: #1a2232;
+  border: 1px solid #36445d;
+  color: #d1dff7;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.character-manage-btn:hover {
+  background: #25334d;
+  border-color: #4b6288;
+  color: #fff;
+}
+
+/* Reference Dropzone with Local Upload & Library Picking */
+.reference-drop {
+  border: 1px dashed #3a475f;
+  background: #111722;
+  border-radius: 10px;
+  padding: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  transition: all 0.18s ease;
+  min-height: 120px;
+}
+
+.reference-drop.dragover {
+  border-color: var(--accent);
+  background: #162234;
+}
+
+.reference-drop-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.reference-drop-prompt {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.reference-drop-icon {
+  font-size: 20px;
+  color: #7b93b8;
+}
+
+.reference-drop-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #cddbf0;
+}
+
+.reference-drop-sub {
+  font-size: 11px;
+  color: #72829c;
+}
+
+.reference-drop-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.drop-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 12px;
+  font-size: 12px;
+  border-radius: 6px;
+  background: #1d2636;
+  border: 1px solid #36465f;
+  color: #d1e0f7;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.drop-action-btn:hover {
+  background: #2a374e;
+  border-color: #4b6288;
+  color: #fff;
+}
+
+.drop-action-btn.local {
+  background: #1f2b3e;
+  border-color: #3d5275;
+}
+
+.drop-action-btn.library {
+  background: #232238;
+  border-color: #47406a;
+  color: #e2d9fc;
+}
+
+.drop-action-btn.library:hover {
+  background: #322f52;
+  border-color: #635894;
+  color: #fff;
+}
+
+/* Caret-following Mention Menu */
+#promptPanel {
+  position: relative;
+}
+
+.mention-menu {
+  position: absolute;
+  z-index: 100;
+  min-width: 220px;
+  max-width: 320px;
+  max-height: 250px;
+  overflow-y: auto;
+  border: 1px solid #3c4d68;
+  background: #161e2c;
+  border-radius: 10px;
+  padding: 6px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+}
+
+.mention-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #dbe7fa;
+  padding: 6px 8px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s ease;
+}
+
+.mention-option:hover,
+.mention-option[aria-selected="true"] {
+  background: #27354c;
+}
+
+.mention-thumb-box {
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  overflow: hidden;
+  flex-shrink: 0;
+  background: #0f1520;
+  border: 1px solid #2d3a50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+}
+
+.mention-thumb-box img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.mention-name {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 600;
+  color: #e4ecfc;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mention-tag {
+  flex-shrink: 0;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #212c40;
+  color: #8fa5c8;
+}
+
+/* Character Management Modal */
+/* ==========================================================================
+   Character Management Modal (DaisyUI Integration)
+   ========================================================================== */
+
+#characterPage.modal {
+  background-color: rgba(0, 0, 0, 0.65) !important;
+  backdrop-filter: blur(6px) !important;
+}
+
+#characterPage.modal:not([open]) {
+  pointer-events: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+}
+
+#characterPage.modal[open] {
+  pointer-events: auto !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+  display: grid !important;
+  place-items: center !important;
+}
+
+#characterPage .modal-box {
+  max-width: 66rem !important;
+  width: min(1040px, calc(100vw - 32px)) !important;
+  height: min(720px, calc(100vh - 40px)) !important;
+  max-height: calc(100dvh - 40px) !important;
+  box-sizing: border-box !important;
+}
+
+/* Ensure grid packs items tightly at the top with NO stretching, comfortable card width (~170px - 210px) */
+#characterPage #characterManagerList {
+  display: grid !important;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)) !important;
+  gap: 14px !important;
+  align-content: flex-start !important;
+  align-items: start !important;
+  padding: 4px 2px 16px !important;
+  overflow-y: auto !important;
+  flex: 1 1 0% !important;
+}
+
+/* DaisyUI Card inside modal: strictly compact, 0 padding around image */
+#characterPage .card {
+  display: flex !important;
+  flex-direction: column !important;
+  height: auto !important;
+  min-height: 0 !important;
+  max-height: none !important;
+  align-self: start !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border-radius: 12px !important;
+  overflow: hidden !important;
+  cursor: pointer !important;
+  user-select: none !important;
+  background: var(--fallback-b1, #191e24) !important;
+  border: 1px solid var(--fallback-b3, rgba(255, 255, 255, 0.08)) !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25) !important;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease !important;
+}
+
+#characterPage .card:hover {
+  transform: translateY(-2px) !important;
+  border-color: rgba(99, 102, 241, 0.45) !important;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4) !important;
+}
+
+#characterPage .card figure {
+  display: block !important;
+  position: relative !important;
+  width: 100% !important;
+  aspect-ratio: 4 / 5 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border-radius: 0 !important;
+  overflow: hidden !important;
+  background: var(--fallback-b3, #1e242e) !important;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06) !important;
+}
+
+#characterPage .card figure img {
+  position: absolute !important;
+  inset: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: cover !important;
+  object-position: center 15% !important;
+  display: block !important;
+  transition: transform 0.25s ease !important;
+}
+
+#characterPage .card:hover figure img {
+  transform: scale(1.04) !important;
+}
+
+#characterPage .card-body {
+  flex: 0 0 auto !important;
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 8px !important;
+  padding: 8px 10px 8px 12px !important;
+  background: var(--fallback-b1, #191e24) !important;
+  box-sizing: border-box !important;
+}
+
+#characterPage .card-body h3 {
+  font-size: 13.5px !important;
+  font-weight: 600 !important;
+  color: var(--fallback-bc, #e2e8f0) !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  flex: 1 1 auto !important;
+  min-width: 0 !important;
+  margin: 0 !important;
+  line-height: 1.3 !important;
+  transition: color 0.15s ease !important;
+}
+
+#characterPage .card:hover .card-body h3 {
+  color: var(--fallback-p, #6366f1) !important;
+}
+
+#characterPage .character-asset {
+  position: relative !important;
+  background: var(--fallback-b1, oklch(var(--b1) / var(--tw-bg-opacity, 1))) !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  border-radius: 8px !important;
+  padding: 6px !important;
+  box-sizing: border-box !important;
+}
+
+#characterPage .character-image-preview {
+  display: block !important;
+  width: 100% !important;
+  aspect-ratio: 1 !important;
+  overflow: hidden !important;
+  border-radius: 6px !important;
+  border: 0 !important;
+  padding: 0 !important;
+  cursor: zoom-in !important;
+  background: #0f1520 !important;
+}
+
+#characterPage .character-image-preview img {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: cover !important;
+}

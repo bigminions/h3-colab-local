@@ -1,34 +1,355 @@
 'use strict';
 (() => {
-  let page = 'tool', h3Page = 'tool', kind = '', scopes = [], assets = [], loading = false, importing = false;
+  const $ = window.$ || (id => document.getElementById(id));
+  window.$ = $;
+  const HASH_MAP = {
+    '#h3': 'tool',
+    '#tool': 'tool',
+    '#qwen_image': 'qwen_image',
+    '#qi': 'qwen_image',
+    '#library': 'library',
+    '#compute': 'compute',
+    '#settings': 'connections',
+    '#connections': 'connections'
+  };
+
+  let activeApp = 'tool';
+  try {
+    const savedApp = localStorage.getItem('lstudio-active-app');
+    if (savedApp === 'tool' || savedApp === 'qwen_image') activeApp = savedApp;
+  } catch (_) {}
+
+  let savedKind = '';
+  try { savedKind = localStorage.getItem('lstudio-library-kind') || ''; } catch (_) {}
+
+  let page = 'tool', h3Page = 'tool', kind = savedKind, scopes = [], assets = [], loading = false, importing = false;
   let libraryRequest = 0, librarySignature = '', previewRequest = 0, previewURL = null;
   const thumbnails = new Map();
-  const panels = {tool:'toolPage', characters:'characterPage', library:'libraryPage', compute:'computePage', connections:'connectionPage'};
-  const labels = {tool:['应用','H3 视频'], characters:['应用','H3 视频'], library:['工作区','素材库'], compute:['工作区','算力'], connections:['工作区','设置']};
+  const panels = {tool:'toolPage', characters:'characterPage', qwen_image:'qwenImagePage', library:'libraryPage', compute:'computePage', connections:'connectionPage'};
+  const labels = {tool:['应用','H3 视频'], characters:['应用','H3 视频'], qwen_image:['应用','Qwen-Image-2.1'], library:['工作区','素材库'], compute:['工作区','算力'], connections:['工作区','设置']};
   const kinds = {images:'图片', videos:'视频', audios:'音频'};
 
+
+  let assetPickerResolve = null;
+  const assetPickerSelected = new Set();
+  let assetPickerOptions = {};
+  const pickerThumbnails = new Map();
+
+  function clearPickerThumbnails() {
+    for (const pending of pickerThumbnails.values()) pending.then(url => URL.revokeObjectURL(url), () => {});
+    pickerThumbnails.clear();
+  }
+
+  function pickerThumbnail(asset, img) {
+    if (!pickerThumbnails.has(asset.id)) pickerThumbnails.set(asset.id, blobURL(asset));
+    pickerThumbnails.get(asset.id).then(url => { if (img.isConnected) img.src = url; }, () => { img.alt = '读取失败'; });
+  }
+
+  function updatePickerSelectionStatus() {
+    const count = assetPickerSelected.size;
+    const max = assetPickerOptions.maxCount || 9;
+    const statusEl = $('assetPickerSelectedCount');
+    if (statusEl) statusEl.textContent = `已选 ${count} 项`;
+    const limitEl = $('assetPickerLimitHint');
+    if (limitEl) {
+      if (max > 1) {
+        limitEl.textContent = `最多可选 ${max} 张图片`;
+      } else {
+        limitEl.textContent = '单选模式，点击选中后确认';
+      }
+    }
+    const confirmBtn = $('confirmAssetPicker');
+    if (confirmBtn) confirmBtn.disabled = count === 0;
+  }
+
+  function updatePickerScopeFilters() {
+    const appSelect = $('assetPickerAppFilter');
+    const purposeSelect = $('assetPickerPurposeFilter');
+    if (!appSelect || !purposeSelect) return;
+    const currentApp = appSelect.value;
+    const currentPurpose = purposeSelect.value;
+
+    const apps = new Map(scopes.map(scope => [scope.app_id, scope.app_name]));
+    for (const asset of assets) if (!apps.has(asset.app_id)) apps.set(asset.app_id, asset.app_id);
+    appSelect.replaceChildren(new Option('全部应用', ''));
+    for (const [id, name] of apps) appSelect.add(new Option(name, id));
+    if (apps.has(currentApp)) appSelect.value = currentApp;
+
+    const purposes = new Map(scopes.filter(scope => !currentApp || scope.app_id === currentApp).map(scope => [scope.purpose, scope.purpose_name]));
+    purposeSelect.replaceChildren(new Option('全部用途', ''));
+    for (const [id, name] of purposes) purposeSelect.add(new Option(name, id));
+    if (purposes.has(currentPurpose)) purposeSelect.value = currentPurpose;
+  }
+
+  function renderPickerGrid() {
+    const grid = $('assetPickerGrid');
+    if (!grid) return;
+    grid.replaceChildren();
+    clearPickerThumbnails();
+
+    const search = ($('assetPickerSearch')?.value || '').trim().toLowerCase();
+    const app = $('assetPickerAppFilter')?.value || '';
+    const purpose = $('assetPickerPurposeFilter')?.value || '';
+    const targetKind = assetPickerOptions.kind || 'images';
+    const alreadyIds = new Set(assetPickerOptions.alreadySelectedIds || []);
+
+    const filtered = assets.filter(asset => {
+      if (asset.kind !== targetKind) return false;
+      if (app && asset.app_id !== app) return false;
+      if (purpose && asset.purpose !== purpose) return false;
+      if (search && !asset.name.toLowerCase().includes(search)) return false;
+      return true;
+    });
+
+    if (!filtered.length) {
+      const empty = document.createElement('div');
+      empty.className = 'asset-picker-empty';
+      empty.textContent = search ? '没有找到匹配的素材' : '当前筛选下没有可用素材';
+      grid.append(empty);
+      return;
+    }
+
+    for (const asset of filtered) {
+      const isAlready = alreadyIds.has(asset.id);
+      const isSelected = assetPickerSelected.has(asset.id);
+
+      const card = document.createElement('div');
+      card.className = 'asset-picker-card' + (isSelected ? ' selected' : '') + (isAlready ? ' in-use' : '');
+      card.setAttribute('role', 'option');
+      card.setAttribute('aria-selected', String(isSelected));
+      card.title = isAlready ? `${asset.name} (已在参考图中)` : asset.name;
+
+      const preview = document.createElement('div');
+      preview.className = 'asset-picker-thumb';
+      const img = document.createElement('img');
+      img.alt = asset.name;
+      img.loading = 'lazy';
+      preview.append(img);
+      queueMicrotask(() => pickerThumbnail(asset, img));
+
+      const check = document.createElement('span');
+      check.className = 'asset-picker-check';
+      check.textContent = isSelected ? '✓' : '';
+      preview.append(check);
+
+      if (isAlready) {
+        const badge = document.createElement('span');
+        badge.className = 'asset-picker-badge';
+        badge.textContent = '已选';
+        preview.append(badge);
+      }
+
+      const meta = document.createElement('div');
+      meta.className = 'asset-picker-meta';
+      const name = document.createElement('span');
+      name.className = 'asset-picker-name';
+      name.textContent = asset.name;
+      const info = document.createElement('span');
+      info.className = 'asset-picker-size';
+      info.textContent = sizeLabel(asset.size);
+      meta.append(name, info);
+
+      card.append(preview, meta);
+
+      if (!isAlready) {
+        card.onclick = () => {
+          const max = assetPickerOptions.maxCount || 9;
+          if (max === 1) {
+            assetPickerSelected.clear();
+            assetPickerSelected.add(asset.id);
+          } else {
+            if (assetPickerSelected.has(asset.id)) {
+              assetPickerSelected.delete(asset.id);
+            } else {
+              if (assetPickerSelected.size >= max) {
+                const err = $('assetPickerError');
+                if (err) {
+                  err.textContent = `最多只能选择 ${max} 张图片`;
+                  err.classList.remove('hidden');
+                  setTimeout(() => err.classList.add('hidden'), 2500);
+                }
+                return;
+              }
+              assetPickerSelected.add(asset.id);
+            }
+          }
+          grid.querySelectorAll('.asset-picker-card').forEach(c => {
+            const id = c.dataset.assetId;
+            const sel = assetPickerSelected.has(id);
+            c.classList.toggle('selected', sel);
+            c.setAttribute('aria-selected', String(sel));
+            const chk = c.querySelector('.asset-picker-check');
+            if (chk) chk.textContent = sel ? '✓' : '';
+          });
+          updatePickerSelectionStatus();
+        };
+
+        card.ondblclick = () => {
+          assetPickerSelected.clear();
+          assetPickerSelected.add(asset.id);
+          confirmPicker();
+        };
+      }
+
+      card.dataset.assetId = asset.id;
+      grid.append(card);
+    }
+  }
+
+  function confirmPicker() {
+    const chosen = assets.filter(a => assetPickerSelected.has(a.id));
+    const resolve = assetPickerResolve;
+    assetPickerResolve = null;
+    closePicker();
+    if (resolve) resolve(chosen);
+  }
+
+  function closePicker() {
+    clearPickerThumbnails();
+    if ($('assetPickerDialog')?.open) {
+      $('assetPickerDialog').close();
+    }
+    if (assetPickerResolve) {
+      assetPickerResolve(null);
+      assetPickerResolve = null;
+    }
+  }
+
+  async function openAssetPicker(options = {}) {
+    if (!assets.length && !loading) {
+      await loadLibrary();
+    }
+    return new Promise((resolve) => {
+      assetPickerResolve = resolve;
+      assetPickerOptions = {
+        kind: 'images',
+        maxCount: 9,
+        alreadySelectedIds: [],
+        title: '从素材库选择图片',
+        ...options
+      };
+      assetPickerSelected.clear();
+      if ($('assetPickerTitle')) $('assetPickerTitle').textContent = assetPickerOptions.title || '从素材库选择素材';
+      if ($('assetPickerSearch')) $('assetPickerSearch').value = '';
+      if ($('assetPickerError')) {
+        $('assetPickerError').classList.add('hidden');
+        $('assetPickerError').textContent = '';
+      }
+
+      updatePickerScopeFilters();
+      renderPickerGrid();
+      updatePickerSelectionStatus();
+
+      const dialog = $('assetPickerDialog');
+      if (dialog && !dialog.open) {
+        dialog.showModal();
+      }
+    });
+  }
+
+  function updateComputeAppInfo() {
+    const isQI = activeApp === 'qwen_image';
+    const appName = isQI ? 'Qwen-Image-2.1' : 'H3 视频';
+    const appGpuVal = isQI
+      ? ($('qiGpu')?.value || localStorage.getItem('lstudio-qi-gpu') || 'T4')
+      : ($('h3Gpu')?.value || localStorage.getItem('lstudio-h3-gpu') || 'G4');
+    const nameEl = $('computeCurrentAppName');
+    if (nameEl) nameEl.textContent = appName;
+    const gpuSelect = $('gpu');
+    if (gpuSelect && appGpuVal && [...gpuSelect.options].some(o => o.value === appGpuVal)) {
+      gpuSelect.value = appGpuVal;
+    }
+    updateBalance();
+  }
+
   function show(next) {
+    if (next === 'characters') {
+      const charModal = $('characterPage');
+      if (charModal) {
+        if (!charModal.open) charModal.showModal();
+        return;
+      }
+    }
     if (!panels[next]) return;
     page = next;
-    const appVisible = next === 'tool' || next === 'characters';
-    if (appVisible) h3Page = next;
+    const isH3 = next === 'tool';
+    const isQwenImage = next === 'qwen_image';
+    const appVisible = isH3 || isQwenImage;
+    if (isH3) {
+      h3Page = 'tool';
+      activeApp = 'tool';
+      try { localStorage.setItem('lstudio-active-app', 'tool'); } catch (_) {}
+    } else if (isQwenImage) {
+      activeApp = 'qwen_image';
+      try { localStorage.setItem('lstudio-active-app', 'qwen_image'); } catch (_) {}
+    }
+    try { localStorage.setItem('lstudio-active-page', next); } catch (_) {}
+    try {
+      const hashName = next === 'tool' ? 'h3' : next === 'connections' ? 'settings' : next;
+      if (window.location.hash !== '#' + hashName) {
+        history.replaceState(null, '', '#' + hashName);
+      }
+    } catch (_) {}
+
+    delete document.documentElement.dataset.initialPage;
+
     for (const [name, id] of Object.entries(panels)) {
-      $(id).hidden = name !== next;
-      $(id).classList.toggle('hidden', name !== next);
+      if (name === 'characters') continue;
+      const el = $(id);
+      if (el) {
+        el.hidden = name !== next;
+        el.classList.toggle('hidden', name !== next);
+        el.style.display = name === next ? '' : 'none';
+      }
     }
     // Pause media hidden by page navigation.
     document.querySelectorAll('main[hidden] video, main[hidden] audio').forEach(media => media.pause());
-    $('applicationHeading').hidden = !appVisible;
+    if ($('applicationHeading')) {
+      $('applicationHeading').hidden = true;
+      $('applicationHeading').classList.add('hidden');
+      $('applicationHeading').style.display = 'none';
+    }
+    if ($('h3PageTabs')) {
+      $('h3PageTabs').hidden = !isH3;
+      $('h3PageTabs').classList.toggle('hidden', !isH3);
+      $('h3PageTabs').style.display = isH3 ? '' : 'none';
+    }
+    if ($('qwenImagePageTabs')) {
+      $('qwenImagePageTabs').hidden = !isQwenImage;
+      $('qwenImagePageTabs').classList.toggle('hidden', !isQwenImage);
+      $('qwenImagePageTabs').style.display = isQwenImage ? '' : 'none';
+    }
     if ($('workspaceSection')) $('workspaceSection').textContent = labels[next][0];
     if ($('workspaceTitle')) $('workspaceTitle').textContent = labels[next][1];
-    for (const [id, selected] of [['h3AppTab',appVisible],['libraryPageTab',next === 'library'],['computePageTab',next === 'compute'],['connectionPageTab',next === 'connections']]) {
-      $(id).classList.toggle('active', selected);
-      if (selected) $(id).setAttribute('aria-current','page');
-      else $(id).removeAttribute('aria-current');
+    for (const [id, selected] of [['h3AppTab',isH3],['qwenImageAppTab',isQwenImage],['libraryPageTab',next === 'library'],['computePageTab',next === 'compute'],['connectionPageTab',next === 'connections']]) {
+      const el = $(id);
+      if (el) {
+        el.classList.toggle('active', selected);
+        if (selected) el.setAttribute('aria-current','page');
+        else el.removeAttribute('aria-current');
+      }
     }
-    for (const [id, name] of [['toolPageTab','tool'],['manageCharacters','characters']]) {
-      $(id).setAttribute('aria-selected', String(next === name));
-      $(id).tabIndex = next === name ? 0 : -1;
+    for (const [id, name] of [['toolPageTab','tool'],['manageCharacters','characters'],['qwenImageToolTab','qwen_image']]) {
+      const el = $(id);
+      if (el) {
+        el.setAttribute('aria-selected', String(next === name));
+        el.tabIndex = next === name ? 0 : -1;
+      }
+    }
+    if (next === 'tool' || next === 'characters') {
+      const h3Val = $('h3Gpu')?.value || localStorage.getItem('lstudio-h3-gpu') || 'G4';
+      if ($('gpu') && [...$('gpu').options].some(o => o.value === h3Val)) {
+        $('gpu').value = h3Val;
+      }
+      updateBalance();
+    } else if (next === 'qwen_image') {
+      const qiVal = $('qiGpu')?.value || localStorage.getItem('lstudio-qi-gpu') || 'T4';
+      if ($('gpu') && [...$('gpu').options].some(o => o.value === qiVal)) {
+        $('gpu').value = qiVal;
+      }
+      updateBalance();
+    } else if (next === 'compute') {
+      updateComputeAppInfo();
     }
     if (next === 'library') loadLibrary();
   }
@@ -49,12 +370,15 @@
     }
   }
 
-  function updateBalance(data, failure = null) {
-    const gpu = $('gpu').value;
-    const estimate = data?.gpu_estimates?.[gpu] || (gpu === 'A100' ? data?.a100_estimate : null);
+  let cachedAccountData = null;
+  function updateBalance(data = null, failure = null) {
+    if (data) cachedAccountData = data;
+    const currentData = data || cachedAccountData;
+    const gpu = $('gpu')?.value;
+    const estimate = currentData?.gpu_estimates?.[gpu] || (gpu === 'A100' ? currentData?.a100_estimate : null);
     const minutes = estimate?.remaining_minutes;
     $('computeRemaining').textContent = typeof minutes === 'number' && Number.isFinite(minutes) && minutes >= 0 ? `${Math.floor(minutes / 60)}时${Math.floor(minutes % 60)}分` : '—';
-    $('computePageTab').classList.toggle('stale', !!failure || !!data?.stale);
+    $('computePageTab').classList.toggle('stale', !!failure || !!currentData?.stale);
   }
 
   function scopeName(asset) {
@@ -77,7 +401,9 @@
   }
 
   function updateScopeFilters() {
-    const app = $('libraryAppFilter').value, purpose = $('libraryPurposeFilter').value;
+    let savedApp = '';
+    try { savedApp = localStorage.getItem('lstudio-library-app') || ''; } catch (_) {}
+    const app = $('libraryAppFilter').value || savedApp, purpose = $('libraryPurposeFilter').value;
     const apps = new Map(scopes.map(scope => [scope.app_id,scope.app_name]));
     for (const asset of assets) if (!apps.has(asset.app_id)) apps.set(asset.app_id,asset.app_id);
     $('libraryAppFilter').replaceChildren(new Option('全部应用',''));
@@ -152,7 +478,13 @@
       const actions = document.createElement('div'); actions.className = 'library-asset-actions';
       const view = document.createElement('button'); view.type = 'button'; view.textContent = '预览'; view.onclick = () => openPreview(asset); actions.append(view);
       if (asset.kind === 'images') {
-        const use = document.createElement('button'); use.type = 'button'; use.textContent = '用于 H3'; use.onclick = () => useImage(asset); actions.append(use);
+        if (activeApp === 'qwen_image') {
+          const useQi = document.createElement('button'); useQi.type = 'button'; useQi.textContent = '用于 Qwen-Image'; useQi.onclick = () => useImageForQi(asset); actions.append(useQi);
+          const use = document.createElement('button'); use.type = 'button'; use.textContent = '用于 H3'; use.onclick = () => useImage(asset); actions.append(use);
+        } else {
+          const use = document.createElement('button'); use.type = 'button'; use.textContent = '用于 H3'; use.onclick = () => useImage(asset); actions.append(use);
+          const useQi = document.createElement('button'); useQi.type = 'button'; useQi.textContent = '用于 Qwen-Image'; useQi.onclick = () => useImageForQi(asset); actions.append(useQi);
+        }
       }
       copy.append(title,location,meta,actions); card.append(preview,copy); $('libraryGrid').append(card);
     }
@@ -170,6 +502,20 @@
       renderLibrary();
     } catch (error) { if (request === libraryRequest) libraryError(error.message); }
     finally { if (request === libraryRequest) { loading = false; $('libraryRefresh').disabled = false; } }
+  }
+
+  async function useImageForQi(asset) {
+    libraryError('');
+    try {
+      if (window.QwenImage?.useImage) {
+        await window.QwenImage.useImage(asset);
+        if ($('assetViewer').open) $('assetViewer').close();
+      } else {
+        show('qwen_image');
+      }
+    } catch (error) {
+      libraryError(error.message);
+    }
   }
 
   async function useImage(asset) {
@@ -217,7 +563,13 @@
       const download = document.createElement('button'); download.className = 'secondary'; download.type = 'button'; download.textContent = '下载';
       download.onclick = () => downloadAsset(asset); $('assetViewerActions').append(download);
       if (asset.kind === 'images') {
-        const use = document.createElement('button'); use.className = 'secondary'; use.type = 'button'; use.textContent = '用于 H3 参考图'; use.onclick = () => useImage(asset); $('assetViewerActions').append(use);
+        if (activeApp === 'qwen_image') {
+          const useQi = document.createElement('button'); useQi.className = 'secondary'; useQi.type = 'button'; useQi.textContent = '用于 Qwen-Image 参考图'; useQi.onclick = () => useImageForQi(asset); $('assetViewerActions').append(useQi);
+          const use = document.createElement('button'); use.className = 'secondary'; use.type = 'button'; use.textContent = '用于 H3 参考图'; use.onclick = () => useImage(asset); $('assetViewerActions').append(use);
+        } else {
+          const use = document.createElement('button'); use.className = 'secondary'; use.type = 'button'; use.textContent = '用于 H3 参考图'; use.onclick = () => useImage(asset); $('assetViewerActions').append(use);
+          const useQi = document.createElement('button'); useQi.className = 'secondary'; useQi.type = 'button'; useQi.textContent = '用于 Qwen-Image 参考图'; useQi.onclick = () => useImageForQi(asset); $('assetViewerActions').append(useQi);
+        }
       }
     } catch (error) { if (request === previewRequest) $('assetViewerContent').textContent = error.message; }
   }
@@ -263,23 +615,160 @@
     } catch (error) { $('computeSummary').textContent = '连接失败 · 点击检查'; }
   }
 
-  window.Workspace = {show, updateCompute, updateBalance, get page(){ return page; }};
-  $('h3AppTab').onclick = () => { if (h3Page === 'characters') $('manageCharacters').click(); else show('tool'); };
-  $('toolPageTab').onclick = () => show('tool');
+  const KNOWN_GPU_LABELS = {
+    G4: 'G4 · Blackwell · 96GB',
+    A100: 'A100 · 80GB',
+    H100: 'H100 · Hopper · 80GB',
+    L4: 'L4 · 24GB',
+    T4: 'T4 · 16GB'
+  };
+
+  let lastDiscoveredRuntimes = [];
+
+  function buildGpuOptions(allRuntimes) {
+    if (allRuntimes && allRuntimes.length) lastDiscoveredRuntimes = allRuntimes;
+    const onlineCounts = {};
+    for (const r of (lastDiscoveredRuntimes || [])) {
+      if (r.gpu) onlineCounts[r.gpu] = (onlineCounts[r.gpu] || 0) + 1;
+    }
+    const gpus = ['G4', 'A100', 'H100', 'L4', 'T4'];
+    for (const g of Object.keys(onlineCounts)) {
+      if (!gpus.includes(g)) gpus.push(g);
+    }
+    return gpus.map(g => {
+      const base = KNOWN_GPU_LABELS[g] || `${g} · 远程检测`;
+      const count = onlineCounts[g] || 0;
+      const text = count > 0 ? `${base} (🟢 ${count}台在线)` : base;
+      return new Option(text, g);
+    });
+  }
+
+  function syncGpuSelects(allRuntimes) {
+    if (allRuntimes && allRuntimes.length) lastDiscoveredRuntimes = allRuntimes;
+    const targets = [
+      { id: 'h3Gpu', defaultGpu: 'G4', storageKey: 'lstudio-h3-gpu' },
+      { id: 'qiGpu', defaultGpu: 'T4', storageKey: 'lstudio-qi-gpu' },
+      { id: 'gpu', defaultGpu: 'G4', storageKey: 'lstudio-compute-gpu' }
+    ];
+
+    function updateGpuCardDisplay(selectId, displayId, statusId, defaultDesc) {
+      const select = $(selectId), display = $(displayId), status = $(statusId);
+      if (!select || !display) return;
+      const opt = select.selectedOptions?.[0];
+      const text = (opt ? opt.textContent : select.value) || '';
+      if (text.includes('(🟢')) {
+        const parts = text.split('(🟢');
+        display.textContent = parts[0].trim();
+        if (status) {
+          status.textContent = '🟢 ' + parts[1].replace(')', '').trim();
+          status.classList.remove('status-idle');
+          status.classList.add('status-online');
+        }
+      } else {
+        display.textContent = text.trim();
+        if (status) {
+          status.textContent = defaultDesc || '按需启动';
+          status.classList.remove('status-online');
+          status.classList.add('status-idle');
+        }
+      }
+    }
+
+    for (const target of targets) {
+      const select = $(target.id);
+      if (!select) continue;
+      let saved = null;
+      try { saved = localStorage.getItem(target.storageKey); } catch (_) {}
+      const chosen = select.value || saved || target.defaultGpu;
+      const options = buildGpuOptions(allRuntimes);
+      select.replaceChildren(...options);
+      if ([...select.options].some(o => o.value === chosen)) {
+        select.value = chosen;
+      } else {
+        select.value = target.defaultGpu;
+      }
+      if (target.id === 'h3Gpu') updateGpuCardDisplay('h3Gpu', 'h3GpuDisplay', 'h3GpuStatus', 'Wan 2.1 推荐配置');
+      if (target.id === 'qiGpu') updateGpuCardDisplay('qiGpu', 'qiGpuDisplay', 'qiGpuStatus', '推荐 · 显存友好');
+      if (!select.dataset.syncBound) {
+        select.dataset.syncBound = 'true';
+        select.addEventListener('change', () => {
+          try { localStorage.setItem(target.storageKey, select.value); } catch (_) {}
+          if (target.id === 'h3Gpu') updateGpuCardDisplay('h3Gpu', 'h3GpuDisplay', 'h3GpuStatus', 'Wan 2.1 推荐配置');
+          if (target.id === 'qiGpu') updateGpuCardDisplay('qiGpu', 'qiGpuDisplay', 'qiGpuStatus', '推荐 · 显存友好');
+          if (target.id === 'h3Gpu' || target.id === 'qiGpu') {
+            const computeGpu = $('gpu');
+            if (computeGpu && [...computeGpu.options].some(o => o.value === select.value)) {
+              computeGpu.value = select.value;
+              computeGpu.dispatchEvent(new Event('change'));
+            }
+          }
+          if (target.id === 'gpu') {
+            const isQI = activeApp === 'qwen_image';
+            const targetSelect = $(isQI ? 'qiGpu' : 'h3Gpu');
+            const targetStorage = isQI ? 'lstudio-qi-gpu' : 'lstudio-h3-gpu';
+            try { localStorage.setItem(targetStorage, select.value); } catch (_) {}
+            if (targetSelect && [...targetSelect.options].some(o => o.value === select.value)) {
+              targetSelect.value = select.value;
+              if (isQI) updateGpuCardDisplay('qiGpu', 'qiGpuDisplay', 'qiGpuStatus', '推荐 · 显存友好');
+              else updateGpuCardDisplay('h3Gpu', 'h3GpuDisplay', 'h3GpuStatus', 'Wan 2.1 推荐配置');
+            }
+            updateBalance();
+          }
+        });
+      }
+    }
+  }
+
+  window.Workspace = {
+    show,
+    updateCompute,
+    updateBalance,
+    buildGpuOptions,
+    syncGpuSelects,
+    openAssetPicker,
+    get page(){ return page; },
+    get activeApp(){ return activeApp; }
+  };
+  $('h3AppTab').onclick = () => show('tool');
+  $('qwenImageAppTab').onclick = () => show('qwen_image');
+  if ($('qwenImageToolTab')) $('qwenImageToolTab').onclick = () => show('qwen_image');
+  if ($('toolPageTab')) $('toolPageTab').onclick = () => show('tool');
   $('libraryPageTab').onclick = () => show('library');
   $('computePageTab').onclick = () => show('compute');
   $('connectionPageTab').onclick = () => show('connections');
   $('settingsOpenLibrary').onclick = () => show('library');
-  $('chooseLibraryImage').onclick = () => { kind = 'images'; $('libraryAppFilter').value = ''; $('libraryPurposeFilter').value = ''; show('library'); };
+
+  $('confirmAssetPicker')?.addEventListener('click', confirmPicker);
+  $('cancelAssetPicker')?.addEventListener('click', closePicker);
+  $('closeAssetPicker')?.addEventListener('click', closePicker);
+  $('assetPickerDialog')?.addEventListener('cancel', closePicker);
+  $('assetPickerDialog')?.addEventListener('click', e => {
+    if (e.target === $('assetPickerDialog')) closePicker();
+  });
+  $('assetPickerSearch')?.addEventListener('input', renderPickerGrid);
+  $('assetPickerAppFilter')?.addEventListener('change', () => {
+    updatePickerScopeFilters();
+    renderPickerGrid();
+  });
+  $('assetPickerPurposeFilter')?.addEventListener('change', renderPickerGrid);
   $('libraryRefresh').onclick = loadLibrary;
   $('librarySearch').oninput = renderLibrary;
   $('libraryFiles').onchange = () => importFiles([...$('libraryFiles').files]);
-  $('libraryAppFilter').onchange = () => { $('libraryPurposeFilter').value = ''; updateScopeFilters(); renderLibrary(); };
+  $('libraryAppFilter').onchange = () => {
+    try { localStorage.setItem('lstudio-library-app', $('libraryAppFilter').value); } catch (_) {}
+    $('libraryPurposeFilter').value = '';
+    updateScopeFilters();
+    renderLibrary();
+  };
   $('libraryPurposeFilter').onchange = renderLibrary;
-  for (const button of document.querySelectorAll('[data-kind]')) button.onclick = () => { kind = button.dataset.kind; renderLibrary(); };
+  for (const button of document.querySelectorAll('[data-kind]')) button.onclick = () => {
+    kind = button.dataset.kind;
+    try { localStorage.setItem('lstudio-library-kind', kind); } catch (_) {}
+    renderLibrary();
+  };
   $('closeAssetViewer').onclick = () => $('assetViewer').close();
   $('assetViewer').addEventListener('close', releasePreview);
-  for (const [index,id] of ['toolPageTab','manageCharacters'].entries()) $(id).onkeydown = event => {
+  for (const [index,id] of ['toolPageTab','manageCharacters'].entries()) if ($(id)) $(id).onkeydown = event => {
     if (!['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) return;
     event.preventDefault();
     const target = event.key === 'Home' ? 'toolPageTab' : event.key === 'End' ? 'manageCharacters' : index ? 'toolPageTab' : 'manageCharacters';
@@ -301,5 +790,29 @@
       $('sidebarToggle')?.click();
     }
   });
+  let initialPage = activeApp;
+  try {
+    const hashTarget = HASH_MAP[window.location.hash];
+    const savedPage = localStorage.getItem('lstudio-active-page');
+    if (hashTarget && panels[hashTarget] && hashTarget !== 'characters') {
+      initialPage = hashTarget;
+      if (initialPage === 'tool' || initialPage === 'qwen_image') {
+        activeApp = initialPage;
+        try { localStorage.setItem('lstudio-active-app', activeApp); } catch (_) {}
+      }
+    } else if (savedPage && panels[savedPage] && savedPage !== 'characters') {
+      initialPage = savedPage;
+    }
+  } catch (_) {}
+
+  window.addEventListener('hashchange', () => {
+    const target = HASH_MAP[window.location.hash];
+    if (target && panels[target] && target !== 'characters' && target !== page) {
+      show(target);
+    }
+  });
+
+  syncGpuSelects();
+  show(initialPage);
   initialize();
 })();

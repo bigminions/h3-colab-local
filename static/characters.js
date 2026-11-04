@@ -1,11 +1,24 @@
 'use strict';
 (() => {
+  const $ = window.$ || (id => document.getElementById(id));
   let profiles = [], deletedProfiles = [], ready = false, editing = null, busy = 0, viewing = false, managerBusy = false, matches = [], activeOption = 0;
   const prompt = $('prompt'), menu = $('mentionMenu'), dialog = $('characterDialog');
   const manager = $('characterManager');
   const coverURLs = new Map();
   const imageViewer = $('characterImageViewer');
   let imageView = null;
+  function pageError(message) {
+    if (typeof window.showError === 'function') {
+      window.showError(message);
+    } else {
+      const el = $('error');
+      if (el) {
+        el.textContent = message;
+        el.classList.toggle('hidden', !message);
+      }
+    }
+  }
+
   function closeImageViewer() {
     const state = imageView; imageView = null;
     $('characterImageFull').removeAttribute('src'); $('characterImageFull').hidden = true;
@@ -79,7 +92,12 @@
     }
   }
   function showPage(page) {
-    window.Workspace.show(page);
+    if (page === 'characters') {
+      const modal = $('characterPage');
+      if (modal && !modal.open) modal.showModal();
+    } else {
+      window.Workspace?.show?.(page);
+    }
     closeMenu();
   }
   function closeEditor() {
@@ -141,20 +159,135 @@
     prompt.setRangeText(prefix + '@' + profile.name + ' ',start,end,'end');
     closeMenu(); setMode('image'); prompt.focus(); refreshUse(); saveDraft();
   }
+
+  function getCaretCoordinates(element, position) {
+    const div = document.createElement('div');
+    const style = div.style;
+    const computed = window.getComputedStyle(element);
+
+    style.whiteSpace = 'pre-wrap';
+    style.wordWrap = 'break-word';
+    style.position = 'absolute';
+    style.visibility = 'hidden';
+    style.overflow = 'hidden';
+    style.top = '0';
+    style.left = '-9999px';
+
+    const properties = [
+      'direction', 'boxSizing', 'width', 'height', 'overflowX', 'overflowY',
+      'borderTopWidth', 'borderRightWidth', 'borderBottomWidth', 'borderLeftWidth',
+      'borderStyle', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft',
+      'fontStyle', 'fontVariant', 'fontWeight', 'fontStretch', 'fontSize',
+      'fontSizeAdjust', 'lineHeight', 'fontFamily', 'textAlign', 'textTransform',
+      'textIndent', 'textDecoration', 'letterSpacing', 'wordSpacing', 'tabSize', 'MozTabSize'
+    ];
+    properties.forEach(prop => { style[prop] = computed[prop]; });
+
+    div.textContent = element.value.substring(0, position);
+    const span = document.createElement('span');
+    span.textContent = element.value.substring(position) || '.';
+    div.appendChild(span);
+
+    document.body.appendChild(div);
+    const coordinates = {
+      top: span.offsetTop + parseInt(computed.borderTopWidth || 0),
+      left: span.offsetLeft + parseInt(computed.borderLeftWidth || 0),
+      height: parseInt(computed.lineHeight) || parseInt(computed.fontSize || 14) * 1.5 || 24
+    };
+    document.body.removeChild(div);
+    return coordinates;
+  }
+
+  function positionMentionMenu(startPos) {
+    if (!prompt || !menu) return;
+    const coords = getCaretCoordinates(prompt, startPos);
+    const textareaOffsetTop = prompt.offsetTop;
+    const textareaOffsetLeft = prompt.offsetLeft;
+
+    let top = textareaOffsetTop + coords.top - prompt.scrollTop + coords.height + 4;
+    let left = textareaOffsetLeft + coords.left - prompt.scrollLeft;
+
+    const menuWidth = 240;
+    const maxLeft = prompt.offsetWidth - menuWidth - 8;
+    if (left > maxLeft) left = Math.max(8, maxLeft);
+    if (left < 8) left = 8;
+
+    const menuHeight = 220;
+    if (top + menuHeight > prompt.offsetTop + prompt.offsetHeight && coords.top > menuHeight) {
+      top = textareaOffsetTop + coords.top - prompt.scrollTop - menuHeight - 4;
+    }
+
+    menu.style.position = 'absolute';
+    menu.style.top = `${top}px`;
+    menu.style.left = `${left}px`;
+  }
+
   function renderOptions() {
     menu.replaceChildren();
-    matches.forEach((profile,index) => {
-      const button = document.createElement('button'); button.type = 'button'; button.id = 'mention-option-' + profile.id;
-      button.className = 'mention-option'; button.setAttribute('role','option'); button.setAttribute('aria-selected',String(index === activeOption));
-      const name = document.createElement('strong'); name.textContent = '@' + profile.name;
-      if (profile.url) { const image = document.createElement('img'); image.src = profile.url; image.alt = ''; image.className = 'mention-thumbnail'; button.append(image); }
-      const detail = document.createElement('span'); detail.textContent = profile.kind === 'image' ? profile.detail : `角色 · ${profile.image_ids.length} 张参考图 · ${profile.audios.length} 段声音`;
-      button.append(name,detail); button.onmousedown = event => event.preventDefault(); button.onclick = () => insert(profile,true); menu.append(button);
+    matches.forEach((profile, index) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.id = 'mention-option-' + profile.id;
+      button.className = 'mention-option';
+      button.setAttribute('role', 'option');
+      button.setAttribute('aria-selected', String(index === activeOption));
+
+      const thumb = document.createElement('div');
+      thumb.className = 'mention-thumb-box';
+
+      if (profile.kind === 'image') {
+        if (profile.url) {
+          const img = document.createElement('img');
+          img.src = profile.url;
+          img.alt = profile.name;
+          thumb.append(img);
+        } else {
+          thumb.textContent = '🖼️';
+        }
+      } else {
+        if (profile.image_ids && profile.image_ids[0]) {
+          const img = document.createElement('img');
+          img.alt = profile.name;
+          thumb.append(img);
+          coverURL(profile.image_ids[0]).then(url => {
+            if (img.isConnected) img.src = url;
+          }).catch(() => {
+            thumb.textContent = '👤';
+          });
+        } else {
+          thumb.textContent = '👤';
+        }
+      }
+
+      const name = document.createElement('span');
+      name.className = 'mention-name';
+      name.textContent = '@' + profile.name;
+
+      const tag = document.createElement('span');
+      tag.className = 'mention-tag';
+      tag.textContent = profile.kind === 'image' ? (profile.detail || '参考图') : '角色';
+
+      button.append(thumb, name, tag);
+      button.onmousedown = event => event.preventDefault();
+      button.onclick = () => insert(profile, true);
+      menu.append(button);
     });
-    if (!matches.length) { const hint = document.createElement('div'); hint.className = 'hint'; hint.textContent = '没有匹配的图片或角色，可上传图片或在“角色管理”中添加角色'; menu.append(hint); }
-    menu.classList.remove('hidden'); prompt.setAttribute('aria-expanded','true');
-    if (matches[activeOption]) prompt.setAttribute('aria-activedescendant','mention-option-'+matches[activeOption].id);
+
+    if (!matches.length) {
+      const hint = document.createElement('div');
+      hint.className = 'hint';
+      hint.style.padding = '8px';
+      hint.textContent = '未找到匹配的图片或角色';
+      menu.append(hint);
+    }
+
+    menu.classList.remove('hidden');
+    prompt.setAttribute('aria-expanded', 'true');
+    if (matches[activeOption]) prompt.setAttribute('aria-activedescendant', 'mention-option-' + matches[activeOption].id);
     else prompt.removeAttribute('aria-activedescendant');
+
+    const m = context();
+    if (m) positionMentionMenu(m.start);
   }
   function suggest() {
     const mention = context();
@@ -174,50 +307,123 @@
     const list = [...profiles,...($('showDeletedCharacters').checked ? deletedProfiles : [])].filter(p => [p.name,p.description,p.voice].some(text=>text.toLowerCase().includes(search)));
     $('characterManagerCount').textContent = `${profiles.length} 个角色${$('showDeletedCharacters').checked ? ` · ${deletedProfiles.length} 个已删除` : ''}${search ? ` · 匹配 ${list.length} 个` : ''}`;
     $('characterManagerList').replaceChildren(); $('newCharacter').disabled = managerBusy;
-    if (!list.length) { const hint = document.createElement('p'); hint.className = 'manager-empty'; hint.textContent = search ? '没有匹配的角色，试试其他名称或描述。' : '还没有角色，点击“新建角色”添加参考图与声音。'; $('characterManagerList').append(hint); }
+    if (!list.length) {
+      const hint = document.createElement('div');
+      hint.className = 'col-span-full py-16 flex flex-col items-center justify-center text-center text-base-content/50 gap-2';
+      const icon = document.createElement('div');
+      icon.className = 'text-3xl opacity-40';
+      icon.textContent = search ? '🔍' : '👤';
+      const text = document.createElement('p');
+      text.className = 'text-sm';
+      text.textContent = search ? '没有匹配的角色，试试其他名称或描述。' : '还没有角色，点击右上角“＋ 新建角色”添加参考图与声音。';
+      hint.append(icon, text);
+      $('characterManagerList').append(hint);
+    }
     for (const profile of list) {
-      const card = document.createElement('article'); card.className = 'manager-character';
-      const viewProfile = async () => { try { await openEditor(await api('characters/'+profile.id),true); } catch (e) { managerError(e.message); } };
-      const cover = document.createElement('button'); cover.type = 'button'; cover.className = 'manager-cover';
-      cover.setAttribute('aria-label','查看角色 '+profile.name); cover.disabled = managerBusy; cover.onclick = viewProfile;
-      const fallback = document.createElement('span'); fallback.className = 'manager-cover-fallback';
-      const initial = document.createElement('strong'); initial.textContent = [...profile.name][0] || '角';
-      const coverStatus = document.createElement('span'); coverStatus.textContent = profile.image_ids.length ? '正在读取封面…' : '暂无参考图';
-      fallback.append(initial,coverStatus); cover.append(fallback);
-      if (profile.image_ids[0]) {
-        const image = document.createElement('img'); image.alt = profile.name+'的角色参考图'; image.hidden = true; image.decoding = 'async';
-        image.onload = () => { image.hidden = false; fallback.hidden = true; };
-        image.onerror = () => { image.hidden = true; fallback.hidden = false; coverStatus.textContent = '封面暂不可用'; };
-        cover.append(image);
-        coverURL(profile.image_ids[0]).then(url => { if (cover.isConnected) image.src = url; },() => { coverStatus.textContent = '封面暂不可用'; });
-      }
-      if (profile.deleted) { const badge = document.createElement('span'); badge.className = 'manager-deleted-badge'; badge.textContent = '已删除'; cover.append(badge); }
-      const info = document.createElement('div'); info.className = 'manager-character-info';
-      const title = document.createElement('h3'); title.textContent = profile.name;
-      const assets = document.createElement('p'); assets.className = 'hint'; assets.textContent = `${profile.image_ids.length} 张参考图 · ${profile.audios.length ? profile.audios.length+' 段声音' : '未添加声音'}`;
-      info.append(title,assets);
-      const actions = document.createElement('div'); actions.className = 'manager-actions';
-      const view = document.createElement('button'); view.type = 'button'; view.className = 'secondary'; view.textContent = '查看'; view.setAttribute('aria-label','查看角色 '+profile.name);
-      view.onclick = viewProfile;
-      actions.append(view);
-      if (!profile.deleted) {
-        const edit = document.createElement('button'); edit.type = 'button'; edit.className = 'secondary'; edit.textContent = '编辑'; edit.setAttribute('aria-label','编辑角色 '+profile.name);
-        edit.onclick = () => openEditor(profile); actions.append(edit);
-      }
-      const action = document.createElement('button'); action.type = 'button'; action.className = profile.deleted ? 'secondary' : 'manager-delete'; action.textContent = profile.deleted ? '恢复' : '删除'; action.setAttribute('aria-label',(profile.deleted ? '恢复角色 ' : '删除角色 ')+profile.name);
-      action.onclick = async () => {
-        if (managerBusy) return;
-        managerBusy = true; managerError(''); $('characterManagerStatus').textContent = profile.deleted ? '正在恢复…' : '正在删除…'; renderManager();
-        try {
-          await api('characters/'+profile.id+(profile.deleted ? '/restore' : ''),{method:profile.deleted ? 'POST' : 'DELETE'});
-          await load();
-          $('characterManagerStatus').textContent = profile.deleted ? `已恢复 ${profile.name}` : `已删除 ${profile.name}，可在“显示已删除角色”中恢复。`;
-          closeMenu();
-        } catch (e) { managerError(e.message); $('characterManagerStatus').textContent = ''; }
-        finally { managerBusy = false; renderManager(); }
+      const card = document.createElement('article');
+      card.className = 'card card-compact bg-base-100 border border-base-300 shadow-sm hover:shadow-xl hover:border-primary/50 transition-all duration-200 overflow-hidden flex flex-col group select-none cursor-pointer' + (profile.deleted ? ' opacity-60 grayscale-[60%]' : '');
+      card.style.padding = '0';
+      card.setAttribute('role', 'button');
+      card.setAttribute('tabindex', '0');
+      card.setAttribute('aria-label', (profile.deleted ? '查看已删除角色 ' : '编辑角色 ') + profile.name);
+
+      // 点击卡片直接进入编辑模式（不修改内容就相当于查看）
+      card.onclick = () => {
+        if (!managerBusy) openEditor(profile, !!profile.deleted);
       };
-      actions.append(action); for (const button of actions.children) button.disabled = managerBusy;
-      card.append(cover,info,actions); card.classList.toggle('manager-character-deleted',profile.deleted); $('characterManagerList').append(card);
+      card.onkeydown = (event) => {
+        if ((event.key === 'Enter' || event.key === ' ') && event.target === card) {
+          event.preventDefault();
+          card.click();
+        }
+      };
+
+      const figure = document.createElement('figure');
+      figure.className = 'relative w-full overflow-hidden m-0 p-0 border-b border-base-300/80 bg-base-300';
+
+      const fallback = document.createElement('div');
+      fallback.className = 'absolute inset-0 flex flex-col items-center justify-center gap-2 text-base-content/40 bg-base-200';
+      const initial = document.createElement('div');
+      initial.className = 'avatar placeholder';
+      const avatarBox = document.createElement('div');
+      avatarBox.className = 'bg-base-300 text-base-content/80 rounded-full w-12 h-12 flex items-center justify-center font-bold text-lg';
+      avatarBox.textContent = [...profile.name][0] || '角';
+      initial.append(avatarBox);
+      const coverStatus = document.createElement('span');
+      coverStatus.className = 'text-xs text-base-content/50';
+      coverStatus.textContent = profile.image_ids.length ? '读取中…' : '暂无参考图';
+      fallback.append(initial, coverStatus);
+      figure.append(fallback);
+
+      if (profile.image_ids[0]) {
+        const image = document.createElement('img');
+        image.alt = profile.name + '的角色参考图';
+        image.className = 'w-full h-full object-cover object-top group-hover:scale-105 transition-transform duration-300 hidden';
+        image.decoding = 'async';
+        image.onload = () => {
+          image.classList.remove('hidden');
+          image.style.display = 'block';
+          if (fallback.parentNode) fallback.remove();
+        };
+        image.onerror = () => {
+          image.classList.add('hidden');
+          image.style.display = 'none';
+          fallback.classList.remove('hidden');
+          coverStatus.textContent = '暂无图片';
+        };
+        figure.append(image);
+        coverURL(profile.image_ids[0]).then(url => { if (figure.isConnected) image.src = url; }, () => { coverStatus.textContent = '暂无图片'; });
+      }
+
+      if (profile.deleted) {
+        const badge = document.createElement('span');
+        badge.className = 'badge badge-error badge-xs absolute top-2 left-2 font-bold shadow';
+        badge.textContent = '已删除';
+        figure.append(badge);
+      }
+
+      const body = document.createElement('div');
+      body.className = 'card-body p-2.5 px-3 flex flex-row items-center justify-between gap-2 min-w-0 bg-base-100';
+
+      const title = document.createElement('h3');
+      title.className = 'font-semibold text-sm text-base-content truncate min-w-0 flex-1 leading-snug group-hover:text-primary transition-colors';
+      title.textContent = profile.name;
+      title.title = profile.name;
+
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = profile.deleted
+        ? 'btn btn-xs btn-outline btn-success font-medium px-2.5 h-6 min-h-6 text-xs rounded shrink-0'
+        : 'btn btn-xs btn-ghost text-error/70 hover:text-error hover:bg-error/15 font-medium px-2 h-6 min-h-6 text-xs rounded shrink-0';
+      delBtn.textContent = profile.deleted ? '恢复' : '删除';
+      delBtn.title = (profile.deleted ? '恢复角色 ' : '删除角色 ') + profile.name;
+      delBtn.setAttribute('aria-label', (profile.deleted ? '恢复角色 ' : '删除角色 ') + profile.name);
+      delBtn.disabled = managerBusy;
+      delBtn.onclick = async (event) => {
+        event.stopPropagation();
+        event.preventDefault();
+        if (managerBusy) return;
+        managerBusy = true;
+        managerError('');
+        $('characterManagerStatus').textContent = profile.deleted ? '正在恢复…' : '正在删除…';
+        renderManager();
+        try {
+          await api('characters/' + profile.id + (profile.deleted ? '/restore' : ''), { method: profile.deleted ? 'POST' : 'DELETE' });
+          await load();
+          $('characterManagerStatus').textContent = profile.deleted ? `已恢复 ${profile.name}` : `已删除 ${profile.name}`;
+          closeMenu();
+        } catch (e) {
+          managerError(e.message);
+          $('characterManagerStatus').textContent = '';
+        } finally {
+          managerBusy = false;
+          renderManager();
+        }
+      };
+
+      body.append(title, delBtn);
+      card.append(figure, body);
+      $('characterManagerList').append(card);
     }
   }
   async function load() {
@@ -238,22 +444,29 @@
         preview.onclick = () => openImageViewer(editing.images,index,$('characterName').value || '角色参考图');
         const img = document.createElement('img'); img.src = asset.url; img.alt = '角色参考图'; preview.append(img); box.append(preview);
       }
-      if (asset.error) { const warning = document.createElement('span'); warning.className = 'reference-error'; warning.textContent = asset.error; box.append(warning); }
+      if (asset.error) { const warning = document.createElement('span'); warning.className = 'text-xs text-error mt-1 block'; warning.textContent = asset.error; box.append(warning); }
       const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = '移除'; remove.disabled = !!busy || viewing;
+      remove.className = 'btn btn-xs btn-ghost text-error/80 hover:text-error hover:bg-error/10 w-full mt-1.5 h-6 min-h-6 text-xs';
       remove.onclick = () => { if (asset.url) URL.revokeObjectURL(asset.url); editing.images = editing.images.filter(a=>a!==asset); renderEditor(); };
       if (!viewing) box.append(remove); $('characterImageAssets').append(box);
     }
     for (const asset of editing.audios) {
-      const row = document.createElement('div'); row.className = 'character-audio';
-      const name = document.createElement('span'); name.textContent = `${asset.name} · ${asset.duration.toFixed(1)} 秒`; row.append(name);
-      if (asset.url) { const audio = document.createElement('audio'); audio.controls = true; audio.preload = 'metadata'; audio.src = asset.url; audio.setAttribute('aria-label','试听 '+asset.name); row.append(audio); }
-      if (asset.error) { const warning = document.createElement('span'); warning.className = 'reference-error'; warning.textContent = asset.error; row.append(warning); }
+      const row = document.createElement('div'); row.className = 'flex flex-col gap-1.5 p-2.5 rounded-lg bg-base-100 border border-base-300';
+      const header = document.createElement('div'); header.className = 'flex items-center justify-between gap-2';
+      const name = document.createElement('span'); name.className = 'text-xs font-medium text-base-content truncate flex-1'; name.textContent = `${asset.name} · ${asset.duration.toFixed(1)} 秒`;
       const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = '移除'; remove.disabled = !!busy || viewing;
+      remove.className = 'btn btn-xs btn-ghost text-error/80 hover:text-error hover:bg-error/10 h-6 min-h-6 text-xs px-2 shrink-0';
       remove.onclick = () => { if (asset.url) URL.revokeObjectURL(asset.url); editing.audios = editing.audios.filter(a=>a!==asset); renderEditor(); };
-      if (!viewing) row.append(remove); $('characterAudioAssets').append(row);
+      header.append(name);
+      if (!viewing) header.append(remove);
+      row.append(header);
+      if (asset.url) { const audio = document.createElement('audio'); audio.controls = true; audio.preload = 'metadata'; audio.src = asset.url; audio.setAttribute('aria-label','试听 '+asset.name); audio.className = 'w-full h-8 mt-1'; row.append(audio); }
+      if (asset.error) { const warning = document.createElement('span'); warning.className = 'text-xs text-error mt-1'; warning.textContent = asset.error; row.append(warning); }
+      $('characterAudioAssets').append(row);
     }
     $('characterEditorStatus').textContent = busy ? '正在准备素材，请稍候…' : `${editing.images.length}/9 张图片 · ${editing.audios.length}/3 段声音 · 合计 ${editing.audios.reduce((sum,a)=>sum+a.duration,0).toFixed(1)}/15 秒`;
     $('saveCharacter').disabled = $('closeCharacter').disabled = !!busy;
+    $('saveCharacter').textContent = editing.id ? '保存修改' : '保存角色';
     $('characterImages').disabled = $('characterAudios').disabled = !!busy || viewing;
     for (const id of ['characterName','characterDescription','characterVoice']) $(id).disabled = viewing;
     dialog.querySelectorAll('.asset-upload').forEach(label=>label.classList.toggle('hidden',viewing));
@@ -268,7 +481,7 @@
     revokeEditor(); editorError('');
     viewing = readOnly;
     editing = {id:profile?.id,images:(profile?.image_ids || []).map(image_id=>({image_id})),audios:(profile?.audios || []).map(a=>({...a}))};
-    $('characterDialogTitle').textContent = viewing ? '角色详情' : profile ? '编辑角色' : '新建角色';
+    $('characterDialogTitle').textContent = viewing ? (profile?.deleted ? '角色详情（已删除）' : '角色详情') : profile ? '编辑角色' : '新建角色';
     $('characterName').value = profile?.name || ''; $('characterDescription').value = profile?.description || ''; $('characterVoice').value = profile?.voice || '';
     $('characterImages').value = $('characterAudios').value = ''; busy = profile ? 1 : 0; renderEditor();
     showPage('characters'); manager.hidden = true; manager.classList.add('hidden');
@@ -296,8 +509,33 @@
     finally { busy = 0; $('characterImages').value = $('characterAudios').value = ''; renderEditor(); }
   }
   $('newCharacter').onclick = () => openEditor();
-  $('manageCharacters').onclick = async () => { showPage('characters'); managerError(''); $('characterManagerStatus').textContent = ''; renderManager(); if (!editing) $('characterSearch').focus(); try { await load(); } catch (_) {} };
+  $('manageCharacters').onclick = async () => {
+    managerError('');
+    $('characterManagerStatus').textContent = '';
+    closeEditor();
+    const modal = $('characterPage');
+    if (modal && !modal.open) modal.showModal();
+    renderManager();
+    if (!editing) $('characterSearch').focus();
+    try { await load(); } catch (_) {}
+  };
+  $('closeCharacterModal2')?.addEventListener('click', () => { $('characterPage')?.close(); closeEditor(); });
+  $('backdropCloseCharacterModal')?.addEventListener('click', () => { $('characterPage')?.close(); closeEditor(); });
+  $('closeCharacterModal')?.addEventListener('click', () => {
+    $('characterPage')?.close();
+    closeEditor();
+  });
+  $('characterPage')?.addEventListener('cancel', () => {
+    closeEditor();
+  });
+  $('characterPage')?.addEventListener('click', event => {
+    if (event.target === $('characterPage')) {
+      $('characterPage')?.close();
+      closeEditor();
+    }
+  });
   $('characterSearch').oninput = renderManager;
+  $('characterSearch').addEventListener('keydown', e => { if (e.key === 'Escape' && $('characterSearch').value) { e.stopPropagation(); $('characterSearch').value = ''; renderManager(); } });
   $('showDeletedCharacters').onchange = renderManager;
   $('closeCharacter').onclick = () => { if (!busy) closeEditor(); };
   $('characterImages').onchange = () => upload('images',$('characterImages').files);
@@ -311,12 +549,13 @@
       const payload = {name:$('characterName').value.trim(),description:$('characterDescription').value.trim(),voice:$('characterVoice').value.trim(),image_ids:editing.images.map(a=>a.image_id),audios:editing.audios.map(({audio_id,name,duration})=>({audio_id,name,duration}))};
       if (editing.id) payload.id = editing.id;
       const saved = await api('characters',{method:'POST',body:JSON.stringify(payload)});
-      busy = 0; closeEditor(); await load(); error(''); $('characterManagerStatus').textContent = `已保存 ${saved.name}`;
+      busy = 0; closeEditor(); await load(); pageError(''); $('characterManagerStatus').textContent = `已保存 ${saved.name}`;
     } catch (e) { editorError(e.message); }
     finally { busy = 0; renderEditor(); }
   };
   prompt.addEventListener('input',() => { if (used().length) setMode('image'); refreshUse(); suggest(); });
   prompt.addEventListener('click',suggest);
+  prompt.addEventListener('scroll',() => { if (!menu.classList.contains('hidden')) { const m = context(); if (m) positionMentionMenu(m.start); } });
   prompt.addEventListener('keydown',event => {
     if (menu.classList.contains('hidden')) return;
     if (event.key === 'Escape') { event.preventDefault(); closeMenu(); }
@@ -326,6 +565,5 @@
   document.addEventListener('click',event => { if (event.target !== prompt && !menu.contains(event.target)) closeMenu(); });
   $('generateForm').addEventListener('input',refreshUse);
   window.H3Characters = {used,validate,refreshUse,insert,needsLibrary:()=>!ready && names().length > 0,get ready(){return ready;}};
-  showPage('tool');
-  load().catch(e=>error(e.message));
+  load().catch(e=>pageError(e.message));
 })();

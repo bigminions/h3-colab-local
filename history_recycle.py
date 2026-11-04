@@ -60,7 +60,8 @@ def recycle_to_bin(path):
 
 
 class HistoryRecycle:
-    def __init__(self, directory, videos, storage, sender=None):
+    def __init__(self, directory, videos, storage, sender=None, asset_library=None):
+        self.asset_library = asset_library
         self.directory = Path(directory).resolve()
         self.videos = Path(videos).resolve()
         self.storage = storage
@@ -79,6 +80,24 @@ class HistoryRecycle:
         if target.parent != self.videos:
             raise ValueError('视频路径超出保存目录')
         return target
+
+    def resolve_job_file(self, filename, job=None):
+        if not filename or not isinstance(filename, str):
+            raise ValueError('无效的文件名')
+        if not re.fullmatch(r'[A-Za-z0-9_.-]+\.(mp4|png|jpg|jpeg|webp)', filename):
+            raise ValueError('无效的作品文件名')
+        if filename.endswith('.mp4'):
+            return self.video(filename)
+        if self.asset_library:
+            try:
+                return self.asset_library.resolve(filename)
+            except (FileNotFoundError, ValueError):
+                app_id = (job.get('config') or {}).get('app_id', 'qwen_image_2_1') if job else 'qwen_image_2_1'
+                target = (self.asset_library.folder('images', app_id, 'outputs') / filename).resolve()
+                if not target.is_relative_to(self.asset_library.root.resolve()):
+                    raise ValueError('文件路径超出保存目录')
+                return target
+        raise ValueError('无效的作品文件名')
 
     @staticmethod
     def digest(path):
@@ -110,7 +129,7 @@ class HistoryRecycle:
         manifest = dict(version=1,token=token,job=snapshot,video_filename=None,source_moved=False)
         try:
             filename = job.get('file')
-            source = self.video(filename) if filename else None
+            source = self.resolve_job_file(filename, job) if filename else None
             if source and source.is_file():
                 target = folder / filename
                 manifest.update(video_filename=filename,source_moved=not keep_source,
@@ -123,7 +142,7 @@ class HistoryRecycle:
                 self.download(job['drive'],folder / filename)
                 manifest['video_filename'] = filename
             elif job.get('file'):
-                raise RuntimeError('找不到视频文件，作品记录已保留')
+                raise RuntimeError('找不到作品文件，作品记录已保留')
             if manifest['video_filename']:
                 video = folder / manifest['video_filename']
                 manifest.update(video_size=video.stat().st_size,video_sha256=self.digest(video))
@@ -137,19 +156,20 @@ class HistoryRecycle:
     def put_video_back(self, folder, manifest):
         filename = manifest.get('video_filename')
         if not filename: return
-        target = self.video(filename)
+        job = manifest.get('job')
+        target = self.resolve_job_file(filename, job)
         source = folder / filename
         if source.resolve().parent != folder.resolve():
-            raise RuntimeError('恢复文件夹中缺少视频，未覆盖现有记录')
+            raise RuntimeError('恢复文件夹中缺少作品，未覆盖现有记录')
         if not source.is_file():
             if target.is_file() and target.stat().st_size == manifest.get('video_size') and self.digest(target) == manifest.get('video_sha256'): return
-            raise RuntimeError('恢复文件夹中缺少视频，未覆盖现有记录')
+            raise RuntimeError('恢复文件夹中缺少作品，未覆盖现有记录')
         if 'video_sha256' in manifest and (source.stat().st_size != manifest['video_size'] or self.digest(source) != manifest['video_sha256']):
-            raise RuntimeError('恢复视频校验未通过，原记录已保留')
-        self.videos.mkdir(parents=True,exist_ok=True)
+            raise RuntimeError('恢复作品校验未通过，原记录已保留')
+        target.parent.mkdir(parents=True,exist_ok=True)
         if target.exists():
             if target.stat().st_size != source.stat().st_size or self.digest(target) != self.digest(source):
-                raise RuntimeError('原位置已有不同的视频，恢复文件夹已保留')
+                raise RuntimeError('原位置已有不同的作品，恢复文件夹已保留')
         else:
             source.replace(target)
 

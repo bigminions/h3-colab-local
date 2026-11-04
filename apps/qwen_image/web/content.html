@@ -1,0 +1,461 @@
+<main id="qwenImagePage" class="qwen-image-page hidden" role="tabpanel" aria-labelledby="qwenImageAppTab" hidden>
+
+    <section class="creation-section" aria-label="图片生成设置">
+
+      <div class="card creation-card">
+
+        <div class="creation-heading">
+
+          <h2 class="card-title">Qwen-Image-2.1 生图</h2>
+
+          <div class="tabs" role="tablist" aria-label="生图方式">
+
+            <button type="button" id="qiTextTab" class="tab active" role="tab" aria-selected="true" aria-controls="qiPromptPanel">文生图</button>
+
+            <button type="button" id="qiImageTab" class="tab" role="tab" aria-selected="false" aria-controls="qiImagePanel">图生图</button>
+
+          </div>
+
+        </div>
+
+        <form id="qiGenerateForm">
+
+          <div class="creation-input qi-creation-input">
+
+            <div id="qiImagePanel" class="hidden">
+
+              <div class="reference-heading">
+
+                <div class="reference-title"><span class="field-label">参考图片</span></div>
+
+                <span id="qiReferenceStatus" class="hint">未选择</span>
+
+              </div>
+
+              <input id="qiReferenceFile" class="file-input" type="file" accept="image/png,image/jpeg,image/webp" aria-label="上传参考图片">
+
+              <div id="qiReferenceDropZone" class="reference-drop">
+
+                <div id="qiReferencePlaceholder" class="reference-drop-inner">
+
+                  <div class="reference-drop-prompt">
+
+                    <span class="reference-drop-icon">＋</span>
+
+                    <span class="reference-drop-title">添加参考图</span>
+
+                    <span class="reference-drop-sub">拖入图片 · PNG/JPEG/WebP ≤ 20MB</span>
+
+                  </div>
+
+                  <div class="reference-drop-actions">
+
+                    <button type="button" id="qiBtnUploadLocal" class="drop-action-btn local">本地添加</button>
+
+                    <button type="button" id="qiChooseLibraryImage" class="drop-action-btn library">素材库选择</button>
+
+                  </div>
+
+                </div>
+
+                <div id="qiReferencePreview" class="hidden" style="display:flex;align-items:center;gap:12px;width:100%;">
+
+                  <img id="qiReferenceImg" src="" alt="参考图预览" style="width:72px;height:72px;object-fit:cover;border-radius:8px;border:1px solid var(--line);">
+
+                  <div style="flex:1;overflow:hidden;">
+
+                    <div id="qiReferenceName" style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
+
+                    <button id="qiRemoveReference" type="button" class="secondary" style="margin-top:6px;padding:2px 8px;font-size:11px;">移除图片</button>
+
+                  </div>
+
+                </div>
+
+              </div>
+
+              <div style="margin-top:12px;">
+
+                <div style="display:flex;justify-content:space-between;align-items:center;">
+
+                  <label class="field-label" for="qiDenoise">重绘幅度 (Denoise)</label>
+
+                  <span id="qiDenoiseVal" class="hint" style="font-weight:600;">0.75</span>
+
+                </div>
+
+                <input id="qiDenoise" type="range" min="0.1" max="1.0" step="0.05" value="0.75" style="width:100%;accent-color:var(--accent);">
+
+                <div class="hint" style="font-size:11px;">较低保留原图结构，较高赋予更多创作自由度。</div>
+
+              </div>
+
+            </div>
+
+            <div id="qiPromptPanel" class="qi-prompt-panel">
+
+              <div class="prompt-heading">
+
+                <label class="field-label" for="qiPrompt">画面描述 (Prompt)</label>
+
+                <span class="hint">支持详细中英文描述</span>
+
+              </div>
+
+              <textarea id="qiPrompt" aria-label="画面描述" required placeholder="描述画面主体、背景、光影细节与艺术风格…&#10;&#10;例如：一座漂浮在云海之上的赛博朋克空中古城，霓虹璀璨，飞艇穿梭，细雨连绵，电影级光影，8k高清细节。"></textarea>
+
+              <div class="qi-negative-group">
+
+                <label class="field-label" for="qiNegativePrompt">反向提示词 (Negative Prompt · 可选)</label>
+
+                <input id="qiNegativePrompt" type="text" placeholder="例如：模糊、低分辨率、畸变、多余肢体、水印、文字">
+
+              </div>
+
+            </div>
+
+          </div>
+
+          <div class="creation-settings qi-creation-settings">
+
+            <fieldset class="qi-format-field">
+
+              <div class="qi-format-header">
+
+                <legend class="field-label">比例</legend>
+
+                <div id="qiFormatNote" class="qi-format-note" role="status">1024 × 1024 px · 方图</div>
+
+              </div>
+
+              <div class="qi-ratio-bar" role="radiogroup" aria-label="画面比例选择">
+
+                <label class="qi-ratio-item" title="1:1 · 1024 × 1024 · 方图">
+
+                  <input type="radio" name="qiAspectRatio" value="1:1" checked>
+
+                  <span class="qi-ratio-box">
+
+                    <span class="qi-icon-stage"><span class="qi-ratio-rect r-1-1" aria-hidden="true"></span></span>
+
+                    <span class="qi-ratio-label">1:1</span>
+
+                  </span>
+
+                </label>
+
+                <label class="qi-ratio-item" title="16:9 · 1344 × 768 · 宽屏横图">
+
+                  <input type="radio" name="qiAspectRatio" value="16:9">
+
+                  <span class="qi-ratio-box">
+
+                    <span class="qi-icon-stage"><span class="qi-ratio-rect r-16-9" aria-hidden="true"></span></span>
+
+                    <span class="qi-ratio-label">16:9</span>
+
+                  </span>
+
+                </label>
+
+                <label class="qi-ratio-item" title="9:16 · 768 × 1344 · 手机全屏">
+
+                  <input type="radio" name="qiAspectRatio" value="9:16">
+
+                  <span class="qi-ratio-box">
+
+                    <span class="qi-icon-stage"><span class="qi-ratio-rect r-9-16" aria-hidden="true"></span></span>
+
+                    <span class="qi-ratio-label">9:16</span>
+
+                  </span>
+
+                </label>
+
+                <label class="qi-ratio-item" title="4:3 · 1152 × 864 · 经典横版">
+
+                  <input type="radio" name="qiAspectRatio" value="4:3">
+
+                  <span class="qi-ratio-box">
+
+                    <span class="qi-icon-stage"><span class="qi-ratio-rect r-4-3" aria-hidden="true"></span></span>
+
+                    <span class="qi-ratio-label">4:3</span>
+
+                  </span>
+
+                </label>
+
+                <label class="qi-ratio-item" title="3:4 · 864 × 1152 · 社交竖图">
+
+                  <input type="radio" name="qiAspectRatio" value="3:4">
+
+                  <span class="qi-ratio-box">
+
+                    <span class="qi-icon-stage"><span class="qi-ratio-rect r-3-4" aria-hidden="true"></span></span>
+
+                    <span class="qi-ratio-label">3:4</span>
+
+                  </span>
+
+                </label>
+
+                <label class="qi-ratio-item" title="3:2 · 1216 × 832 · 单反横画幅">
+
+                  <input type="radio" name="qiAspectRatio" value="3:2">
+
+                  <span class="qi-ratio-box">
+
+                    <span class="qi-icon-stage"><span class="qi-ratio-rect r-3-2" aria-hidden="true"></span></span>
+
+                    <span class="qi-ratio-label">3:2</span>
+
+                  </span>
+
+                </label>
+
+                <label class="qi-ratio-item" title="2:3 · 832 × 1216 · 人像海报">
+
+                  <input type="radio" name="qiAspectRatio" value="2:3">
+
+                  <span class="qi-ratio-box">
+
+                    <span class="qi-icon-stage"><span class="qi-ratio-rect r-2-3" aria-hidden="true"></span></span>
+
+                    <span class="qi-ratio-label">2:3</span>
+
+                  </span>
+
+                </label>
+
+              </div>
+
+            </fieldset>
+
+            <div class="qi-model-fields">
+
+              <div class="qi-field">
+
+                <label class="field-label" for="qiModelFile">扩散模型 (GGUF / Safetensors)</label>
+
+                <select id="qiModelFile">
+                  <option value="qwen-image-2.1-turbo-Q4_K_M.gguf" selected>Q4_K_M.gguf · 3.8GB（首选推荐）</option>
+                  <option value="qwen-image-2.1-turbo-fp8.safetensors">fp8.safetensors · 6.6GB（FP8 高精度）</option>
+                  <option value="qwen-image-2.1-turbo-int8_convrot.safetensors">int8_convrot.safetensors · 6.8GB</option>
+                  <option value="qwen-image-2.1-turbo-Q5_K_M.gguf">Q5_K_M.gguf · 4.6GB</option>
+                  <option value="qwen-image-2.1-turbo-Q8_0.gguf">Q8_0.gguf · 7.1GB</option>
+                  <option value="qwen-image-2.1-turbo-Q6_K.gguf">Q6_K.gguf · 5.5GB</option>
+                  <option value="qwen-image-2.1-turbo-Q4_0.gguf">Q4_0.gguf · 3.8GB</option>
+                </select>
+
+              </div>
+
+              <div class="qi-field">
+
+                <label class="field-label" for="qiEncoder">文本编码器 (Qwen3-VL 8B)</label>
+
+                <select id="qiEncoder">
+
+                  <option value="int8_convrot" selected>INT8 ConvRot · 9.3GB（显存友好）</option>
+
+                  <option value="bf16">BF16 原版 · 17.5GB</option>
+
+                </select>
+
+              </div>
+
+            </div>
+
+            <div class="qi-param-grid">
+
+              <div class="qi-field">
+
+                <label class="field-label" for="qiSteps">采样步数</label>
+
+                <input id="qiSteps" type="number" min="1" max="60" value="8">
+
+              </div>
+
+              <div class="qi-field">
+
+                <label class="field-label" for="qiCfg">提示词引导 (CFG)</label>
+
+                <input id="qiCfg" type="number" min="1.0" max="20.0" step="0.5" value="1.0">
+
+              </div>
+
+              <div class="qi-field">
+
+                <label class="field-label" for="qiSeed">随机种子</label>
+
+                <input id="qiSeed" type="number" min="0" max="9007199254740991" placeholder="留空自动随机">
+
+              </div>
+
+              <div class="qi-field">
+
+                <label class="field-label" for="qiCount">数量</label>
+
+                <div class="count-stepper">
+
+                  <button id="qiDecreaseCount" type="button" aria-label="减少数量" disabled>−</button>
+
+                  <input id="qiCount" type="number" min="1" max="8" step="1" value="1" readonly>
+
+                  <button id="qiIncreaseCount" type="button" aria-label="增加数量">+</button>
+
+                </div>
+
+              </div>
+
+            </div>
+
+            <div class="qi-gpu-card-wrap">
+
+              <div class="qi-gpu-card" id="qiGpuCard" role="button" aria-haspopup="listbox" title="点击切换运行显卡">
+
+                <div class="qi-gpu-card-header">
+
+                  <span class="qi-gpu-badge">
+
+                    <svg class="qi-gpu-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+
+                      <rect x="4" y="4" width="16" height="16" rx="2"/>
+
+                      <rect x="9" y="9" width="6" height="6"/>
+
+                      <path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/>
+
+                    </svg>
+
+                    运行显卡
+
+                  </span>
+
+                  <span class="qi-gpu-action">切换 ▾</span>
+
+                </div>
+
+                <div class="qi-gpu-card-body">
+
+                  <span id="qiGpuDisplay" class="qi-gpu-name">T4 · 16GB</span>
+
+                  <span id="qiGpuStatus" class="qi-gpu-status">推荐 · 显存友好</span>
+
+                </div>
+
+                <select id="qiGpu" class="qi-gpu-select" aria-label="切换运行显卡"></select>
+
+              </div>
+
+            </div>
+
+            <div id="qiError" class="error hidden" role="alert"></div>
+
+            <button class="primary" id="qiGenerate" type="submit">开始生图</button>
+
+          </div>
+
+        </form>
+
+      </div>
+
+    </section>
+
+    <section class="card task-stream-card" id="qiTaskStreamCard" aria-label="任务队列与作品">
+
+      <div class="task-stream-heading">
+
+        <div class="task-stream-title">
+
+          <h2 class="card-title">任务队列与作品</h2>
+
+          <span id="qiTaskStreamSummary" class="task-stream-count">0</span>
+
+        </div>
+
+        <div class="task-stream-toolbar">
+
+          <div class="history-clear-group">
+
+            <button id="qiClearHistory" class="history-clear-all" type="button" title="将已完成作品移入系统回收箱" disabled>移除已完成</button>
+
+            <div id="qiHistoryClearConfirm" class="history-remove-confirm" role="group" aria-label="确认全部移入回收箱" hidden>
+
+              <p>全部移到回收箱？</p>
+
+              <div class="history-confirm-actions">
+
+                <button id="qiCancelClearHistory" type="button">取消</button>
+
+                <button id="qiConfirmClearHistory" class="history-confirm-commit" type="button">移除</button>
+
+              </div>
+
+              <p class="history-remove-error" role="alert"></p>
+
+            </div>
+
+          </div>
+
+        </div>
+
+      </div>
+
+      <span id="qiHistoryFeedback" class="sr-only" role="status"></span>
+
+      <div id="qiTaskStreamList" class="task-stream-list" role="feed" aria-label="任务与作品列表">
+
+        <div id="qiTaskStreamEmpty" class="task-stream-empty">
+
+          <span class="empty-icon" aria-hidden="true">🖼️</span>
+
+          <p>暂无任务，在左侧输入画面描述开始创作</p>
+
+        </div>
+
+      </div>
+
+    </section>
+
+  </main>
+
+
+
+  <dialog id="qiImageViewer" class="qi-image-viewer" aria-labelledby="qiImageTitle">
+
+    <div class="qi-image-viewer-toolbar">
+
+      <div class="qi-image-viewer-info">
+
+        <h2 id="qiImageTitle" class="qi-image-viewer-title">生图预览</h2>
+
+        <span id="qiImageMeta" class="qi-image-viewer-meta"></span>
+
+      </div>
+
+      <div class="qi-image-viewer-controls">
+
+        <button id="qiViewerPrev" type="button" class="secondary qi-viewer-btn" aria-label="上一张" title="上一张 (←)">←</button>
+
+        <button id="qiViewerNext" type="button" class="secondary qi-viewer-btn" aria-label="下一张" title="下一张 (→)">→</button>
+
+        <button id="qiViewerUseRef" type="button" class="secondary qi-viewer-btn" title="设为图生图参考图">🎨 设为参考图</button>
+
+        <a id="qiViewerDownload" href="#" download class="secondary qi-viewer-btn" title="下载原图">💾 下载原图</a>
+
+        <button id="qiCloseImageViewer" type="button" class="qi-viewer-close-btn" aria-label="关闭预览" autofocus title="关闭 (Esc)">×</button>
+
+      </div>
+
+    </div>
+
+    <div class="qi-image-viewer-stage">
+
+      <img id="qiImageFull" alt="生图预览" hidden>
+
+      <p id="qiImageStatus" role="status"></p>
+
+    </div>
+
+  </dialog>

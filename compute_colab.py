@@ -17,14 +17,30 @@ class ColabProvider:
         self.application_id = 'h3'
         self.assignment_hash = uuid.uuid4()
 
+    @staticmethod
+    def resolve_shape(services, gpu):
+        if gpu in ('G4', 'L4', 'V5E1', 'V6E1', 'NONE'):
+            return None
+        shape_cls = getattr(services, 'Shape', None)
+        return shape_cls.HIGH_RAM if shape_cls else None
+
+    def resolve_accelerator(self, gpu):
+        try:
+            return self.services.Accelerator(gpu)
+        except (ValueError, KeyError):
+            acc_cls = getattr(self.services, 'Accelerator', None)
+            return getattr(acc_cls, 'A100', gpu)
+
     def cancel_pending_assignment(self, job):
         if not job.get('assignment_pending'):
             return
         application = self.services.applications.get(job['config'].get('app_id', 'h3'))
         config = application.config_model(**job['config'])
         client = self.client()
+        accelerator = self.resolve_accelerator(config.gpu)
+        shape = self.resolve_shape(self.services, config.gpu)
         found = client._get_assignment(uuid.UUID(job['assignment_hash']),variant=self.services.Variant.GPU,
-            accelerator=self.services.Accelerator(config.gpu),shape=None if config.gpu=='G4' else self.services.Shape.HIGH_RAM)
+            accelerator=accelerator,shape=shape)
         endpoint = getattr(found,'endpoint',None)
         if endpoint:
             self._unassign_confirmed(client,endpoint)
@@ -103,9 +119,8 @@ class ColabProvider:
             if previous.get('accelerator', 'A100') != config.gpu:
                 raise RuntimeError('请先释放当前运行时，再切换显卡型号。')
             return self.connection_step('检查已有 Colab 运行时', self.refresh)
-        accelerator = self.services.Accelerator(config.gpu)
-        # G4 has one fixed memory profile: Colab rejects shape=hm for G4.
-        shape = None if config.gpu == 'G4' else self.services.Shape.HIGH_RAM
+        accelerator = self.resolve_accelerator(config.gpu)
+        shape = self.resolve_shape(self.services, config.gpu)
         assignments = self.connection_step('查询 Colab 运行时列表（含授权检查）', client.list_assignments)
         active_id = getattr(self.controller,'active',None)
         owned_job = self.controller.jobs.get(active_id) if isinstance(active_id,str) else None
@@ -128,7 +143,8 @@ class ColabProvider:
                 lambda: client.assign(notebook_hash, variant=self.services.Variant.GPU, accelerator=accelerator, shape=shape))
         proxy = assignment.runtime_proxy_info
         self.controller.session = dict(endpoint=assignment.endpoint, url=proxy.url, token=proxy.token,
-            name='h3-local', variant='GPU', accelerator=config.gpu, machine_shape='HIGH_RAM',
+            name='h3-local', variant='GPU', accelerator=config.gpu,
+            machine_shape='HIGH_RAM' if shape is not None else 'STANDARD',
             kernel_id=None, session_id=None)
         self.controller.save_session()
         if owned_job:

@@ -102,7 +102,7 @@ class AssetLibrary:
             temporary.unlink(missing_ok=True)
 
     def list(self, kind=None, jobs=(), *, app_id=None, purpose=None):
-        by_file = {job.get('file') or job['id'] + '.mp4': job for job in jobs
+        by_file = {job.get('file') or (job.get('id', '') + '.mp4'): job for job in jobs
                    if (job.get('file') or job.get('drive')) and not job.get('history_hidden')}
         items, seen = [], set()
         for folder, application, usage, media_kind in self._folders(kind, app_id, purpose):
@@ -110,7 +110,7 @@ class AssetLibrary:
                 if not path.is_file() or path.is_symlink() or not ASSET_ID.fullmatch(path.name) or self.kind(path.name) != media_kind:
                     continue
                 if path.name in seen:
-                    raise ValueError('素材编号重复，请检查素材目录：' + path.name)
+                    continue
                 seen.add(path.name)
                 stat = path.stat()
                 try:
@@ -118,22 +118,24 @@ class AssetLibrary:
                 except (OSError, ValueError):
                     metadata = {}
                 job = by_file.get(path.name, {})
+                job_config = job.get('config') or {}
                 items.append({'id': path.name, 'kind': media_kind,
                               'folder': folder.relative_to(self.root).as_posix(),
                               'app_id': application, 'purpose': usage,
-                              'name': job.get('config', {}).get('title') or metadata.get('name') or path.name,
+                              'name': job_config.get('title') or metadata.get('name') or path.name,
                               'size': stat.st_size, 'created': job.get('created', stat.st_mtime),
                               'job_id': job.get('id'), 'local': True,
                               'url': '/api/assets/' + path.name + '/file'})
         for name, job in by_file.items():
-            application = job['config']['app_id']
+            job_config = job.get('config') or {}
+            application = job_config.get('app_id', 'h3')
             if name in seen or kind not in (None, 'videos') or app_id is not None and application != app_id or purpose not in (None, 'outputs'):
                 continue
             items.append({'id': name, 'kind': 'videos', 'folder': application + '/outputs/videos',
                           'app_id': application, 'purpose': 'outputs',
-                          'name': job['config'].get('title') or name,
+                          'name': job_config.get('title') or name,
                           'size': (job.get('drive') or {}).get('size', 0), 'created': job.get('created', 0),
-                          'job_id': job['id'], 'local': False, 'recoverable': bool(job.get('drive')),
+                          'job_id': job.get('id'), 'local': False, 'recoverable': bool(job.get('drive')),
                           'url': '/video/' + name})
         return sorted(items, key=lambda item: item['created'], reverse=True)
 

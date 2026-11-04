@@ -1,23 +1,34 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="application-name" content="LStudio">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>LStudio · LocalStudio</title>
+  <script>
+    window.$ = id => document.getElementById(id);
+    (() => {
+      try {
+        const HASH_MAP = { '#h3': 'tool', '#tool': 'tool', '#qwen_image': 'qwen_image', '#qi': 'qwen_image', '#library': 'library', '#compute': 'compute', '#settings': 'connections', '#connections': 'connections' };
+        const target = HASH_MAP[window.location.hash] || localStorage.getItem('lstudio-active-page') || localStorage.getItem('lstudio-active-app');
+        if (target && target !== 'tool') {
+          document.documentElement.dataset.initialPage = target;
+        }
+      } catch (_) {}
+    })();
+  </script>
   <link rel="stylesheet" href="/static/daisyui.min.css">
   <script src="/static/tailwind.js"></script>
   <script>
     tailwind.config = { corePlugins: { preflight: false } };
   </script>
-  <link rel="stylesheet" href="/static/workbench.css">
-  <link rel="stylesheet" href="/static/workspace.css">
   <link rel="stylesheet" href="/static/daisy-theme.css">
+  <link rel="stylesheet" href="/static/workspace.css">
+  <!-- APP_STYLES -->
   <script src="/static/completion-sound.js" defer></script>
   <script src="/static/job-progress.js" defer></script>
-  <script src="/static/workbench.js" defer></script>
   <script src="/static/workspace.js" defer></script>
-  <script src="/static/characters.js" defer></script>
+  <!-- APP_SCRIPTS -->
 </head>
 <body>
   <aside id="workspaceSidebar" class="workspace-sidebar" aria-label="工作台导航">
@@ -32,6 +43,10 @@
         <button id="h3AppTab" class="workspace-nav active" type="button" aria-current="page" title="H3 视频">
           <span class="nav-icon app-icon" aria-hidden="true">H3</span>
           <span class="sidebar-label nav-copy"><strong>H3 视频</strong><small>视频创作与角色</small></span>
+        </button>
+        <button id="qwenImageAppTab" class="workspace-nav" type="button" title="Qwen-Image-2.1">
+          <span class="nav-icon app-icon" aria-hidden="true" style="background:linear-gradient(135deg,#7c3aed,#4f46e5);color:#fff;font-weight:700;">QI</span>
+          <span class="sidebar-label nav-copy"><strong>Qwen-Image-2.1</strong><small>文生图与图生图 · 量化版</small></span>
         </button>
       </div>
       <div class="sidebar-divider"></div>
@@ -71,147 +86,20 @@
     <div class="sidebar-foot sidebar-label">本地管理 · 云端运行</div>
   </aside>
   <div class="workspace-main">
-  <section id="applicationHeading" class="application-heading" aria-label="H3 视频应用">
-    <nav class="page-tabs" role="tablist" aria-label="H3 应用页面">
-      <button id="toolPageTab" class="page-tab" type="button" role="tab" aria-selected="true" aria-controls="toolPage">创作</button>
-      <button id="manageCharacters" class="page-tab" type="button" role="tab" aria-selected="false" aria-controls="characterPage" tabindex="-1">角色管理</button>
+  <section id="applicationHeading" class="application-heading hidden" style="display:none;" aria-label="应用导航" hidden>
+    <nav id="h3PageTabs" class="page-tabs" role="tablist" aria-label="H3 应用页面" style="display:none;" hidden>
+      <button id="toolPageTab" class="page-tab" type="button" role="tab" aria-selected="true" aria-controls="toolPage" style="display:none;">创作</button>
+    </nav>
+    <nav id="qwenImagePageTabs" class="page-tabs hidden" style="display:none;" role="tablist" aria-label="Qwen-Image 应用页面" hidden>
+      <button id="qwenImageToolTab" class="page-tab" type="button" role="tab" aria-selected="true" aria-controls="qwenImagePage">生图创作</button>
     </nav>
   </section>
-  <main id="toolPage" role="tabpanel" aria-labelledby="toolPageTab">
-    <section class="creation-section" aria-label="视频生成设置">
-      <div class="card creation-card">
-        <div class="creation-heading"><h2 class="card-title">视频创作</h2><div class="tabs" role="tablist" aria-label="视频生成方式">
-          <button type="button" id="textTab" class="tab" role="tab" aria-selected="true" aria-controls="promptPanel">文生视频</button>
-          <button type="button" id="imageTab" class="tab" role="tab" aria-selected="false" aria-controls="imagePanel">图生视频</button>
-        </div></div>
-        <form id="generateForm">
-          <div class="creation-input">
-          <div id="imagePanel" class="hidden">
-            <div class="reference-heading"><button id="chooseLibraryImage" class="library-pick-button" type="button">从素材库选择</button><div class="reference-title"><span class="field-label">参考素材</span><button id="referenceHelpToggle" class="reference-help-toggle" type="button" aria-label="图片使用说明" aria-expanded="false" aria-controls="referenceHelp">?</button></div><span id="referenceCount" class="hint">0 / 9 张</span></div>
-            <div id="referenceHelp" class="reference-help hidden">
-              <p class="hint reference-guide">每张图片可设为参考图、首帧或尾帧。首帧与尾帧各限一张，可同时搭配其他参考图。</p>
-              <p class="hint reference-guide">在下方输入 @ 选择图片，直接描述参考用途，例如“@图片1 作为场景参考，@图片2 作为人物参考，生成一段人物在雨中行走的视频”。首尾帧按视频比例居中裁剪；参考图保留原有比例。</p>
-            </div>
-            <input id="referenceFiles" class="file-input" type="file" multiple accept="image/png,image/jpeg,image/webp" aria-label="上传图片">
-            <div id="referenceCards" class="reference-grid">
-              <label id="referenceDropZone" class="reference-drop" for="referenceFiles">＋ 添加图片 <span>拖入或多选 · 单张 ≤ 20MB</span></label>
-            </div>
-          </div>
-          <div id="promptPanel">
-            <div class="prompt-heading"><label class="field-label" for="prompt">画面描述</label><span class="hint">@ 引用图片或角色</span></div>
-            <textarea id="prompt" aria-label="视频描述" required aria-autocomplete="list" aria-controls="mentionMenu" aria-expanded="false" placeholder="描述画面、动作与声音，输入 @ 引用图片或角色…&#10;&#10;例如：@图片1 作为场景参考，@图片2 作为人物参考，人物在雨中缓缓走来。"></textarea>
-            <div id="mentionMenu" class="mention-menu hidden" role="listbox" aria-label="图片与角色引用建议"></div>
-            <div id="characterUse" class="character-use hidden" role="status"></div>
-          </div>
-          </div>
-          <div class="creation-settings">
-          <fieldset class="format-field"><legend class="field-label">视频比例</legend><div class="format-options">
-            <label class="format-option"><input type="radio" name="aspectRatio" value="16:9" checked><span class="format-tile"><span class="frame-icon landscape" aria-hidden="true"></span><strong>16:9</strong></span></label>
-            <label class="format-option"><input type="radio" name="aspectRatio" value="9:16"><span class="format-tile"><span class="frame-icon portrait" aria-hidden="true"></span><strong>9:16</strong></span></label>
-            <label class="format-option"><input type="radio" name="aspectRatio" value="1:1"><span class="format-tile"><span class="frame-icon square" aria-hidden="true"></span><strong>1:1</strong></span></label>
-            <label class="format-option"><input type="radio" name="aspectRatio" value="4:5"><span class="format-tile"><span class="frame-icon feed" aria-hidden="true"></span><strong>4:5</strong></span></label>
-            <label class="format-option"><input type="radio" name="aspectRatio" value="3:4"><span class="format-tile"><span class="frame-icon photo" aria-hidden="true"></span><strong>3:4</strong></span></label>
-          </div></fieldset>
-          <div id="formatNote" class="preset-note" role="status">读取输出尺寸…</div>
-          <div class="generation-fields">
-            <div><label class="field-label" for="resolution">画质</label><select id="resolution"><option value="768p">768p</option><option value="480p">480p</option></select></div>
-            <div><label class="field-label" for="duration">时长</label><select id="duration"><option value="5">约 5 秒</option><option value="10">约 10 秒</option><option value="12">约 12 秒</option><option value="15">约 15 秒</option></select></div>
-            <div><label class="field-label" for="count">数量</label><div class="count-stepper"><button id="decreaseCount" type="button" aria-label="减少数量" disabled>−</button><input id="count" type="number" min="1" max="8" step="1" value="1" readonly><button id="increaseCount" type="button" aria-label="增加数量">+</button></div></div>
-          </div>
-          <div id="generationSummary" class="sr-only" aria-live="polite"></div>
-          <section class="performance-settings" aria-label="性能加速设置">
-            <label class="check"><input id="performance" type="checkbox" checked>性能加速</label>
-            <div id="performanceHint" class="hint" role="status">使用加速配置，可展开单独调整。</div>
-            <details id="performanceDetails" class="advanced"><summary>加速选项</summary>
-              <fieldset id="performanceOptions" class="advanced-content performance-options">
-                <label class="field-label" for="encoder">文本 / 图像编码器</label>
-                <select id="encoder"><option value="heretic_int8">Ultra Heretic · INT8</option><option value="official_int8">官方编码器 · INT8</option><option value="official_bf16">官方编码器 · BF16 原版</option></select>
-                <label class="check"><input id="quantizedModel" type="checkbox" checked>主模型 INT8 量化</label>
-                <label class="check"><input id="quantizedVae" type="checkbox" checked>视频 VAE INT8 量化</label>
-                <label class="field-label" for="mode">采样模式</label><select id="mode"><option value="pdd">PDD 8 步</option><option value="base">常规 20 步</option></select>
-                <label class="check"><input id="veda" type="checkbox" checked>Veda 注意力加速 · 实验性</label>
-                <div class="hint">加速配置可能影响画面与声音；可逐项关闭进行对照。</div>
-              </fieldset>
-            </details>
-          </section>
-          <details class="advanced" id="advanced"><summary>高级设置</summary><div class="advanced-content">
-            <label class="check"><input id="qwenFormatting" type="checkbox" checked>Qwen 提示词整理</label>
-            <div class="hint">按官方格式转换英文描述，保留原有剧情、动作与时间；台词和画面文字保持原文。</div>
-            <div id="referenceAdvanced" class="hidden"><label class="field-label" for="referenceSize">参考图细节</label><select id="referenceSize"><option value="match">匹配生成画质</option><option value="max">更多细节 · 更慢</option></select><div class="hint">参考图与首尾帧均支持 PDD 8 步或原版 20 步。</div></div>
-            <label class="check"><input id="peopleEnhancement" type="checkbox">人物写实增强</label>
-            <div class="row"><div><label class="field-label" for="seed">随机种子</label><input id="seed" type="number" min="0" max="9007199254740991" placeholder="自动随机"></div><div><label class="field-label" for="strength">人物写实强度</label><input id="strength" type="number" value="0.7" min="0" max="1" step="0.1" disabled></div></div>
-            <div class="hint">留空自动随机；多条生成时，仅第一条使用指定种子。</div>
-            <button type="button" id="resetAdvanced" class="preset-reset">恢复推荐设置</button>
-          </div></details>
-          <div id="error" class="error hidden" role="alert"></div>
-          <button class="primary" id="generate" type="submit" disabled>请先连接 Google</button>
-          </div>
-        </form>
-      </div>
-    </section>
-    <section class="card task-stream-card" id="taskStreamCard" aria-label="任务队列与作品">
-      <div class="task-stream-heading">
-        <div class="task-stream-title">
-          <h2 class="card-title">任务队列与作品</h2>
-          <span id="taskStreamSummary" class="task-stream-count">0</span>
-        </div>
-        <div class="task-stream-toolbar">
-          <div class="history-clear-group">
-            <button id="clearHistory" class="history-clear-all" type="button" title="将已完成作品移入系统回收箱" disabled>移除已完成</button>
-            <div id="historyClearConfirm" class="history-remove-confirm" role="group" aria-label="确认全部移入回收箱" hidden>
-              <p>全部移到回收箱？</p>
-              <div class="history-confirm-actions">
-                <button id="cancelClearHistory" type="button">取消</button>
-                <button id="confirmClearHistory" class="history-confirm-commit" type="button">移除</button>
-              </div>
-              <p class="history-remove-error" role="alert"></p>
-            </div>
-          </div>
-        </div>
-      </div>
-      <span id="historyFeedback" class="sr-only" role="status"></span>
-      <div id="taskStreamList" class="task-stream-list" role="feed" aria-label="任务与作品列表">
-        <div id="taskStreamEmpty" class="task-stream-empty">
-          <span class="empty-icon" aria-hidden="true">🎬</span>
-          <p>暂无任务，在左侧输入画面描述开始创作</p>
-        </div>
-      </div>
-    </section>
-
-  </main>
-  <main id="characterPage" class="character-page hidden" role="tabpanel" aria-labelledby="manageCharacters" hidden>
-  <section id="characterManager" class="card character-manager" aria-labelledby="characterManagerTitle">
-    <div class="character-heading"><h2 id="characterManagerTitle">角色管理</h2><button id="newCharacter" class="secondary" type="button">＋ 新建角色</button></div>
-    <div class="manager-toolbar"><label class="manager-search"><span class="sr-only">搜索角色</span><input id="characterSearch" type="search" placeholder="搜索名称、外观或声音描述"></label></div>
-    <div class="manager-summary"><span id="characterManagerCount" class="hint">读取角色库…</span><label class="manager-trash"><input id="showDeletedCharacters" type="checkbox">显示已删除角色</label></div>
-    <div id="characterManagerList" class="manager-list"></div>
-    <div id="characterManagerStatus" class="hint" role="status"></div><div id="characterManagerError" class="error hidden" role="alert"></div>
-  </section>
-  <section id="characterDialog" class="card character-editor hidden" aria-labelledby="characterDialogTitle" hidden>
-    <form id="characterForm">
-      <div class="character-heading"><h2 id="characterDialogTitle">新建角色</h2><button id="closeCharacter" class="secondary" type="button">返回角色列表</button></div>
-      <div class="character-editor-columns"><div class="character-editor-visual">
-      <label class="field-label" for="characterName">角色名称</label><input id="characterName" required maxlength="30" pattern="[A-Za-z0-9_\u4e00-\u9fff\-]+" placeholder="例如：男主、小明、机械巨龙">
-      <p class="hint">用于 @ 引用，名称不含空格。</p>
-      <label class="field-label" for="characterDescription">外观与保留特征</label><textarea id="characterDescription" maxlength="500" placeholder="例如：红衣少年，保留面部、短发和红色外套"></textarea>
-      <div class="character-heading asset-heading"><span class="field-label">参考图 · 至少一张</span><label class="asset-upload" for="characterImages">＋ 添加图片</label></div>
-      <input id="characterImages" class="file-input" type="file" multiple accept="image/png,image/jpeg,image/webp" aria-label="添加角色参考图"><div id="characterImageAssets" class="character-assets"></div>
-      </div><div class="character-editor-voice">
-      <label class="field-label" for="characterVoice">声音描述 · 可选</label><input id="characterVoice" maxlength="300" placeholder="例如：年轻男声，偏低沉，普通话，略带沙哑">
-      <div class="character-heading asset-heading"><span class="field-label">声音样本 · 可选</span><label class="asset-upload" for="characterAudios">＋ 添加音频</label></div>
-      <input id="characterAudios" class="file-input" type="file" multiple accept=".wav,.mp3,.m4a,.ogg,.flac,.aac" aria-label="添加角色声音样本"><div id="characterAudioAssets" class="character-audios"></div>
-      <p class="hint">最多 3 段，共 15 秒；单段 2–15 秒、≤ 20MB。仅参考音色。</p>
-      </div></div>
-      <div id="characterEditorStatus" class="hint" role="status"></div><div id="characterEditorError" class="error hidden" role="alert"></div>
-      <button id="saveCharacter" class="primary" type="submit">保存角色</button>
-    </form>
-  </section>
-  </main>
+  <!-- APP_CONTENTS -->
   <main id="computePage" class="compute-page workspace-page hidden" aria-labelledby="computePageTitle" hidden>
     <div class="workspace-page-heading"><div><span class="application-kicker">COMPUTE</span><h2 id="computePageTitle">算力</h2><p>选择运行应用的云端算力，管理连接与释放。</p></div></div>
     <section class="provider-grid" id="providerList" aria-label="算力提供商"></section>
-    <div class="compute-columns"><section class="card compute-config"><h3 class="card-title">运行配置</h3><p class="hint">当前应用：H3 视频。开始生成时才申请显卡。</p>            <label class="field-label" for="gpu">Colab 显卡</label><select id="gpu"><option value="G4" selected>G4 · Blackwell · 96GB</option><option value="A100">A100 · 需要 80GB</option></select>
-            <label class="field-label" for="endpoint">Colab 运行时</label><select id="endpoint"><option value="">自动申请 G4 · 按需连接</option></select><div class="hint">可复用同型号运行时；切换型号前请释放 GPU。</div>
+    <div class="compute-columns"><section class="card compute-config"><h3 class="card-title">运行配置</h3><p id="computeCurrentAppHint" class="hint">当前应用：<strong id="computeCurrentAppName">H3 视频</strong>。开始生成时才申请显卡。</p>            <label class="field-label" for="gpu">Colab 显卡</label><select id="gpu"><option value="G4" selected>G4 · Blackwell · 96GB</option><option value="A100">A100 · 需要 80GB</option><option value="H100">H100 · Hopper · 80GB</option><option value="L4">L4 · 24GB</option><option value="T4">T4 · 16GB</option></select>
+            <label class="field-label" for="endpoint">Colab 运行时</label><select id="endpoint"><option value="">自动申请 G4 · 按需连接</option></select><div class="hint">可自动发现并复用已有在线运行时；切换型号前请释放 GPU。</div>
           <fieldset class="release-config"><legend>显卡释放</legend>
             <label class="release-choice"><input type="radio" name="releaseMode" value="always">整批生成后释放</label>
             <div class="release-option"><label class="release-choice"><input type="radio" name="releaseMode" value="idle" checked>闲置后释放 <span>默认</span></label><div id="idleReleaseOptions" class="idle-release-options"><label for="idleMinutes">闲置</label><input id="idleMinutes" type="number" min="1" max="120" step="1" value="10"><span>分钟</span></div></div>
@@ -281,12 +169,38 @@ while True:
   </main>
   </div>
   <dialog id="assetViewer" class="asset-viewer" aria-labelledby="assetViewerTitle"><div class="asset-viewer-heading"><h2 id="assetViewerTitle">素材预览</h2><button id="closeAssetViewer" type="button" class="secondary">关闭</button></div><div id="assetViewerContent"></div><div id="assetViewerActions" class="actions"></div></dialog>
-  <dialog id="characterImageViewer" class="character-image-viewer" aria-labelledby="characterImageTitle">
-    <div class="character-image-toolbar">
-      <h2 id="characterImageTitle">角色参考图</h2>
-      <div class="character-image-controls"><button id="previousCharacterImage" type="button" aria-label="上一张角色图片">←</button><button id="nextCharacterImage" type="button" aria-label="下一张角色图片">→</button><button id="closeCharacterImage" type="button" aria-label="关闭图片预览" autofocus>×</button></div>
+  <dialog id="assetPickerDialog" class="asset-picker-dialog" aria-labelledby="assetPickerTitle">
+    <div class="asset-picker-container">
+      <div class="asset-picker-header">
+        <div class="asset-picker-header-title">
+          <h2 id="assetPickerTitle">从素材库选择素材</h2>
+          <span id="assetPickerLimitHint" class="hint">点击选择素材，支持多选</span>
+        </div>
+        <button id="closeAssetPicker" type="button" class="asset-picker-close-btn" aria-label="关闭选择器">✕</button>
+      </div>
+      <div class="asset-picker-toolbar">
+        <div class="asset-picker-filters">
+          <label for="assetPickerAppFilter">应用
+            <select id="assetPickerAppFilter"><option value="">全部应用</option></select>
+          </label>
+          <label for="assetPickerPurposeFilter">用途
+            <select id="assetPickerPurposeFilter"><option value="">全部用途</option></select>
+          </label>
+        </div>
+        <input id="assetPickerSearch" type="search" placeholder="搜索素材名称…" aria-label="搜索素材">
+      </div>
+      <div id="assetPickerError" class="error hidden" role="alert"></div>
+      <div id="assetPickerGrid" class="asset-picker-grid" role="listbox" aria-multiselectable="true"></div>
+      <div class="asset-picker-footer">
+        <div class="asset-picker-selection-info">
+          <span id="assetPickerSelectedCount">已选 0 项</span>
+        </div>
+        <div class="actions">
+          <button id="cancelAssetPicker" type="button" class="secondary">取消</button>
+          <button id="confirmAssetPicker" type="button" class="primary" disabled>确认选择</button>
+        </div>
+      </div>
     </div>
-    <div class="character-image-stage"><img id="characterImageFull" alt="角色参考图" hidden><p id="characterImageStatus" role="status"></p></div>
   </dialog>
 </body>
 </html>

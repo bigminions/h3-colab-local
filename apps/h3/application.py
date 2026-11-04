@@ -42,7 +42,7 @@ class H3JobConfig(BaseModel):
     strength: float = Field(default=.7, ge=0, le=1)
     release_mode: Literal['always', 'idle', 'manual'] = 'idle'
     idle_minutes: int = Field(default=10, ge=1, le=120)
-    gpu: Literal['A100', 'G4'] = 'A100'
+    gpu: str = 'A100'
     endpoint: str | None = None
     generation_type: Literal['text', 'image'] | None = None
     references: list[ReferenceImage] = Field(default_factory=list, max_length=9)
@@ -95,6 +95,7 @@ class H3JobConfig(BaseModel):
 
 class H3Application:
     config_model = H3JobConfig
+    web_dir = Path(__file__).parent / 'web'
     spec = ApplicationSpec(
         id='h3', name='H3 视频', description='文生视频、图生视频与角色参考',
         output_kind='video', providers=('colab',),

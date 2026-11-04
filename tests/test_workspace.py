@@ -65,6 +65,15 @@ class MediaLibraryTests(unittest.TestCase):
         self.assertFalse(assets[0]['local'])
         self.assertTrue(assets[1]['local'])
 
+    def test_video_library_handles_legacy_jobs_without_app_id(self):
+        remote = 'c'*32
+        jobs = [{'id': remote, 'drive': {'size': 200}, 'created': 3, 'config': {'title': '历史作品'}}]
+        assets = self.library.list('videos', jobs)
+        self.assertEqual(len(assets), 1)
+        self.assertEqual(assets[0]['app_id'], 'h3')
+        self.assertEqual(assets[0]['name'], '历史作品')
+        self.assertTrue(assets[0]['recoverable'])
+
 
 class WorkspaceAPITests(unittest.TestCase):
     def setUp(self):
@@ -240,3 +249,101 @@ class AdapterTests(unittest.TestCase):
         providers.register('colab', lambda c: MagicMock())
         providers.validate(registry.get('image'), image_cfg.provider_id, image_cfg.gpu)
 
+
+
+class UiOptimizationTests(unittest.TestCase):
+    def test_generic_asset_picker_dialog_present(self):
+        studio_html = Path("studio.html").read_text(encoding="utf-8")
+        self.assertIn('id="assetPickerDialog"', studio_html)
+        self.assertIn('class="asset-picker-dialog"', studio_html)
+        self.assertIn('id="assetPickerGrid"', studio_html)
+        self.assertIn('id="confirmAssetPicker"', studio_html)
+
+        ws_js = Path("static/workspace.js").read_text(encoding="utf-8")
+        self.assertIn("openAssetPicker", ws_js)
+
+    def test_top_tabs_cancelled_in_studio(self):
+        studio_html = Path("studio.html").read_text(encoding="utf-8")
+        self.assertIn('id="applicationHeading"', studio_html)
+        self.assertIn('style="display:none;"', studio_html)
+
+    def test_h3_heading_switches_and_character_manager_modal(self):
+        h3_html = Path("apps/h3/web/content.html").read_text(encoding="utf-8")
+        self.assertIn('creation-heading-left', h3_html)
+        self.assertIn('id="textTab"', h3_html)
+        self.assertIn('id="imageTab"', h3_html)
+        self.assertIn('id="manageCharacters"', h3_html)
+
+        # Character management is a dialog modal
+        self.assertIn('<dialog id="characterPage"', h3_html)
+        self.assertIn('id="closeCharacterModal"', h3_html)
+
+    def test_merged_add_image_and_library_pick(self):
+        # H3
+        h3_html = Path("apps/h3/web/content.html").read_text(encoding="utf-8")
+        self.assertIn('id="referenceDropZone"', h3_html)
+        self.assertIn('id="btnUploadLocal"', h3_html)
+        self.assertIn('id="chooseLibraryImage"', h3_html)
+
+        # Qwen-Image
+        qi_html = Path("apps/qwen_image/web/content.html").read_text(encoding="utf-8")
+        self.assertIn('id="qiReferenceDropZone"', qi_html)
+        self.assertIn('id="qiBtnUploadLocal"', qi_html)
+        self.assertIn('id="qiChooseLibraryImage"', qi_html)
+
+    def test_caret_following_mention_and_clean_ui(self):
+        chars_js = Path("apps/h3/web/characters.js").read_text(encoding="utf-8")
+        self.assertIn("getCaretCoordinates", chars_js)
+        self.assertIn("positionMentionMenu", chars_js)
+        self.assertIn("mention-thumb-box", chars_js)
+        self.assertIn("mention-name", chars_js)
+
+    def test_character_manager_card_simplified_and_robust_layout(self):
+        chars_js = Path("apps/h3/web/characters.js").read_text(encoding="utf-8")
+        self.assertIn("card.onclick = () => {", chars_js)
+        self.assertIn("openEditor(profile, !!profile.deleted)", chars_js)
+        self.assertNotIn("viewBtn.textContent = '查看'", chars_js)
+        self.assertNotIn("editBtn.textContent = '编辑'", chars_js)
+        rm_body = chars_js.split("function renderManager")[1].split("async function load")[0]
+        self.assertNotIn("张参考图", rm_body)
+        self.assertIn("delBtn.onclick = async (event) => {", chars_js)
+        self.assertIn("event.stopPropagation()", chars_js)
+        self.assertIn("body.append(title, delBtn)", chars_js)
+
+        css = Path("apps/h3/web/workbench.css").read_text(encoding="utf-8")
+        self.assertIn("aspect-ratio: 4 / 5 !important", css)
+        self.assertIn("cursor: pointer !important", css)
+
+    def test_h3_gpu_card_styling(self):
+        css = Path("apps/h3/web/workbench.css").read_text(encoding="utf-8")
+        self.assertIn("#toolPage .h3-gpu-card-wrap", css)
+        self.assertIn("#toolPage .h3-gpu-card", css)
+        self.assertIn("#toolPage .h3-gpu-select", css)
+        self.assertIn("#toolPage .h3-gpu-badge", css)
+        self.assertIn("#toolPage .h3-gpu-name", css)
+        self.assertIn("#toolPage .h3-gpu-status", css)
+        self.assertIn("#toolPage #generate", css)
+
+    def test_app_and_page_persistence_across_refresh(self):
+        studio_html = Path("studio.html").read_text(encoding="utf-8")
+        self.assertIn("lstudio-active-page", studio_html)
+        self.assertIn("dataset.initialPage", studio_html)
+        self.assertIn('id="computeCurrentAppHint"', studio_html)
+        self.assertIn('id="computeCurrentAppName"', studio_html)
+
+        ws_js = Path("static/workspace.js").read_text(encoding="utf-8")
+        self.assertIn("lstudio-active-app", ws_js)
+        self.assertIn("lstudio-active-page", ws_js)
+        self.assertIn("updateComputeAppInfo", ws_js)
+        self.assertIn("activeApp", ws_js)
+        self.assertIn("useImageForQi", ws_js)
+        self.assertIn("lstudio-library-kind", ws_js)
+        self.assertIn("lstudio-library-app", ws_js)
+
+        qi_js = Path("apps/qwen_image/web/qwen-image.js").read_text(encoding="utf-8")
+        self.assertIn("useImage", qi_js)
+
+        chars_js = Path("apps/h3/web/characters.js").read_text(encoding="utf-8")
+        self.assertNotIn("showPage('tool')", chars_js)
+        static_chars_js = Path("static/characters.js").read_text(encoding="utf-8")
+        self.assertNotIn("showPage('tool')", static_chars_js)

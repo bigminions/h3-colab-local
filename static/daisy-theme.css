@@ -335,13 +335,17 @@ body {
 }
 
 /* 3. Top Tabs (创作 / 角色管理) */
-.application-heading .page-tabs {
+.application-heading .page-tabs:not([hidden]):not(.hidden) {
   background-color: #171d28 !important;
   border: 1px solid #30394a !important;
   border-radius: 10px !important;
   padding: 4px !important;
   display: inline-flex !important;
   gap: 3px !important;
+}
+.application-heading .page-tabs.hidden,
+.application-heading .page-tabs[hidden] {
+  display: none !important;
 }
 
 .application-heading .page-tab {
@@ -371,7 +375,6 @@ body {
 .card,
 .creation-card,
 .task-stream-card,
-.character-manager,
 .character-editor,
 .compute-config,
 .compute-account,
@@ -460,37 +463,36 @@ select:focus {
 
 /* Number Stepper */
 .count-stepper {
-  display: inline-flex !important;
-  align-items: center !important;
-  background-color: #11151d !important;
-  border: 1px solid #3a4252 !important;
-  border-radius: 8px !important;
-  overflow: hidden !important;
+  display: inline-flex;
+  align-items: center;
+  background-color: #11151d;
+  border: 1px solid #3a4252;
+  border-radius: 8px;
+  overflow: hidden;
 }
 
 .count-stepper button {
-  background: transparent !important;
-  border: none !important;
-  color: #9da8bc !important;
-  padding: 4px 10px !important;
-  cursor: pointer !important;
-  font-size: 14px !important;
-  transition: background-color 0.15s !important;
+  background: transparent;
+  border: none;
+  color: #9da8bc;
+  padding: 4px 6px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: background-color 0.15s;
 }
 
 .count-stepper button:hover:not(:disabled) {
-  background-color: #202633 !important;
-  color: #fff !important;
+  background-color: #202633;
+  color: #fff;
 }
 
 .count-stepper input {
-  background: transparent !important;
-  border: none !important;
-  color: #edf1f8 !important;
-  font-weight: 600 !important;
-  font-family: ui-monospace, monospace !important;
-  text-align: center !important;
-  width: 32px !important;
+  background: transparent;
+  border: none;
+  color: #edf1f8;
+  font-weight: 600;
+  font-family: ui-monospace, monospace;
+  text-align: center;
 }
 
 /* Format Tiles (Aspect Ratio) */
@@ -758,4 +760,47 @@ input[type="checkbox"] {
 /* 6. Footer in Collapsed Mode */
 .sidebar-collapsed .sidebar-foot {
   display: none !important;
+}
+
+
+/* ==========================================================================
+   Character File Input & Lightbox Polish
+   ========================================================================== */
+
+/* Fix DaisyUI .file-input collision: Keep hidden file inputs strictly invisible */
+input[type="file"].file-input,
+.file-input {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+/* Lightbox Modal & Mention Menu Polish */
+.character-image-viewer {
+  width: min(1040px, calc(100vw - 32px)) !important;
+  max-width: none !important;
+  max-height: calc(100dvh - 32px) !important;
+  padding: 20px !important;
+  border: 1px solid #45536a !important;
+  border-radius: 16px !important;
+  background: #141a25 !important;
+  color: #e4ecfa !important;
+  margin: auto !important;
+}
+
+.mention-option .mention-thumbnail {
+  width: 34px !important;
+  height: 34px !important;
+  max-width: none !important;
+  object-fit: cover !important;
+  border-radius: 6px !important;
+  flex-shrink: 0 !important;
 }

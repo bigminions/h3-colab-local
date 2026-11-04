@@ -1,17 +1,25 @@
 # LStudio 架构：应用、算力与素材库
 
-工作台在本机管理导航、任务和素材，远程资源只负责运行应用。当前交付的应用是 H3，已接入的算力是 Colab；生图、RunPod 和 Modal 需要后续各自的实现与实测。
+工作台在本机管理导航、任务和素材，远程资源只负责运行应用。当前交付的应用是 H3 视频与 Qwen-Image-2.1 生图，已接入的算力是 Colab；RunPod 和 Modal 需要后续各自的实现与实测。
 
 ## 应用
 
 工作台采用应用模块化架构，所有应用独立维护在 `apps/<app_id>/` 目录下，互不影响：
 
 - **H3 视频应用 (`apps/h3/`)**：
-  - `application.py`：拥有 H3 应用规范 (`ApplicationSpec`)、`H3JobConfig` 参数模型、素材校验钩子 (`validate_assets`)、远程程序打包 (`source()`)、输入素材清单、执行入口与空闲探测。H3 的页面位于 `studio.html` 的应用区域，创作与角色管理是其内部 tab。
+  - `application.py`：拥有 H3 应用规范 (`ApplicationSpec`)、`H3JobConfig` 参数模型、素材校验钩子 (`validate_assets`)、远程程序打包 (`source()`)、输入素材清单、执行入口与空闲探测。
   - `characters.py`：角色素材管理、外观特征、声音样本与 `@` 提及展开。
   - `remote_h3.py`：Colab 远程 ComfyUI 工作流构建、模型加载与推理代码。
   - `h3_prompt.py`、`h3_prompt_worker.py`：Qwen 剧本理解、提示词整理与节点运行。
+  - `web/`：前端专属目录，包含 `content.html`（创作与角色管理面板）、`workbench.css`、`workbench.js`、`characters.js`。
   - 根目录保留同名兼容转发层（`h3_application.py`、`remote_h3.py`、`characters.py`、`h3_prompt.py`、`h3_prompt_worker.py`），保证现有脚本和外部引用完全兼容。
+
+- **Qwen-Image-2.1 生图应用 (`apps/qwen_image/`)**：
+  - `application.py`：拥有 Qwen-Image-2.1 应用规范 (`ApplicationSpec`)、`QwenImageJobConfig` 参数模型、素材校验钩子 (`validate_assets`)、远程程序打包 (`source()`)、输入素材清单、执行入口与空闲探测。
+  - `remote_qwen_image.py`：对接社区开源模型库 `abenzerps/Qwen-Image-2.1-Turbo-Quantized`，构建 ComfyUI 工作流（支持 `leejet/ComfyUI-GGUF` 的 UnetLoaderGGUF 以及标准 UNETLoader、Qwen3-VL 文本编码器与 VAE），完成远端环境准备、采样执行与图片生成。
+  - `web/`：前端专属目录，包含 `content.html`（文生图与图生图面板）、`qwen-image.css`、`qwen-image.js`。
+  - 根目录保留同名兼容转发层（`qwen_image_application.py`、`remote_qwen_image.py`）。
+  - 素材用途声明 `references`（创作参考图）与 `outputs`（生成图片），物理保存于 `materials/qwen_image_2_1/` 下。
 
 `workspace_runtime.py` 定义应用协议 (`ApplicationProtocol`)、应用描述和注册表。任务提交统一由目标应用的 `config_model` 与 `validate_assets` 独立校验，由提供商注册表检查算力配置。
 
@@ -35,7 +43,11 @@ GPU 选择作为工作台算力偏好保存；释放策略继续保存在本机�
 
 ## 界面与验证
 
-`static/workspace.js` 与 `static/workspace.css` 管理全局壳层、导航、算力入口和素材库；`workbench.js` 与 `characters.js` 管理 H3 创作、当前任务流和角色交互，页面只渲染现行面板。左下角设置上方的算力卡片显示常用状态并打开算力页，顶部只显示页面位置。素材库按应用、用途和类型筛选，并显示导入目标。左侧“设置”存放通知、素材路径和开发者接口。
+工作台与各应用界面严格遵循 [PRINCIPLES.md](PRINCIPLES.md) 中定义的五大核心设计原则（简洁、易用、界面美观、用 DaisyUI 统一风格、交互友好细腻）。前端基于全局声明的 DaisyUI 暗色主题（`data-theme="dark"`）与 Tailwind CSS 语义化组件构建，严禁在外部样式中编写全局冲突的 `!important` 标签覆盖层，保证所有卡片、弹窗与操作按钮具有统一精细的触感与规范的盒模型。
+
+`static/workspace.js` 与 `static/workspace.css` 管理全局壳层、侧边栏导航、算力入口和素材库等公共组件，不侵入各应用业务逻辑；各应用的前端（`content.html`、专属 CSS 和 JS）存放在各自的 `apps/<app_id>/web/` 目录下。启动时，服务端自动挂载各应用 web 静态路径，并在 `studio.html` 中注入对应内容与样式脚本。
+
+顶栏应用导航根据当前激活的应用展示其内部 tab（如 H3 的“创作/角色管理”，Qwen-Image 的“生图创作”），各应用面板在切换时严格隔离显隐。左下角设置上方的算力卡片显示常用状态并打开算力页，顶部只显示页面位置。素材库按应用、用途和类型筛选，并显示导入目标。左侧“设置”存放通知、素材路径和开发者接口。
 
 离线测试见 `tests/test_workspace.py`，覆盖应用用途目录边界、角色引用、按用途导入、非法文件清理、注册表不可用状态及应用与提供商解耦。已有 H3 测试继续验证执行、恢复、校验和释放。
 

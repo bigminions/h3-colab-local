@@ -91,7 +91,7 @@ class ProviderRegistry:
             raise ValueError(spec.name + ' 尚未接入')
         if provider_id not in app.spec.providers:
             raise ValueError('该应用不支持所选算力提供商')
-        if gpu not in spec.gpus:
+        if spec.gpus and gpu not in spec.gpus and provider_id != 'colab':
             raise ValueError('所选算力不支持该显卡')
 
     def create(self, provider_id, controller):

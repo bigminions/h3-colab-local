@@ -1,5 +1,28 @@
+function updateH3GpuDisplay() {
+  const select = $('h3Gpu'), display = $('h3GpuDisplay'), status = $('h3GpuStatus');
+  if (!select || !display) return;
+  const opt = select.selectedOptions?.[0];
+  const t = (opt ? opt.textContent : select.value) || '';
+  if (t.includes('(🟢')) {
+    const parts = t.split('(🟢');
+    display.textContent = parts[0].trim();
+    if (status) {
+      status.textContent = '🟢 ' + parts[1].replace(')', '').trim();
+      status.classList.remove('status-idle');
+      status.classList.add('status-online');
+    }
+  } else {
+    display.textContent = t.trim();
+    if (status) {
+      status.textContent = 'Wan 2.1 推荐配置';
+      status.classList.remove('status-online');
+      status.classList.add('status-idle');
+    }
+  }
+}
+
 'use strict';
-const $ = id => document.getElementById(id);
+window.$ = window.$ || (id => document.getElementById(id));
 const KEY = $('apiKey').value;
 let authorized = false;
 let latestJobs = [];
@@ -78,15 +101,26 @@ async function api(path, options = {}) {
     ...options,
     headers: {'X-LStudio-Key': KEY, ...(options.body instanceof FormData ? {} : {'Content-Type':'application/json'}), ...options.headers}
   });
-  const data = await response.json();
-  if (!response.ok) throw Error(typeof data.detail === 'string' ? data.detail : Array.isArray(data.detail) ? data.detail.map(item => String(item.msg || '参数不正确').replace(/^Value error, /,'')).join('；') : '请求失败');
+  let data = null;
+  try {
+    data = await response.json();
+  } catch (_) {}
+  if (!response.ok) {
+    const detail = data && (typeof data.detail === 'string' ? data.detail : Array.isArray(data.detail) ? data.detail.map(item => String(item.msg || '参数不正确').replace(/^Value error, /,'')).join('；') : null);
+    throw Error(detail || `请求失败 (${response.status})`);
+  }
   return data;
 }
 
 function error(message) {
-  $('error').textContent = message;
-  $('error').classList.toggle('hidden', !message);
+  const el = $('error');
+  if (el) {
+    el.textContent = message;
+    el.classList.toggle('hidden', !message);
+  }
 }
+window.showError = error;
+window.error = error;
 
 function updatePerformance() {
   const enabled = $('performance').checked;
@@ -169,6 +203,48 @@ function referenceData() {
   return references.filter(r => r.image_id).map(({slot, image_id, role, description, frame}) => ({slot, image_id, role, description, frame:frame || 'reference'}));
 }
 
+
+async function pickFromLibrary() {
+  if (references.length >= 9) {
+    return error('最多使用 9 张图片，请先移除已有参考图。');
+  }
+  const remaining = 9 - references.length;
+  const inUse = references.map(r => r.image_id).filter(Boolean);
+
+  if (!window.Workspace?.openAssetPicker) return;
+  const picked = await window.Workspace.openAssetPicker({
+    kind: 'images',
+    maxCount: remaining,
+    alreadySelectedIds: inUse,
+    title: '从素材库选择参考图片'
+  });
+
+  if (!picked || !picked.length) return;
+
+  for (const asset of picked) {
+    if (references.length >= 9 || references.some(r => r.image_id === asset.id)) continue;
+    const slot = Array.from({length: 9}, (_, i) => i + 1).find(idx => !references.some(r => r.slot === idx));
+    if (!slot) break;
+    let url = '';
+    try {
+      const resp = await fetch(asset.url, { headers: { 'X-LStudio-Key': KEY } });
+      if (resp.ok) url = URL.createObjectURL(await resp.blob());
+    } catch (_) {}
+    references.push({
+      slot,
+      image_id: asset.id,
+      role: 'other',
+      description: '',
+      frame: 'reference',
+      url: url || asset.url
+    });
+  }
+  setMode('image');
+  renderReferences();
+  saveDraft();
+  window.H3Characters?.refreshUse();
+}
+
 function renderReferences() {
   $('referenceCount').textContent = `${references.length} / 9 张`;
   const dropZone = $('referenceDropZone');
@@ -210,7 +286,16 @@ function renderReferences() {
     remove.onclick = () => { if (ref.url) URL.revokeObjectURL(ref.url); references = references.filter(r => r !== ref); renderReferences(); saveDraft(); };
     actions.append(insert,replace,remove); card.append(preview,state,frameButtons,actions,input); $('referenceCards').append(card);
   }
-  $('referenceCards').append(dropZone);
+  if (references.length < 9) {
+    dropZone.hidden = false;
+    dropZone.classList.remove('hidden');
+    dropZone.style.display = '';
+    $('referenceCards').append(dropZone);
+  } else {
+    dropZone.hidden = true;
+    dropZone.classList.add('hidden');
+    dropZone.style.display = 'none';
+  }
   updateModelControls(); updateGenerate(); updateFormat();
   window.H3Characters?.refreshUse();
 }
@@ -344,6 +429,7 @@ function saveDraft() {
     const value = {studioMode};
     for (const id of ['prompt','resolution','duration','count','mode','strength','encoder']) value[id] = $(id).value;
     value.aspectRatio = selectedRatio();
+    value.gpu = $('h3Gpu')?.value || $('gpu')?.value || 'G4';
     value.peopleEnhancement = $('peopleEnhancement').checked;
     value.performance = $('performance').checked;
     value.quantizedModel = $('quantizedModel').checked;
@@ -362,7 +448,10 @@ function restoreDraft() {
     const draft = JSON.parse(localStorage.getItem(DRAFT) || 'null');
     const compute = JSON.parse(localStorage.getItem('lstudio-compute-v1') || 'null');
     const gpu = compute?.gpu;
-    if (['G4','A100'].includes(gpu)) $('gpu').value = gpu;
+    if (gpu && $('gpu')?.options && [...$('gpu').options].some(o => o.value === gpu)) $('gpu').value = gpu;
+    const savedH3Gpu = localStorage.getItem('lstudio-h3-gpu') || draft?.gpu || 'G4';
+    if (savedH3Gpu && $('h3Gpu')?.options && [...$('h3Gpu').options].some(o => o.value === savedH3Gpu)) $('h3Gpu').value = savedH3Gpu;
+    if (typeof updateH3GpuDisplay === 'function') updateH3GpuDisplay();
     if (!draft) return;
     for (const id of ['prompt','resolution','duration','count','mode','strength','encoder']) {
       if (typeof draft[id] !== 'string') continue;
@@ -587,7 +676,7 @@ function renderBalance(data, failure = null) {
   $('remainingTime').textContent = !hasEstimate ? '—' : minutes === 0 && available > 0 ? '不足 1 分钟' : `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`;
   const rateSource = (failure || data?.stale) && estimate?.rate_source === 'live' ? 'last_observed' : estimate?.rate_source;
   const source = {reference:'参考',last_observed:'上次',live:'实时'}[rateSource];
-  $('estimateBasis').textContent = estimate && source ? `按 ${estimate.rate_hourly.toFixed(2)} 单元/小时（${source}）` : gpu === 'G4' ? '连接 G4 后读取实际费率' : '';
+  $('estimateBasis').textContent = estimate && source ? `按 ${estimate.rate_hourly.toFixed(2)} 单元/小时（${source}）` : `连接 ${gpu} 后读取实际费率`;
   $('estimateDetail').title = estimate && source ? `按 ${estimate.rate_hourly.toFixed(2)} 单元/小时换算。${rateSource === 'reference' ? '参考设置期间观测的费率。' : rateSource === 'last_observed' ? '使用账户上次单独运行 ' + gpu + ' 时的实际费率。' : '使用当前单张 ' + gpu + ' 的实际费率。'}这是累计 GPU 使用时长，包含模型准备，不是成片时长或单次连接时限。` : '';
   const updated = data?.updated_at ? new Date(data.updated_at * 1000).toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false,timeZone:'Asia/Shanghai'}) : null;
   const stale = !!failure || data?.stale;
@@ -625,11 +714,66 @@ async function refreshAccount(force = false) {
   }
 }
 
+const KNOWN_GPU_LABELS = {
+  G4: 'G4 · Blackwell · 96GB',
+  A100: 'A100 · 需要 80GB',
+  H100: 'H100 · Hopper · 80GB',
+  L4: 'L4 · 24GB',
+  T4: 'T4 · 16GB'
+};
+
+function updateDiscoveredGpuOptions(allRuntimes) {
+  if (window.Workspace?.syncGpuSelects) {
+    window.Workspace.syncGpuSelects(allRuntimes);
+    if (typeof updateH3GpuDisplay === 'function') updateH3GpuDisplay();
+  }
+  const gpuSelect = $('gpu');
+  if (!gpuSelect) return;
+  const currentGpu = gpuSelect.value || 'G4';
+  const onlineCounts = {};
+  for (const r of (allRuntimes || [])) {
+    if (r.gpu) onlineCounts[r.gpu] = (onlineCounts[r.gpu] || 0) + 1;
+  }
+  const gpus = ['G4', 'A100', 'H100', 'L4', 'T4'];
+  for (const g of Object.keys(onlineCounts)) {
+    if (!gpus.includes(g)) gpus.push(g);
+  }
+  const options = [];
+  for (const g of gpus) {
+    const base = KNOWN_GPU_LABELS[g] || `${g} · 远程检测`;
+    const count = onlineCounts[g] || 0;
+    const text = count > 0 ? `${base} (🟢 ${count}台在线)` : base;
+    options.push(new Option(text, g));
+  }
+  gpuSelect.replaceChildren(...options);
+  if (gpus.includes(currentGpu)) {
+    gpuSelect.value = currentGpu;
+  } else if (gpus.length) {
+    gpuSelect.value = gpus[0];
+  }
+}
+
 function renderRuntimes(data) {
+  const allRuntimes = (data?.runtimes && data.runtimes.length) ? data.runtimes : (onlineGpuState?.runtimes || []);
+  updateDiscoveredGpuOptions(allRuntimes);
   const chosen = $('endpoint').value, gpu = $('gpu').value;
   $('endpoint').replaceChildren(new Option('自动申请 ' + gpu + ' · 按需连接', ''));
-  for (const runtime of (data?.runtimes || []).filter(r => r.gpu === gpu)) {
-    $('endpoint').add(new Option('已有 ' + gpu + ' · ' + runtime.endpoint, runtime.endpoint));
+  const currentMatching = allRuntimes.filter(r => r.gpu === gpu);
+  for (const runtime of currentMatching) {
+    const note = runtime.managed ? ' (当前工作台占用)' : ' (在线可用)';
+    $('endpoint').add(new Option('已有 ' + gpu + ' · ' + runtime.endpoint + note, runtime.endpoint));
+  }
+  const otherRuntimes = allRuntimes.filter(r => r.gpu !== gpu);
+  if (otherRuntimes.length) {
+    const optgroup = document.createElement('optgroup');
+    optgroup.label = '其他型号在线显卡（选择后自动切换）';
+    for (const r of otherRuntimes) {
+      const note = r.managed ? ' (当前工作台占用)' : ' (在线可用)';
+      const opt = new Option('已有 ' + r.gpu + ' · ' + r.endpoint + note, r.endpoint);
+      opt.dataset.targetGpu = r.gpu;
+      optgroup.appendChild(opt);
+    }
+    $('endpoint').appendChild(optgroup);
   }
   if ([...$('endpoint').options].some(o => o.value === chosen)) $('endpoint').value = chosen;
 }
@@ -669,6 +813,7 @@ async function detectOnlineGPUs(preserveMessage = false) {
     if (!Array.isArray(data.runtimes)) throw new Error('在线显卡检测返回格式不正确');
     onlineGpuState = data;
     renderRuntimes(data);
+    renderBalance(lastAccountData);
   } catch (e) { onlineGpuState = null; gpuDetectionError = e.message; }
   finally { gpuDetectionBusy = false; renderOnlineGpuState(); }
 }
@@ -827,7 +972,7 @@ function renderTaskStream(jobs) {
   const empty = $('taskStreamEmpty');
   const scrollY = window.scrollY;
 
-  const visibleJobs = (jobs || []).filter(j => !j.history_hidden);
+  const visibleJobs = (jobs || []).filter(j => !j.history_hidden && (j.app_id === 'h3' || !j.app_id));
 
   if (!visibleJobs.length) {
     if ($('taskStreamSummary')) $('taskStreamSummary').textContent = '0 个任务';
@@ -1275,7 +1420,7 @@ async function refreshStatus() {
     window.Workspace?.updateCompute(s);
     serverActive = !!s.active;
     activeJobId = s.active || null;
-    recoveryJob = s.jobs.find(j => j.can_retry || j.can_cancel && j.cancel_requested) || null;
+    recoveryJob = s.jobs.find(j => (j.app_id === 'h3' || !j.app_id) && ((j.can_retry && j.recovery_kind !== 'download') || (j.can_cancel && j.cancel_requested))) || null;
     updateReleaseUI(s.release);
     updateGenerate();
     renderOnlineGpuState();
@@ -1285,6 +1430,7 @@ async function refreshStatus() {
     else if (!wasAuthorized) renderBalance(lastAccountData);
     $('clearHistory').disabled = historyBusy || !(s.history?.clearable ?? s.jobs.filter(j => (j.file || j.drive) && j.can_clear_history).length);
     renderTaskStream(s.jobs);
+    window.QwenImage?.update?.(s);
     const accountChanged = s.active !== lastActive || s.managed_gpu !== lastManaged || authorized !== wasAuthorized;
     lastActive = s.active; lastManaged = s.managed_gpu;
     if (authorized && accountChanged) refreshAccount(true);
@@ -1306,7 +1452,7 @@ function generationConfig() {
     duration: Number($('duration').value), count: Number($('count').value), seed: seed === '' ? (typeof crypto !== 'undefined' ? crypto.getRandomValues(new Uint32Array(1))[0] : Math.floor(Math.random() * 2**32)) : Number(seed),
     people: $('performance').checked && !referenceModelActive && $('peopleEnhancement').checked, strength: Number($('strength').value), veda: $('performance').checked && $('veda').checked,
     release_mode: selectedReleaseMode(), idle_minutes: Number($('idleMinutes').value),
-    gpu: $('gpu').value, endpoint: $('endpoint').value || null
+    gpu: $('h3Gpu')?.value || $('gpu').value, endpoint: $('endpoint').value || null
   };
 }
 
@@ -1314,15 +1460,51 @@ $('textTab').onclick = () => { setMode('text'); saveDraft(); };
 $('imageTab').onclick = () => { setMode('image'); saveDraft(); };
 $('referenceFiles').onchange = () => addReferences($('referenceFiles').files);
 const referenceDrop = $('referenceDropZone');
-referenceDrop.ondragover = e => { e.preventDefault(); referenceDrop.classList.add('dragging'); };
-referenceDrop.ondragleave = () => referenceDrop.classList.remove('dragging');
-referenceDrop.ondrop = e => { e.preventDefault(); referenceDrop.classList.remove('dragging'); addReferences(e.dataTransfer.files); };
+if (referenceDrop) {
+  referenceDrop.onclick = e => {
+    if (e.target.closest('button')) return;
+    $('referenceFiles').click();
+  };
+  referenceDrop.ondragover = e => { e.preventDefault(); referenceDrop.classList.add('dragging'); };
+  referenceDrop.ondragleave = () => referenceDrop.classList.remove('dragging');
+  referenceDrop.ondrop = e => { e.preventDefault(); referenceDrop.classList.remove('dragging'); addReferences(e.dataTransfer.files); };
+}
+$('btnUploadLocal')?.addEventListener('click', e => {
+  e.stopPropagation();
+  $('referenceFiles').click();
+});
+$('chooseLibraryImage')?.addEventListener('click', e => {
+  e.stopPropagation();
+  pickFromLibrary();
+});
 $('peopleEnhancement').onchange = () => { updateEnhancement(); saveDraft(); };
 $('qwenFormatting').onchange = saveDraft;
 $('performance').onchange = () => { updatePerformance(); saveDraft(); };
+if ($('h3Gpu')) {
+  $('h3Gpu').onchange = () => {
+    try { localStorage.setItem('lstudio-h3-gpu', $('h3Gpu').value); } catch (_) {}
+    if ($('gpu')) {
+      $('gpu').value = $('h3Gpu').value;
+      $('endpoint').value = '';
+      renderRuntimes(lastAccountData);
+      renderBalance(lastAccountData);
+    }
+    if (typeof updateH3GpuDisplay === 'function') updateH3GpuDisplay();
+    saveDraft();
+  };
+}
 $('gpu').onchange = () => {
   $('endpoint').value = ''; renderRuntimes(lastAccountData); renderBalance(lastAccountData);
   try { localStorage.setItem('lstudio-compute-v1',JSON.stringify({provider_id:'colab',gpu:$('gpu').value})); } catch (_) {}
+};
+$('endpoint').onchange = () => {
+  const selectedOpt = $('endpoint').selectedOptions?.[0];
+  if (selectedOpt && selectedOpt.dataset.targetGpu && selectedOpt.dataset.targetGpu !== $('gpu').value) {
+    $('gpu').value = selectedOpt.dataset.targetGpu;
+    renderRuntimes(lastAccountData);
+    renderBalance(lastAccountData);
+    try { localStorage.setItem('lstudio-compute-v1',JSON.stringify({provider_id:'colab',gpu:$('gpu').value})); } catch (_) {}
+  }
 };
 document.querySelectorAll('input[name="aspectRatio"]').forEach(input => { input.onchange = () => { updateFormat(); saveDraft(); }; });
 for (const id of ['resolution','duration','count']) $(id).onchange = () => { updateFormat(); saveDraft(); };
