@@ -6,9 +6,9 @@ import unittest
 from unittest.mock import MagicMock
 
 import app
-import h3_prompt as p
-import h3_prompt_worker as worker
-import remote_h3 as h3
+from apps.h3 import h3_prompt as p
+from apps.h3 import h3_prompt_worker as worker
+from apps.h3 import remote_h3 as h3
 
 
 SCRIPT = """硬朗写实青年漫风，成熟二维动漫比例，清晰黑色墨线轮廓。

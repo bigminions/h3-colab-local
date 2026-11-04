@@ -79,6 +79,19 @@ class DriveBackupEndpointTests(unittest.TestCase):
         self.assertEqual(job['status'], 'error')
         self.assertTrue(job.get('drive_backup_needed'))
 
+    def test_drive_backup_dispatches_to_h3_application(self):
+        (self.root / 'google-token.dat').touch()
+        mock_cache = MagicMock(backend='native')
+        with patch.object(app, 'PRIVATE', self.root), patch.object(app, 'drive_cache', mock_cache), \
+                patch.object(app.controller, 'active', None), \
+                patch.object(app.threading, 'Thread') as thread, \
+                patch('apps.h3.seed_drive_cache.run_backup') as backup:
+            result = app.trigger_drive_backup()
+            self.assertTrue(result['ok'])
+            thread.return_value.start.assert_called_once_with()
+            thread.call_args.kwargs['target']()
+            backup.assert_called_once_with(gpu_type='T4')
+
 
 if __name__ == '__main__':
     unittest.main()

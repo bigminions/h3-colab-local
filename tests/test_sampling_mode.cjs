@@ -2,7 +2,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const source = fs.readFileSync(require.resolve('../static/workbench.js'), 'utf8');
+const source = fs.readFileSync(require.resolve('../apps/h3/web/workbench.js'), 'utf8');
 const elements = new Map();
 const $ = id => {
   assert.notEqual(id, 'promptEnhance', 'retired rewrite control must not be accessed');

@@ -11,17 +11,18 @@
   - `characters.py`：角色素材管理、外观特征、声音样本与 `@` 提及展开。
   - `remote_h3.py`：Colab 远程 ComfyUI 工作流构建、模型加载与推理代码。
   - `h3_prompt.py`、`h3_prompt_worker.py`：Qwen 剧本理解、提示词整理与节点运行。
+  - `seed_drive_cache.py`：H3 模型备份及缓存基准工具，网页备份接口从此应用目录加载；命令行使用 `python -m apps.h3.seed_drive_cache`。
   - `web/`：前端专属目录，包含 `content.html`（创作与角色管理面板）、`workbench.css`、`workbench.js`、`characters.js`。
-  - 根目录保留同名兼容转发层（`h3_application.py`、`remote_h3.py`、`characters.py`、`h3_prompt.py`、`h3_prompt_worker.py`），保证现有脚本和外部引用完全兼容。
 
 - **Qwen-Image-2.1 生图应用 (`apps/qwen_image/`)**：
   - `application.py`：拥有 Qwen-Image-2.1 应用规范 (`ApplicationSpec`)、`QwenImageJobConfig` 参数模型、素材校验钩子 (`validate_assets`)、远程程序打包 (`source()`)、输入素材清单、执行入口与空闲探测。
   - `remote_qwen_image.py`：对接社区开源模型库 `abenzerps/Qwen-Image-2.1-Turbo-Quantized`，构建 ComfyUI 工作流（支持 `leejet/ComfyUI-GGUF` 的 UnetLoaderGGUF 以及标准 UNETLoader、Qwen3-VL 文本编码器与 VAE），完成远端环境准备、采样执行与图片生成。
   - `web/`：前端专属目录，包含 `content.html`（文生图与图生图面板）、`qwen-image.css`、`qwen-image.js`。
-  - 根目录保留同名兼容转发层（`qwen_image_application.py`、`remote_qwen_image.py`）。
   - 素材用途声明 `references`（创作参考图）与 `outputs`（生成图片），物理保存于 `materials/qwen_image_2_1/` 下。
 
 `workspace_runtime.py` 定义应用协议 (`ApplicationProtocol`)、应用描述和注册表。任务提交统一由目标应用的 `config_model` 与 `validate_assets` 独立校验，由提供商注册表检查算力配置。
+
+应用专属 Python 模块统一通过 `apps.h3` 或 `apps.qwen_image` 导入，根目录不保留旧模块的兼容转发文件。应用脚本与样式仅在各自的 `web/` 目录维护，公共 `static/` 不保存应用副本。H3 提示词工具会打包到 Colab 的独立目录，远端独立运行时使用的同目录导入不依赖本机根目录文件。
 
 后续应用只需在 `apps/` 目录下新增独立子目录（如 `apps/image/`），实现参数模型、远程适配器和中心内容页，注册其输入输出能力与支持的提供商，无需修改根目录或 H3 相关代码。不同应用的依赖不要求安装进同一个进程；兼容时可以复用运行时，不兼容时需重建。当前队列、Drive 成片恢复和回收箱保留 H3 视频语义，新输出类型接入时需要扩展这些行为。
 

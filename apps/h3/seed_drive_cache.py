@@ -109,9 +109,7 @@ def run_backup(gpu_type='T4', config=None, benchmark=False, reuse=False, concurr
                 result = json.loads(line[len('H3_CACHE_REPORT '):])
 
     cache_source = (app.BASE / 'drive_cache_remote.py').read_bytes()
-    remote_path = app.BASE / 'apps' / 'h3' / 'remote_h3.py'
-    if not remote_path.exists():
-        remote_path = app.BASE / 'remote_h3.py'
+    remote_path = Path(__file__).resolve().with_name('remote_h3.py')
     source = remote_path.read_text(encoding='utf-8')
     code = "import subprocess, sys\nsubprocess.run([sys.executable, '-m', 'pip', 'install', '-q', 'huggingface_hub'], check=True)\n"
     code += source + '\nimport types, base64, shutil\n'

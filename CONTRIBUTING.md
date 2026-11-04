@@ -6,15 +6,17 @@
 | --- | --- |
 | 文档和依赖 | `README.md`、`CONTRIBUTING.md`、`PRINCIPLES.md`、`.gitignore`、`requirements.txt`、`requirements-cached.txt` |
 | 启动 | `start.cmd`、`launch.py`、`app.py` |
-| 应用模块 (`apps/`) | `apps/h3/`（`application.py`、`remote_h3.py`、`characters.py`、`h3_prompt.py`、`h3_prompt_worker.py`、`web/` 前端资产）、`apps/qwen_image/`（`application.py`、`remote_qwen_image.py`、`web/` 前端资产）及根目录兼容垫片 |
+| 应用模块 (`apps/`) | `apps/h3/`（`application.py`、`remote_h3.py`、`characters.py`、`h3_prompt.py`、`h3_prompt_worker.py`、`seed_drive_cache.py`、`web/` 前端资产）、`apps/qwen_image/`（`application.py`、`remote_qwen_image.py`、`web/` 前端资产） |
 | 历史与回收 | `history_recycle.py` |
-| Drive | `drive_storage.py`、`drive_cache.py`、`drive_cache_remote.py`、`mounted_drive_cache.py`、`native_drive_mount.py`、`seed_drive_cache.py` |
+| Drive | `drive_storage.py`、`drive_cache.py`、`drive_cache_remote.py`、`mounted_drive_cache.py`、`native_drive_mount.py` |
 | 运行时恢复 | `runtime_recovery.py`、`runtime_watchdog.py` |
 | 工作台架构 | `workspace_runtime.py`、`compute_colab.py`、`asset_library.py`、`ARCHITECTURE.md` |
 | 网页与公共组件 | `studio.html`（工作台壳层）、`static/` 下的公共组件 CSS 和 JavaScript，各应用前端独立存放于 `apps/<app_id>/web/` |
 | 本地回归验证 | `tests/`：离线 Python 和前端回归测试 |
 
-`seed_drive_cache.py` 被网页备份接口动态导入；远程缓存、挂载及提示词模块会按文件内容发送到 Colab，不能仅检查顶层 Python import 后省略它们。
+`apps/h3/seed_drive_cache.py` 被网页备份接口动态导入，也可通过 `python -m apps.h3.seed_drive_cache` 运行；远程缓存、挂载及提示词模块会按文件内容发送到 Colab，不能仅检查顶层 Python import 后省略它们。
+
+应用内部模块通过 `apps.h3` 或 `apps.qwen_image` 导入。根目录不保留应用兼容转发层，公共 `static/` 仅保存共享资源，应用专属前端文件在对应的 `apps/<app>/web/` 目录维护。
 
 ## 用户数据与生成文件
 
@@ -38,7 +40,7 @@
 
 ```powershell
 Get-ChildItem -File tests/test_*.cjs | ForEach-Object { node $_.FullName; if ($LASTEXITCODE -ne 0) { throw "Frontend check failed: $_" } }
-Get-ChildItem -File -Recurse static/*.js, apps/*.js | ForEach-Object { node --check $_.FullName; if ($LASTEXITCODE -ne 0) { throw "JavaScript syntax check failed: $_" } }
+Get-ChildItem -Path static, apps -Recurse -Filter *.js -File | ForEach-Object { node --check $_.FullName; if ($LASTEXITCODE -ne 0) { throw "JavaScript syntax check failed: $_" } }
 git diff --check
 ```
 

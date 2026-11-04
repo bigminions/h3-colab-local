@@ -4,7 +4,7 @@ from pathlib import Path
 import unittest
 
 import app
-import remote_h3 as h3
+from apps.h3 import remote_h3 as h3
 
 
 class PerformanceConfigTests(unittest.TestCase):

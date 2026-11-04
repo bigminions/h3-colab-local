@@ -16,9 +16,9 @@ from starlette.requests import Request
 
 import app
 from asset_library import AssetLibrary
-from characters import AudioAsset, CharacterLibrary, CharacterProfile, validate_audio_asset
+from apps.h3.characters import AudioAsset, CharacterLibrary, CharacterProfile, validate_audio_asset
 from workspace_runtime import ApplicationRegistry, ProviderRegistry, ProviderSpec
-from h3_application import H3Application
+from apps.h3.application import H3Application
 
 
 class MediaLibraryTests(unittest.TestCase):
@@ -201,9 +201,6 @@ class AdapterTests(unittest.TestCase):
 
     def test_h3_application_packaged_in_apps_directory(self):
         from apps.h3 import H3Application, H3JobConfig, CharacterProfile
-        import remote_h3
-        import apps.h3.remote_h3 as app_remote
-        self.assertIs(remote_h3, app_remote)
 
         h3_app = H3Application()
         source = h3_app.source(app.BASE, {'prompt_processing': 'faithful'})
@@ -345,5 +342,3 @@ class UiOptimizationTests(unittest.TestCase):
 
         chars_js = Path("apps/h3/web/characters.js").read_text(encoding="utf-8")
         self.assertNotIn("showPage('tool')", chars_js)
-        static_chars_js = Path("static/characters.js").read_text(encoding="utf-8")
-        self.assertNotIn("showPage('tool')", static_chars_js)

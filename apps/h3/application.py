@@ -131,15 +131,11 @@ print('H3_IDLE_CHECK ' + json.dumps({'idle': idle}))
     def source(self, base, config):
         app_dir = Path(__file__).resolve().parent
         remote_path = app_dir / 'remote_h3.py'
-        if not remote_path.exists():
-            remote_path = Path(base) / 'remote_h3.py'
         source = remote_path.read_text(encoding='utf-8')
         if config.get('prompt_processing') == 'faithful':
             bundle = {}
             for name in ('h3_prompt.py', 'h3_prompt_worker.py'):
                 file_path = app_dir / name
-                if not file_path.exists():
-                    file_path = Path(base) / name
                 bundle[name] = base64.b64encode(file_path.read_bytes()).decode()
             source = ('import base64, pathlib, sys\n_prompt_tools = pathlib.Path("/content/h3-prompt-tools")\n'
                       '_prompt_tools.mkdir(exist_ok=True)\n'

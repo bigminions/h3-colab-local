@@ -130,8 +130,6 @@ print('QWEN_IMAGE_IDLE_CHECK ' + json.dumps({'idle': idle}))
     def source(self, base, config):
         app_dir = Path(__file__).resolve().parent
         remote_path = app_dir / 'remote_qwen_image.py'
-        if not remote_path.exists():
-            remote_path = Path(base) / 'apps' / 'qwen_image' / 'remote_qwen_image.py'
         return remote_path.read_text(encoding='utf-8')
 
     def validate_assets(self, config, asset_library):

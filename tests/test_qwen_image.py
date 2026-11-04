@@ -427,6 +427,23 @@ class QwenImageFrontendModularityTests(unittest.TestCase):
         self.assertIn('/apps/h3/web/characters.js', html)
         self.assertIn('/apps/qwen_image_2_1/web/qwen-image.js', html)
 
+    def test_application_assets_are_served_from_application_routes(self):
+        from starlette.testclient import TestClient
+        client = TestClient(app.app)
+        headers = {'host': f'127.0.0.1:{app.PORT}'}
+        html = client.get('/', headers=headers).text
+        for application in app.applications:
+            for asset in application.web_dir.iterdir():
+                if asset.suffix not in ('.js', '.css'):
+                    continue
+                url = f'/apps/{application.spec.id}/web/{asset.name}'
+                with self.subTest(url=url):
+                    self.assertIn(url, html)
+                    response = client.get(url, headers=headers)
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.content, asset.read_bytes())
+                    self.assertEqual(client.get('/static/' + asset.name, headers=headers).status_code, 404)
+
     def test_workspace_css_is_decoupled_from_app_specific_styles(self):
         ws_css = Path('static/workspace.css').read_text(encoding='utf-8')
         self.assertNotIn('/* Qwen-Image-2.1 styles */', ws_css)
@@ -457,12 +474,8 @@ class QwenImageFrontendModularityTests(unittest.TestCase):
 
     def test_qwen_image_frontend_interactions_and_actions(self):
         js = Path('apps/qwen_image/web/qwen-image.js').read_text(encoding='utf-8')
-        static_js = Path('static/qwen-image.js').read_text(encoding='utf-8')
-        self.assertEqual(js, static_js, 'apps/qwen_image/web/qwen-image.js and static/qwen-image.js must be in sync')
 
         css = Path('apps/qwen_image/web/qwen-image.css').read_text(encoding='utf-8')
-        static_css = Path('static/qwen-image.css').read_text(encoding='utf-8')
-        self.assertEqual(css, static_css, 'apps/qwen_image/web/qwen-image.css and static/qwen-image.css must be in sync')
         self.assertIn('cursor: zoom-in', css)
 
         # 1. Direct click on image opens lightbox viewer and backdrop closes modal

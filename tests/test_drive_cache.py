@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 from drive_cache import DriveCache
 from drive_cache_remote import DriveModelCache
 from mounted_drive_cache import MountedDriveModelCache
-import remote_h3 as h3
+from apps.h3 import remote_h3 as h3
 from native_drive_mount import install_mount_hook
 
 

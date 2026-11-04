@@ -13,8 +13,8 @@ from fastapi import HTTPException, UploadFile
 from pydantic import ValidationError
 import app
 from asset_library import AssetLibrary
-from characters import AudioAsset, CharacterLibrary, CharacterProfile, expand_characters, inspect_audio, mention_names
-from remote_h3 import build_graph, files_for, reference_prompt, REF_UNET
+from apps.h3.characters import AudioAsset, CharacterLibrary, CharacterProfile, expand_characters, inspect_audio, mention_names
+from apps.h3.remote_h3 import build_graph, files_for, reference_prompt, REF_UNET
 
 
 def wav_bytes(seconds=2):

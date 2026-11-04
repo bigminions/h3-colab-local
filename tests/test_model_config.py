@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-import remote_h3 as h3
+from apps.h3 import remote_h3 as h3
 
 
 class ModelConfigTests(unittest.TestCase):

@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 from pydantic import ValidationError
 import app
-from remote_h3 import build_graph
+from apps.h3.remote_h3 import build_graph
 from tests.test_release_policy import CheckedTransport
 
 

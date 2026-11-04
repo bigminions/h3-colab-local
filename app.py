@@ -1677,7 +1677,7 @@ def trigger_drive_backup():
         pass
 
     import threading
-    import seed_drive_cache
+    from apps.h3 import seed_drive_cache
 
     def run_worker():
         try:

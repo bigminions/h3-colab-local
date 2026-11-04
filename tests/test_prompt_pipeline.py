@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 import app
-import remote_h3 as h3
+from apps.h3 import remote_h3 as h3
 
 
 class DirectPromptTests(unittest.TestCase):
@@ -90,7 +90,7 @@ class DirectPromptTests(unittest.TestCase):
 
     def test_load_images_falls_back_to_content_directory(self):
         from PIL import Image
-        import h3_prompt_worker
+        from apps.h3 import h3_prompt_worker
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / 'ComfyUI'
             (root / 'input').mkdir(parents=True)

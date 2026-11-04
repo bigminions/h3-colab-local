@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock
 import app
-from remote_h3 import build_graph, PDD, DIMENSIONS
+from apps.h3.remote_h3 import build_graph, PDD, DIMENSIONS
 
 
 class FakeTransport:

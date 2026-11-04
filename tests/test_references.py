@@ -13,7 +13,7 @@ from PIL import Image
 from pydantic import ValidationError
 import app
 from asset_library import AssetLibrary
-from remote_h3 import build_graph, files_for, reference_prompt, REF_UNET, UNET, PDD, REF_PDD, PEOPLE
+from apps.h3.remote_h3 import build_graph, files_for, reference_prompt, REF_UNET, UNET, PDD, REF_PDD, PEOPLE
 
 
 def ref(slot, role='character', description=''):
