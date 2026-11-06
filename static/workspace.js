@@ -908,10 +908,15 @@
     queueChoicePending = true;
     try {
       const status = await api('status');
-      const consumer = status.consumer || {};
+      let consumer = status.consumer || {};
       const waiting = status.queue || [];
+      if (!status.active && !waiting.length && status.managed_gpu) {
+        // A retained environment or a stale observer snapshot is not a waiting task.
+        try { consumer = await api('consumer'); }
+        catch (_) { consumer = {state: 'unknown'}; }
+      }
       const needsQueue = !!status.active || waiting.length > 0 ||
-        ['busy', 'connecting', 'switching', 'cancelling', 'blocked', 'unknown'].includes(consumer.state) && status.managed_gpu;
+        ['busy', 'connecting', 'switching', 'cancelling'].includes(consumer.state) && status.managed_gpu;
       if (!needsQueue) return 'back';
       const dialog = $('queuePlacementModal');
       if (!dialog) return 'back';
