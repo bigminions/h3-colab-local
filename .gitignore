@@ -4,6 +4,14 @@ videos/
 materials/
 log/
 
+# Local databases and SQLite sidecar files
+*.sqlite
+*.sqlite3
+*.db
+*.sqlite-*
+*.sqlite3-*
+*.db-*
+
 # Local secrets and credentials
 .env
 .env.*
