@@ -15,7 +15,7 @@ from tests.test_app import FakeTransport
 
 
 class RecoveryTests(unittest.TestCase):
-    def test_real_client_quiet_wait_cancels_and_releases_without_another_message(self):
+    def test_real_client_quiet_wait_cancels_and_keeps_environment_without_another_message(self):
         # Actual dependency loop, queues and events; only the network send is mocked.
         with tempfile.TemporaryDirectory() as temp:
             control = app.Controller(Path(temp), Path(temp))
@@ -39,7 +39,6 @@ class RecoveryTests(unittest.TestCase):
                 enable_cancellation(runtime, lambda: control.check_cancelled(current))
                 client.execute_interactive('no network send', allow_stdin=False, timeout=4500)
             transport.execute = execute
-            transport.stop_running = client.stop_channels
             control.transport = transport
             thread = threading.Thread(target=control.run, args=(job,), daemon=True)
             thread.start()
@@ -50,8 +49,8 @@ class RecoveryTests(unittest.TestCase):
                 self.assertFalse(thread.is_alive(), 'Cancellation must not wait for another output or the 4500 s deadline')
                 self.assertEqual(job['status'], 'cancelled')
                 self.assertIsNone(control.active)
-                self.assertIsNone(control.session)
-                self.assertEqual(transport.calls, ['connect', 'release'])
+                self.assertIsNotNone(control.session)
+                self.assertEqual(transport.calls, ['connect', 'cancel'])
                 client.execute.assert_called_once()
             finally:
                 job['cancel_requested'] = True

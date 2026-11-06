@@ -444,12 +444,12 @@
 
 .qi-single-image-stage {
   position: relative;
-  width: 100%;
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: #080b12;
-  min-height: 220px;
+  max-width: 100%;
+  border-radius: 8px;
+  overflow: hidden;
 }
 
 .qi-single-image-stage img {
@@ -465,16 +465,17 @@
 .qi-img-overlay {
   position: absolute;
   inset: 0;
-  background: rgba(9, 13, 22, 0.72);
-  backdrop-filter: blur(3px);
+  background: transparent !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
+  align-items: flex-end;
+  justify-content: flex-end;
+  padding: 8px 10px;
   opacity: 0;
+  pointer-events: none;
   transition: opacity 0.18s ease;
   z-index: 5;
-  cursor: zoom-in;
 }
 
 .qi-single-image-stage,
@@ -496,28 +497,61 @@
   opacity: 1;
 }
 
-.qi-overlay-btn {
+.qi-overlay-actions {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 7px 14px;
-  font-size: 12px;
-  font-weight: 500;
-  border-radius: 7px;
-  background: #1c2637;
+  padding: 4px;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.78);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  pointer-events: auto;
+}
+
+.qi-overlay-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 6px;
+  background: rgba(30, 41, 59, 0.85);
   color: #e2e8f0;
-  border: 1px solid #364866;
+  border: 1px solid rgba(255, 255, 255, 0.12);
   cursor: pointer;
   text-decoration: none;
   transition: all 0.15s ease;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  box-shadow: none;
 }
 
 .qi-overlay-btn:hover {
-  background: #273854;
+  background: #2563eb;
   border-color: #60a5fa;
   color: #ffffff;
   transform: translateY(-1px);
+}
+
+.qi-overlay-btn:active {
+  transform: translateY(0);
+}
+
+.qi-overlay-btn.is-success {
+  background: #14532d;
+  border-color: #22c55e;
+  color: #4ade80;
+}
+
+@keyframes qi-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.qi-spin {
+  animation: qi-spin 0.8s linear infinite;
 }
 
 /* Image grid for multi-image batches */
@@ -1016,13 +1050,15 @@
 }
 
 #qwenImagePage .qi-gpu-name {
-  font-size: 13.5px !important;
+  font-size: 13px !important;
   font-weight: 650 !important;
   color: #f0f4fc !important;
   white-space: nowrap !important;
   overflow: hidden !important;
   text-overflow: ellipsis !important;
   letter-spacing: 0.2px !important;
+  flex: 1 1 auto !important;
+  min-width: 0 !important;
 }
 
 #qwenImagePage .qi-gpu-status {
@@ -1045,13 +1081,22 @@
   width: 100% !important;
   height: 100% !important;
   opacity: 0 !important;
-  cursor: pointer !important;
-  z-index: 10 !important;
+  pointer-events: none !important;
+  z-index: -1 !important;
   border: 0 !important;
   margin: 0 !important;
   padding: 0 !important;
-  -webkit-appearance: none !important;
-  appearance: none !important;
+  background-color: #141824 !important;
+  color: #edf1f8 !important;
+  color-scheme: dark !important;
+  box-sizing: border-box !important;
+}
+
+#qwenImagePage .qi-gpu-select option,
+#qwenImagePage #qiGpu option {
+  background-color: #141824 !important;
+  color: #edf1f8 !important;
+  padding: 8px 12px !important;
 }
 
 #qwenImagePage #qiGenerate {
@@ -1062,4 +1107,186 @@
 
 html[data-initial-page="qwen_image"] #qwenImagePage {
   display: block !important;
+}
+
+/* H3-aligned Reference Grid and Cards for Qwen-Image */
+#qwenImagePage #qiImagePanel {
+  margin-bottom: 18px;
+}
+#qwenImagePage .reference-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(145px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+  align-items: start;
+}
+#qwenImagePage .reference-grid:not(.has-images) > .reference-drop {
+  grid-column: 1 / -1;
+}
+#qwenImagePage .reference-grid.has-images > .reference-drop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 180px;
+  height: 180px;
+  padding: 10px 8px;
+}
+#qwenImagePage .reference-grid.has-images .reference-drop-inner {
+  gap: 6px;
+}
+#qwenImagePage .reference-grid.has-images .reference-drop-sub {
+  display: none;
+}
+#qwenImagePage .reference-grid.has-images .reference-drop-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  padding: 0 6px;
+  margin-top: 6px;
+}
+#qwenImagePage .reference-grid.has-images .drop-action-btn {
+  justify-content: center;
+  padding: 5px 6px;
+  font-size: 11px;
+  width: 100%;
+}
+#qwenImagePage .reference-card {
+  min-width: 0;
+  background: #141c28;
+  border: 1px solid #34425a;
+  border-radius: 10px;
+  padding: 9px;
+  display: flex;
+  flex-direction: column;
+  height: fit-content;
+  align-self: start;
+}
+#qwenImagePage .reference-preview {
+  position: relative;
+  height: 140px;
+  background: #0e141e;
+  border-radius: 6px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+#qwenImagePage .reference-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+#qwenImagePage .reference-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  background: #1a2946e8;
+  border: 1px solid #6e87ad;
+  border-radius: 5px;
+  padding: 3px 6px;
+  font-size: 11px;
+  color: #e3ecff;
+  font-weight: 600;
+}
+#qwenImagePage .reference-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 4px;
+  margin-top: 2px;
+  padding: 2px 0;
+}
+#qwenImagePage .reference-actions button {
+  background: transparent;
+  color: #aac0e3;
+  border: 0;
+  padding: 4px 2px;
+  cursor: pointer;
+  font-size: 11px;
+}
+#qwenImagePage .reference-actions button:hover {
+  color: #fff;
+}
+#qwenImagePage .reference-actions button:disabled {
+  opacity: .45;
+}
+
+/* Caret-following Mention Menu for Qwen Image */
+#qwenImagePage #qiPromptPanel {
+  position: relative !important;
+}
+
+#qwenImagePage #qiMentionMenu {
+  position: absolute !important;
+  z-index: 100 !important;
+  min-width: 220px;
+  max-width: 320px;
+  max-height: 250px;
+  overflow-y: auto;
+  border: 1px solid #3c4d68;
+  background: #161e2c;
+  border-radius: 10px;
+  padding: 6px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+}
+
+#qwenImagePage #qiMentionMenu .mention-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #dbe7fa;
+  padding: 6px 8px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s ease;
+}
+
+#qwenImagePage #qiMentionMenu .mention-option:hover,
+#qwenImagePage #qiMentionMenu .mention-option[aria-selected="true"] {
+  background: #27354c;
+}
+
+#qwenImagePage #qiMentionMenu .mention-thumb-box {
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  overflow: hidden;
+  flex-shrink: 0;
+  background: #0f1520;
+  border: 1px solid #2d3a50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+}
+
+#qwenImagePage #qiMentionMenu .mention-thumb-box img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+#qwenImagePage #qiMentionMenu .mention-name {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 600;
+  color: #e4ecfc;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#qwenImagePage #qiMentionMenu .mention-tag {
+  flex-shrink: 0;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #212c40;
+  color: #8fa5c8;
 }

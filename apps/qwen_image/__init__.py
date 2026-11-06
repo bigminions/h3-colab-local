@@ -8,6 +8,7 @@ from .remote_qwen_image import (
     VAE_MODEL,
     build_graph,
     files_for,
+    normalize_edit_prompt,
 )
 
 __all__ = [
@@ -21,4 +22,5 @@ __all__ = [
     'VAE_MODEL',
     'build_graph',
     'files_for',
+    'normalize_edit_prompt',
 ]

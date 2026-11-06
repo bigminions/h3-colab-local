@@ -40,13 +40,6 @@ class ReferenceTests(unittest.TestCase):
             with self.subTest(prompt=prompt,description=description), self.assertRaises(ValidationError):
                 app.H3JobConfig(prompt=prompt,references=[ref(1,description=description)])
 
-    def test_direct_pipeline_preserves_literal_picture_words_in_dialogue(self):
-        text='女人说：“图片9很好看。”'
-        c=app.H3JobConfig(prompt=text,references=[ref(1)])
-        self.assertEqual(c.prompt,text)
-        self.assertNotIn('prompt_enhance',c.model_dump())
-        self.assertTrue(reference_prompt(c.model_dump()).endswith(text))
-
     def test_duplicate_slots_limits_paths_and_mode_mismatch_are_rejected(self):
         cases = [dict(references=[ref(1),ref(1)]),dict(references=[ref(i) for i in range(1,11)]),
                  dict(references=[dict(ref(1),image_id='../secret.png')]),

@@ -1,4 +1,4 @@
-"""Independent sampling and batch ownership, without allocating a Colab GPU."""
+"""Independent sampling and queue dispatch between batch items; no Colab GPU allocation."""
 from pathlib import Path
 import tempfile
 import unittest
@@ -62,7 +62,7 @@ class BatchTests(unittest.TestCase):
         batch = sorted((j for j in self.c.jobs.values() if j.get('batch_id') == job['batch_id']
                         and not (j.get('file') or j.get('drive'))), key=lambda j: j['batch_index'])
         self.assertEqual(first, batch[0]['id'])
-        self.c.run_batch(batch)
+        self.c._run_queue()
 
     def test_distinct_outputs_reuse_runtime_release_once_after_all_verified(self):
         batch = self.start()
@@ -75,7 +75,7 @@ class BatchTests(unittest.TestCase):
                 self.assertTrue((self.path / batch[0]['file']).exists())
                 self.assertFalse(self.c.public_job(batch[0])['batch']['finished'])
         self.fake.before_execute = observe
-        self.c.run_batch(batch)
+        self.c._run_queue()
         self.assertEqual(self.fake.allocations, 1)
         self.assertEqual(self.fake.calls, ['connect','execute','download','connect','execute','download','release'])
         self.assertEqual(len({j['id'] for j in batch}), 2)
@@ -105,7 +105,7 @@ class BatchTests(unittest.TestCase):
                     self.assertIsNone(self.c.release_status()['deadline'])
                     self.c.idle_tick()
                 self.fake.before_execute = observe
-                self.c.run_batch(batch)
+                self.c._run_queue()
                 self.assertNotIn('release', self.fake.calls)
                 if mode == 'idle':
                     self.assertEqual(self.c.release_status()['deadline'], self.clock + 600)
@@ -118,12 +118,15 @@ class BatchTests(unittest.TestCase):
     def test_failure_pauses_remaining_and_retry_preserves_saved_variants(self):
         batch = self.start(count=3)
         self.fake.fail_index = 2
-        self.c.run_batch(batch)
+        self.c._run_queue()
         self.assertEqual([j['status'] for j in batch], ['done','error','interrupted'])
         self.assertNotIn('release', self.fake.calls)
         self.c.idle_tick()
         self.assertNotIn('release', self.fake.calls)
-        with self.assertRaises(app.HTTPException): self.c.start(app.H3JobConfig(prompt='new'))
+        with patch.object(app.threading, 'Thread'):
+            extra = self.c.start(app.H3JobConfig(prompt='new', release_mode='always'))
+        self.assertEqual(self.c.jobs[extra]['status'], 'queued')
+        self.c.cancel(extra)
         self.fake.fail_index = None
         self.resume(batch[2])  # Picking a later waiting variant still resumes the earliest missing one.
         self.assertEqual([seed for _,seed in self.fake.executed], [17,18,18,19])
@@ -144,7 +147,7 @@ class BatchTests(unittest.TestCase):
         self.c.drive_storage.open_download = open_download
         batch = self.start(count=3)
         self.fake.fail_upload_index = 2
-        self.c.run_batch(batch)
+        self.c._run_queue()
         self.assertIn('drive', batch[0]); self.assertNotIn('drive', batch[1])
         self.assertNotIn('release', self.fake.calls)
         self.fake.fail_upload_index = None
@@ -157,7 +160,7 @@ class BatchTests(unittest.TestCase):
     def test_release_failure_keeps_saved_batch_complete(self):
         batch = self.start()
         self.fake.release_failure = True
-        self.c.run_batch(batch)
+        self.c._run_queue()
         self.assertEqual(batch[-1]['status'], 'warning')
         self.assertTrue(all(j.get('file') and j['batch_complete'] for j in batch))
         self.assertIsNotNone(self.c.session)
@@ -179,7 +182,7 @@ class BatchTests(unittest.TestCase):
             response.iter_content.return_value = [str(self.c.jobs[stored['job_id']]['config']['seed']).encode()]
             return response
         storage.open_download.side_effect = download
-        self.c.run_batch(batch)
+        self.c._run_queue()
         self.assertIsNone(self.c.session)
         self.assertEqual(self.fake.calls.count('release'), 1)
         self.assertEqual([job['status'] for job in batch], ['warning', 'done'])
@@ -195,22 +198,22 @@ class BatchTests(unittest.TestCase):
 
     def test_restart_preserves_batch_members_and_distinct_seeds(self):
         batch = self.start(count=3)
-        self.c.session = {'endpoint':'owned-test'}
+        self.c.session = {'endpoint':'owned-test', 'app_id': 'h3', 'accelerator': 'A100'}
         self.c.save_session()
         for j in batch: j['endpoint'] = 'owned-test'
         self.c.save_jobs()
         restored = app.Controller(self.path, self.path)
-        self.assertTrue(all(j['status'] == 'interrupted' for j in restored.jobs.values()))
+        self.assertTrue(all(j['status'] == 'queued' for j in restored.jobs.values()))
         self.assertEqual(len(restored.pending_jobs()), 3)
         restored.transport = BatchTransport(restored)
         with patch.object(app.threading, 'Thread'): restored.start(None, retry=batch[-1]['id'])
-        restored.run_batch(list(restored.jobs.values()))
+        restored._run_queue()
         self.assertEqual([seed for _,seed in restored.transport.executed], [17,18,19])
         self.assertEqual(restored.transport.calls.count('release'), 1)
 
     def test_restart_after_all_backups_does_not_offer_regeneration(self):
         batch = self.start()
-        self.c.run_batch(batch)
+        self.c._run_queue()
         for j in batch: j['batch_complete'] = False
         batch[-1]['status'] = 'running'  # Interrupted while finalizing release/completion.
         self.c.save_jobs()
@@ -255,7 +258,7 @@ class BatchTests(unittest.TestCase):
                 second_gpu_started.set()
 
         self.fake.before_execute = observe
-        self.c.run_batch(batch)
+        self.c._run_queue()
 
         self.assertEqual(concurrently_executed, [True])
         self.assertEqual([j['status'] for j in batch], ['done', 'done'])

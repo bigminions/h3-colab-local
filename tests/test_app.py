@@ -15,9 +15,18 @@ class FakeTransport:
 
     def connect(self, config):
         self.calls.append('connect')
-        self.control.session = {'endpoint': 'owned-test'}
+        self.control.session = {'endpoint': 'owned-test', 'app_id': config.app_id, 'accelerator': config.gpu}
+
+    def consumer_status(self):
+        return {'state': 'idle' if self.control.session else 'disconnected'}
+
+    def cancel_job(self, job):
+        self.calls.append('cancel')
+        if getattr(self, 'cancel_failure', False):
+            raise RuntimeError('cancel unconfirmed')
 
     def execute(self, job):
+        job['execution_started'] = True
         self.calls.append('execute')
         if self.failure:
             job['safe_release'] = True
@@ -95,11 +104,14 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 409)
         self.assertFalse(self.c.public_job(job)['can_retry'])
 
-    def test_unretrieved_job_blocks_new_job(self):
+    def test_unretrieved_job_allows_queueing_but_blocks_dispatch(self):
         fake, job = self.run_job(bad_hash=True)
-        with self.assertRaises(app.HTTPException) as raised:
-            self.c.start(app.H3JobConfig(prompt='another job'))
-        self.assertEqual(raised.exception.status_code, 409)
+        from unittest.mock import patch
+        with patch.object(app.threading, 'Thread'):
+            next_id = self.c.start(app.H3JobConfig(prompt='another job'))
+        self.c._run_queue()
+        self.assertEqual(self.c.jobs[next_id]['status'], 'queued')
+        self.assertEqual(fake.calls.count('execute'), 1)
 
     def test_restart_marks_running_interrupted(self):
         fake, job = self.run_job()

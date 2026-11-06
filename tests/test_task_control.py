@@ -40,7 +40,7 @@ class TaskControlTests(unittest.TestCase):
         self.assertEqual(fake.calls.count('connect'),1)
         self.assertEqual(fake.calls[-1],'release')
 
-    def test_three_failed_reconnects_cancel_and_free_runtime(self):
+    def test_three_failed_reconnects_cancel_and_preserve_runtime(self):
         fake=FakeTransport(self.control)
         fake.execute=MagicMock(side_effect=RuntimeError('Connection was lost.'))
         self.control.transport=fake
@@ -49,7 +49,7 @@ class TaskControlTests(unittest.TestCase):
         self.assertEqual(self.job['status'],'cancelled')
         self.assertEqual(self.job['reconnect_attempts'],3)
         self.assertIsNone(self.control.active)
-        self.assertIsNone(self.control.session)
+        self.assertIsNotNone(self.control.session)
         self.assertEqual(self.control.pending_jobs(),[])
 
     def test_non_connection_error_is_not_retried_or_auto_cancelled(self):
@@ -68,21 +68,16 @@ class TaskControlTests(unittest.TestCase):
             fake.calls.append('connect')
             self.control.session={'endpoint':'owned-test'}
         fake.connect=connect
-        fake.stop_running=MagicMock()
         self.control.transport=fake
         self.control.run(self.job)
-        self.assertEqual(fake.calls,['connect','release'])
+        self.assertEqual(fake.calls,['connect','cancel'])
         self.assertEqual(self.job['status'],'cancelled')
-        fake.stop_running.assert_called_once()
 
-    def test_cancel_stops_progress_client_then_confirms_release(self):
+    def test_cancel_confirms_remote_stop_and_keeps_environment(self):
         fake=FakeTransport(self.control)
-        stopped=threading.Event()
-        fake.stop_running=stopped.set
         def execute(job):
             self.assertTrue(self.control.public_job(job)['can_cancel'])
             self.control.cancel(job['id'])
-            self.assertTrue(stopped.is_set())
             raise RuntimeError('Connection was lost.')
         fake.execute=execute
         self.control.transport=fake
@@ -90,10 +85,12 @@ class TaskControlTests(unittest.TestCase):
         self.assertEqual(self.job['status'],'cancelled')
         self.assertIsNone(self.control.active)
         self.assertNotIn('download',fake.calls)
-        self.assertEqual(fake.calls.count('release'),1)
+        self.assertEqual(fake.calls.count('release'),0)
+        self.assertEqual(fake.calls.count('cancel'),1)
 
-    def test_cancel_release_failure_stays_blocked_with_retry_cancel(self):
-        fake=FakeTransport(self.control,release_failure=True)
+    def test_cancel_failure_stays_blocked_with_retry_cancel(self):
+        fake=FakeTransport(self.control)
+        fake.cancel_failure=True
         self.control.transport=fake
         self.control.session={'endpoint':'owned-test'}
         self.job.update(endpoint='owned-test',status='error')
@@ -104,7 +101,7 @@ class TaskControlTests(unittest.TestCase):
         self.assertEqual(self.control.pending_jobs(),[self.job])
         public=self.control.public_job(self.job)
         self.assertTrue(public['can_cancel']);self.assertFalse(public['can_retry'])
-        fake.release_failure=False
+        fake.cancel_failure=False
         self.control.cancel(self.job['id'])
         self.assertEqual(self.job['status'],'cancelled')
         self.assertEqual(self.control.pending_jobs(),[])

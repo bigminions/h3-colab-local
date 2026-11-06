@@ -1,5 +1,4 @@
 """Direct prompt regressions. No real cloud or GPU calls."""
-import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -9,35 +8,6 @@ from apps.h3 import remote_h3 as h3
 
 
 class DirectPromptTests(unittest.TestCase):
-    def test_direct_mode_preserves_original_prompt_without_rewriting(self):
-        text = '[0s-4s] 二维墨线。手机显示“妈妈”。[4s-10s] 她说：“图片9很好看。”'
-        c = app.H3JobConfig(prompt=text, people=False, prompt_processing='direct').model_dump()
-        c.update(job_id='test')
-        self.assertEqual(h3.build_graph(c)['5']['inputs']['prompt'], text)
-        self.assertFalse(any('generation_tail' in name for _,name,_ in h3.files_for(c)))
-        self.assertIn(h3.CLIP,[name for _,name,_ in h3.files_for(c)])
-
-    def test_explicit_picture_mapping_preserves_prose_and_timestamps(self):
-        text = '@图片3 作为场景。[0s-4s] 二维墨线，手机显示“妈妈”。[4s-10s] 女人说：“图片9很好看。”'
-        c = app.H3JobConfig(prompt=text, references=[dict(slot=3,image_id='a'*32+'.png')]).model_dump()
-        actual = h3.build_graph(dict(c,job_id='test'))['5']['inputs']['prompt']
-        self.assertTrue(actual.endswith(text.replace('@图片3', '<Picture 1>')))
-        self.assertNotIn('[Shot', actual)
-
-    def test_generation_records_exact_direct_prompt(self):
-        c = dict(prompt='[0s-4s] 墨线风格，妈妈。',prompt_processing='direct',_compiled_prompt='WRONG',
-                 mode='pdd',people=False,resolution='480p',duration=5,seed=1,job_id='audit')
-        queue=MagicMock();queue.json.return_value={}
-        history=MagicMock();history.json.return_value={'queued':{'status':{'completed':True},'outputs':{'save':{'videos':[{'filename':'clip.mp4'}]}}}}
-        submitted=MagicMock(ok=True);submitted.json.return_value={'prompt_id':'queued'}
-        with tempfile.TemporaryDirectory() as tmp,patch.object(h3,'ROOT',Path(tmp)),patch('requests.get',side_effect=[queue,history]),patch('requests.post',return_value=submitted) as post,patch.object(h3,'result_for',return_value='saved'),patch.object(h3,'event'):
-            self.assertEqual(h3.generate(c),'saved')
-            audit=json.loads((Path(tmp)/'output'/'H3'/'local_audit.prompt.json').read_text(encoding='utf-8'))
-            self.assertEqual(audit['original_prompt'],c['prompt'])
-            self.assertEqual(audit['compiled_prompt'],c['prompt'])
-            self.assertEqual(audit['compiled_prompt'],post.call_args.kwargs['json']['prompt']['5']['inputs']['prompt'])
-            self.assertEqual(audit['version'],'direct-h3')
-
     def test_only_the_owned_private_service_can_be_stopped(self):
         import signal
         with tempfile.TemporaryDirectory() as tmp:

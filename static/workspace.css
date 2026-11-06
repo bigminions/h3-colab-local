@@ -26,7 +26,7 @@ body{background:#101218}
 .application-heading{max-width:1920px;margin:0 auto;padding:20px 28px 10px;display:flex;align-items:center;justify-content:flex-start;gap:20px}.application-kicker{font-size:9px;letter-spacing:2px;color:#8292ae}.application-heading h2{font-size:21px;font-weight:500;letter-spacing:.5px;margin:8px 0 0}.application-heading .page-tabs{margin:0;padding:4px;border:1px solid #30394a;border-radius:10px;background:#171d28}.application-heading .page-tab{padding:9px 18px}
 .workspace-main #toolPage{margin-top:16px;padding:0 28px;gap:18px}
 .workspace-main #toolPage:not([hidden]):not(.hidden){grid-template-columns:minmax(0,1fr) minmax(0,1fr)!important;max-width:1920px!important}
-.workspace-main #generateForm{grid-template-columns:minmax(0,1fr) 240px!important;gap:20px!important}.workspace-main .creation-settings{padding-left:20px!important}
+.workspace-main #generateForm{grid-template-columns:minmax(0,1fr) 265px!important;gap:20px!important}.workspace-main .creation-settings{padding-left:20px!important}
 .workspace-main .creation-section{top:16px!important;height:calc(100vh - 84px)!important;max-height:calc(100vh - 84px)!important;min-height:600px}
 .workspace-main .task-stream-card{min-height:calc(100vh - 84px)!important}.workspace-main .creation-heading{gap:10px;flex-wrap:wrap}.workspace-main .creation-heading .card-title{font-size:14px}.workspace-main .creation-heading .tabs{gap:3px}
 .workspace-main #characterPage{margin:16px auto 0;padding:0 28px 28px;max-width:1920px}
@@ -124,4 +124,293 @@ html[data-initial-page="compute"] #computePage {
 }
 html[data-initial-page="connections"] #connectionPage {
   display: block !important;
+}
+
+
+/* ==========================================================================
+   Shared GPU Selector Card Component (Unified for H3, Qwen-Image & Future Apps)
+   ========================================================================== */
+.gpu-card-wrap,
+.h3-gpu-card-wrap,
+.qi-gpu-card-wrap {
+  position: relative !important;
+  margin-top: auto !important;
+  padding-top: 14px !important;
+  margin-bottom: 10px !important;
+}
+
+.gpu-card,
+.h3-gpu-card,
+.qi-gpu-card {
+  position: relative !important;
+  display: flex !important;
+  flex-direction: column !important;
+  background: #141824 !important;
+  border: 1px solid #2b3548 !important;
+  border-radius: 10px !important;
+  padding: 9px 12px !important;
+  box-sizing: border-box !important;
+  cursor: pointer !important;
+  transition: all 0.18s ease !important;
+  user-select: none !important;
+}
+
+.gpu-card:hover,
+.h3-gpu-card:hover,
+.qi-gpu-card:hover {
+  background: #181e2e !important;
+  border-color: #4a5c7d !important;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3) !important;
+}
+
+.gpu-card:focus-visible,
+.h3-gpu-card:focus-visible,
+.qi-gpu-card:focus-visible,
+.gpu-card[aria-expanded="true"],
+.h3-gpu-card[aria-expanded="true"],
+.qi-gpu-card[aria-expanded="true"] {
+  border-color: #8cb7ff !important;
+  box-shadow: 0 0 0 2px rgba(140, 183, 255, 0.25) !important;
+  outline: none !important;
+}
+
+.gpu-card-header,
+.h3-gpu-card-header,
+.qi-gpu-card-header {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  margin-bottom: 4px !important;
+}
+
+.gpu-badge,
+.h3-gpu-badge,
+.qi-gpu-badge {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 5px !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  color: #8da1bf !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.5px !important;
+}
+
+.gpu-icon,
+.h3-gpu-icon,
+.qi-gpu-icon {
+  color: #8cb7ff !important;
+}
+
+.gpu-action,
+.h3-gpu-action,
+.qi-gpu-action {
+  font-size: 11.5px !important;
+  font-weight: 500 !important;
+  color: #7b8fae !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 3px !important;
+  transition: color 0.15s ease !important;
+}
+
+.gpu-card:hover .gpu-action,
+.h3-gpu-card:hover .h3-gpu-action,
+.qi-gpu-card:hover .qi-gpu-action {
+  color: #cdddfc !important;
+}
+
+.gpu-action-arrow,
+.h3-gpu-action-arrow,
+.qi-gpu-action-arrow {
+  display: inline-block !important;
+  transition: transform 0.2s ease !important;
+}
+
+.gpu-card[aria-expanded="true"] .gpu-action-arrow,
+.h3-gpu-card[aria-expanded="true"] .gpu-action-arrow,
+.qi-gpu-card[aria-expanded="true"] .gpu-action-arrow {
+  transform: rotate(180deg) !important;
+  color: #8cb7ff !important;
+}
+
+.gpu-card-body,
+.h3-gpu-card-body,
+.qi-gpu-card-body {
+  display: flex !important;
+  align-items: baseline !important;
+  justify-content: space-between !important;
+  gap: 8px !important;
+  min-width: 0 !important;
+}
+
+.gpu-name,
+.h3-gpu-name,
+.qi-gpu-name {
+  font-size: 13px !important;
+  font-weight: 650 !important;
+  color: #f0f4fc !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  letter-spacing: 0.2px !important;
+  flex: 1 1 auto !important;
+  min-width: 0 !important;
+}
+
+.gpu-status,
+.h3-gpu-status,
+.qi-gpu-status {
+  font-size: 11px !important;
+  font-weight: 500 !important;
+  color: #8da1bf !important;
+  white-space: nowrap !important;
+  flex-shrink: 0 !important;
+}
+
+.gpu-status.status-online,
+.h3-gpu-status.status-online,
+.qi-gpu-status.status-online {
+  color: #4ade80 !important;
+  font-weight: 600 !important;
+}
+
+/* Hidden but accessible form select with dark theme enforcement */
+.gpu-select,
+.h3-gpu-select,
+.qi-gpu-select,
+#h3Gpu,
+#qiGpu {
+  position: absolute !important;
+  top: 0 !important;
+  left: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  z-index: -1 !important;
+  border: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  background-color: #141824 !important;
+  color: #edf1f8 !important;
+  color-scheme: dark !important;
+  box-sizing: border-box !important;
+}
+
+.gpu-select option,
+.h3-gpu-select option,
+.qi-gpu-select option,
+#h3Gpu option,
+#qiGpu option {
+  background-color: #141824 !important;
+  color: #edf1f8 !important;
+  padding: 8px 12px !important;
+}
+
+/* Custom Floating Dropdown Menu (Popping upward above the card) */
+.gpu-dropdown-menu {
+  position: absolute !important;
+  bottom: calc(100% + 6px) !important;
+  left: 0 !important;
+  right: 0 !important;
+  z-index: 60 !important;
+  background: #141824 !important;
+  border: 1px solid #2e3a50 !important;
+  border-radius: 12px !important;
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.05) !important;
+  padding: 6px !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 3px !important;
+  max-height: 320px !important;
+  overflow-y: auto !important;
+  backdrop-filter: blur(12px) !important;
+  animation: gpuDropdownFadeIn 0.15s ease-out !important;
+}
+
+@keyframes gpuDropdownFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.gpu-menu-item {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  padding: 8px 10px !important;
+  border-radius: 8px !important;
+  cursor: pointer !important;
+  transition: all 0.12s ease !important;
+  user-select: none !important;
+  background: transparent !important;
+  border: 1px solid transparent !important;
+}
+
+.gpu-menu-item:hover {
+  background: #1e2638 !important;
+  border-color: #354460 !important;
+}
+
+.gpu-menu-item.selected {
+  background: #1c273c !important;
+  border-color: #3b5278 !important;
+}
+
+.gpu-menu-item-info {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 2px !important;
+  min-width: 0 !important;
+  flex: 1 1 auto !important;
+}
+
+.gpu-menu-item-header {
+  display: flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+}
+
+.gpu-menu-item-name {
+  font-size: 12.5px !important;
+  font-weight: 600 !important;
+  color: #edf1f8 !important;
+  white-space: nowrap !important;
+}
+
+.gpu-menu-item.selected .gpu-menu-item-name {
+  color: #8cb7ff !important;
+}
+
+.gpu-menu-online-pill {
+  font-size: 10px !important;
+  font-weight: 600 !important;
+  color: #4ade80 !important;
+  background: rgba(74, 222, 128, 0.12) !important;
+  border: 1px solid rgba(74, 222, 128, 0.25) !important;
+  padding: 1px 6px !important;
+  border-radius: 10px !important;
+  white-space: nowrap !important;
+}
+
+.gpu-menu-item-desc {
+  font-size: 11px !important;
+  color: #8294b0 !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+}
+
+.gpu-menu-check {
+  font-size: 13px !important;
+  font-weight: 700 !important;
+  color: #8cb7ff !important;
+  margin-left: 8px !important;
+  flex-shrink: 0 !important;
 }

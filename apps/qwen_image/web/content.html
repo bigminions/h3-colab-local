@@ -12,7 +12,7 @@
 
             <button type="button" id="qiTextTab" class="tab active" role="tab" aria-selected="true" aria-controls="qiPromptPanel">文生图</button>
 
-            <button type="button" id="qiImageTab" class="tab" role="tab" aria-selected="false" aria-controls="qiImagePanel">图生图</button>
+            <button type="button" id="qiImageTab" class="tab" role="tab" aria-selected="false" aria-controls="qiImagePanel">智能图像编辑</button>
 
           </div>
 
@@ -26,47 +26,49 @@
 
               <div class="reference-heading">
 
-                <div class="reference-title"><span class="field-label">参考图片</span></div>
+                <div class="reference-title">
+                  <span class="field-label">参考素材</span>
+                  <button id="qiReferenceHelpToggle" class="reference-help-toggle" type="button" aria-label="图片使用说明" aria-expanded="false" aria-controls="qiReferenceHelp">?</button>
+                </div>
 
-                <span id="qiReferenceStatus" class="hint">未选择</span>
+                <span id="qiReferenceCount" class="hint">0 / 3 张</span>
+                <span id="qiReferenceStatus" class="hint hidden" style="display:none;"></span>
 
               </div>
 
-              <input id="qiReferenceFile" class="file-input" type="file" accept="image/png,image/jpeg,image/webp" aria-label="上传参考图片">
+              <div id="qiReferenceHelp" class="reference-help hidden">
 
-              <div id="qiReferenceDropZone" class="reference-drop">
+                <p class="hint reference-guide">智能图像编辑支持最多 3 张素材图片。</p>
 
-                <div id="qiReferencePlaceholder" class="reference-drop-inner">
+                <p class="hint reference-guide">在下方输入 @ 选择图片，直接在描述中用文字说明参考用途，例如“保持 @图片1 长相面容不变，换上 @图片2 的衣服，画风参考 @图片3”。首张图片按输出比例居中适配，其余参考图保留原有比例。</p>
 
-                  <div class="reference-drop-prompt">
+              </div>
 
-                    <span class="reference-drop-icon">＋</span>
+              <input id="qiReferenceFile" class="file-input" type="file" multiple accept="image/png,image/jpeg,image/webp" aria-label="上传图片">
 
-                    <span class="reference-drop-title">添加参考图</span>
+              <div id="qiReferenceCards" class="reference-grid">
 
-                    <span class="reference-drop-sub">拖入图片 · PNG/JPEG/WebP ≤ 20MB</span>
+                <div id="qiReferenceDropZone" class="reference-drop">
 
-                  </div>
+                  <div id="qiReferencePlaceholder" class="reference-drop-inner">
 
-                  <div class="reference-drop-actions">
+                    <div class="reference-drop-prompt">
 
-                    <button type="button" id="qiBtnUploadLocal" class="drop-action-btn local">本地添加</button>
+                      <span class="reference-drop-icon">＋</span>
 
-                    <button type="button" id="qiChooseLibraryImage" class="drop-action-btn library">素材库选择</button>
+                      <span class="reference-drop-title">添加图片</span>
 
-                  </div>
+                      <span class="reference-drop-sub">拖入图片 · 单张 ≤ 20MB</span>
 
-                </div>
+                    </div>
 
-                <div id="qiReferencePreview" class="hidden" style="display:flex;align-items:center;gap:12px;width:100%;">
+                    <div class="reference-drop-actions">
 
-                  <img id="qiReferenceImg" src="" alt="参考图预览" style="width:72px;height:72px;object-fit:cover;border-radius:8px;border:1px solid var(--line);">
+                      <button type="button" id="qiBtnUploadLocal" class="drop-action-btn local">本地添加</button>
 
-                  <div style="flex:1;overflow:hidden;">
+                      <button type="button" id="qiChooseLibraryImage" class="drop-action-btn library">素材库选择</button>
 
-                    <div id="qiReferenceName" style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
-
-                    <button id="qiRemoveReference" type="button" class="secondary" style="margin-top:6px;padding:2px 8px;font-size:11px;">移除图片</button>
+                    </div>
 
                   </div>
 
@@ -75,34 +77,38 @@
               </div>
 
               <div style="margin-top:12px;">
+                <label class="field-label" for="qiEditType">编辑模式</label>
+                <select id="qiEditType" style="width:100%;padding:6px 10px;background:#1a2332;border:1px solid var(--line);border-radius:6px;color:#e1e7f0;font-size:12px;">
+                  <option value="instruction" selected>智能指令编辑 (Qwen-Image-Edit · 深度保留面部与背景，只按指令修改)</option>
+                  <option value="repaint">传统垫图重绘 (Img2Img · 全图加噪重绘)</option>
+                </select>
+                <div id="qiEditTypeHint" class="hint" style="font-size:11px;margin-top:4px;">✨ 推荐模式：输入自然语言指令（如“将背景改为白色”），自动精准替换。</div>
+              </div>
 
+              <div id="qiDenoiseGroup" style="margin-top:12px;" class="hidden">
                 <div style="display:flex;justify-content:space-between;align-items:center;">
-
-                  <label class="field-label" for="qiDenoise">重绘幅度 (Denoise)</label>
-
+                  <label class="field-label" for="qiDenoise">垫图重绘幅度 (仅重绘生效)</label>
                   <span id="qiDenoiseVal" class="hint" style="font-weight:600;">0.75</span>
-
                 </div>
-
                 <input id="qiDenoise" type="range" min="0.1" max="1.0" step="0.05" value="0.75" style="width:100%;accent-color:var(--accent);">
-
-                <div class="hint" style="font-size:11px;">较低保留原图结构，较高赋予更多创作自由度。</div>
-
+                <div class="hint" style="font-size:11px;">智能编辑模式自动精准保留面部与结构；此项仅传统垫图重绘生效。</div>
               </div>
 
             </div>
 
-            <div id="qiPromptPanel" class="qi-prompt-panel">
+            <div id="qiPromptPanel" class="qi-prompt-panel" style="position:relative;">
 
               <div class="prompt-heading">
 
                 <label class="field-label" for="qiPrompt">画面描述 (Prompt)</label>
 
-                <span class="hint">支持详细中英文描述</span>
+                <span class="hint">输入 @ 引用图片 · 支持中英文</span>
 
               </div>
 
-              <textarea id="qiPrompt" aria-label="画面描述" required placeholder="描述画面主体、背景、光影细节与艺术风格…&#10;&#10;例如：一座漂浮在云海之上的赛博朋克空中古城，霓虹璀璨，飞艇穿梭，细雨连绵，电影级光影，8k高清细节。"></textarea>
+              <textarea id="qiPrompt" aria-label="画面描述" required aria-autocomplete="list" aria-controls="qiMentionMenu" aria-expanded="false" placeholder="描述画面主体、动作与修改要求，输入 @ 引用图片…&#10;&#10;例如：将 @图片1 中的方块放到 @图片2 的桌面上，配色参考 @图片3。"></textarea>
+
+              <div id="qiMentionMenu" class="mention-menu hidden" role="listbox" aria-label="图片引用建议" style="position:absolute;z-index:100;min-width:220px;max-width:320px;max-height:250px;overflow-y:auto;border:1px solid #3c4d68;background:#161e2c;border-radius:10px;padding:6px;box-shadow:0 12px 32px rgba(0,0,0,0.55);"></div>
 
               <div class="qi-negative-group">
 
@@ -236,16 +242,17 @@
 
               <div class="qi-field">
 
-                <label class="field-label" for="qiModelFile">扩散模型 (GGUF / Safetensors)</label>
+                <label id="qiModelLabel" class="field-label" for="qiModelFile">扩散模型 (GGUF / Safetensors)</label>
 
                 <select id="qiModelFile">
-                  <option value="qwen-image-2.1-turbo-Q4_K_M.gguf" selected>Q4_K_M.gguf · 3.8GB（首选推荐）</option>
-                  <option value="qwen-image-2.1-turbo-fp8.safetensors">fp8.safetensors · 6.6GB（FP8 高精度）</option>
-                  <option value="qwen-image-2.1-turbo-int8_convrot.safetensors">int8_convrot.safetensors · 6.8GB</option>
-                  <option value="qwen-image-2.1-turbo-Q5_K_M.gguf">Q5_K_M.gguf · 4.6GB</option>
-                  <option value="qwen-image-2.1-turbo-Q8_0.gguf">Q8_0.gguf · 7.1GB</option>
-                  <option value="qwen-image-2.1-turbo-Q6_K.gguf">Q6_K.gguf · 5.5GB</option>
-                  <option value="qwen-image-2.1-turbo-Q4_0.gguf">Q4_0.gguf · 3.8GB</option>
+                  <optgroup id="qiModelGroupEdit" label="智能图像编辑 (Qwen-Image-Edit 20B)">
+                    <option value="qwen-image-edit-2511-Q4_K_M.gguf" selected>Qwen-Image-Edit 2511 Q4_K_M · 12.0GB（智能修图推荐 · 极速省显存）</option>
+                    <option value="qwen_image_edit_2511_fp8mixed.safetensors">Qwen-Image-Edit 2511 FP8 · 19.1GB（高精度细节 · 原生FP8）</option>
+                  </optgroup>
+                  <optgroup id="qiModelGroupTurbo" label="文生图加速 (Qwen-Image Turbo)">
+                    <option value="qwen-image-2.1-turbo-Q4_K_M.gguf">Turbo Q4_K_M.gguf · 3.8GB（文生图推荐 · 极速出图）</option>
+                    <option value="qwen-image-2.1-turbo-fp8.safetensors">Turbo fp8.safetensors · 6.6GB（高精度细节 · 原生FP8）</option>
+                  </optgroup>
                 </select>
 
               </div>
@@ -310,15 +317,15 @@
 
             </div>
 
-            <div class="qi-gpu-card-wrap">
+            <div class="gpu-card-wrap qi-gpu-card-wrap">
 
-              <div class="qi-gpu-card" id="qiGpuCard" role="button" aria-haspopup="listbox" title="点击切换运行显卡">
+              <div class="gpu-card qi-gpu-card" id="qiGpuCard" role="button" tabindex="0" aria-haspopup="listbox" aria-expanded="false" title="点击切换运行显卡">
 
-                <div class="qi-gpu-card-header">
+                <div class="gpu-card-header qi-gpu-card-header">
 
-                  <span class="qi-gpu-badge">
+                  <span class="gpu-badge qi-gpu-badge">
 
-                    <svg class="qi-gpu-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <svg class="gpu-icon qi-gpu-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 
                       <rect x="4" y="4" width="16" height="16" rx="2"/>
 
@@ -332,21 +339,23 @@
 
                   </span>
 
-                  <span class="qi-gpu-action">切换 ▾</span>
+                  <span class="gpu-action qi-gpu-action">切换 <span class="gpu-action-arrow qi-gpu-action-arrow">▾</span></span>
 
                 </div>
 
-                <div class="qi-gpu-card-body">
+                <div class="gpu-card-body qi-gpu-card-body">
 
-                  <span id="qiGpuDisplay" class="qi-gpu-name">T4 · 16GB</span>
+                  <span id="qiGpuDisplay" class="gpu-name qi-gpu-name">T4 · 16GB</span>
 
-                  <span id="qiGpuStatus" class="qi-gpu-status">推荐 · 显存友好</span>
+                  <span id="qiGpuStatus" class="gpu-status qi-gpu-status">显存友好 · 适于文生图</span>
 
                 </div>
 
-                <select id="qiGpu" class="qi-gpu-select" aria-label="切换运行显卡"></select>
+                <select id="qiGpu" class="gpu-select qi-gpu-select" aria-label="切换运行显卡"></select>
 
               </div>
+
+              <div class="gpu-dropdown-menu hidden" id="qiGpuMenu" role="listbox" aria-label="切换运行显卡选项"></div>
 
             </div>
 

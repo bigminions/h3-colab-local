@@ -101,10 +101,10 @@
     <div class="compute-columns"><section class="card compute-config"><h3 class="card-title">运行配置</h3><p id="computeCurrentAppHint" class="hint">当前应用：<strong id="computeCurrentAppName">H3 视频</strong>。开始生成时才申请显卡。</p>            <label class="field-label" for="gpu">Colab 显卡</label><select id="gpu"><option value="G4" selected>G4 · Blackwell · 96GB</option><option value="A100">A100 · 需要 80GB</option><option value="H100">H100 · Hopper · 80GB</option><option value="L4">L4 · 24GB</option><option value="T4">T4 · 16GB</option></select>
             <label class="field-label" for="endpoint">Colab 运行时</label><select id="endpoint"><option value="">自动申请 G4 · 按需连接</option></select><div class="hint">可自动发现并复用已有在线运行时；切换型号前请释放 GPU。</div>
           <fieldset class="release-config"><legend>显卡释放</legend>
-            <label class="release-choice"><input type="radio" name="releaseMode" value="always">整批生成后释放</label>
+            <label class="release-choice"><input type="radio" name="releaseMode" value="always">队列完成后释放</label>
             <div class="release-option"><label class="release-choice"><input type="radio" name="releaseMode" value="idle" checked>闲置后释放 <span>默认</span></label><div id="idleReleaseOptions" class="idle-release-options"><label for="idleMinutes">闲置</label><input id="idleMinutes" type="number" min="1" max="120" step="1" value="10"><span>分钟</span></div></div>
             <div class="release-option"><label class="release-choice"><input type="radio" name="releaseMode" value="manual">手动释放</label><button id="manualRelease" class="secondary hidden" type="button">检查并释放</button></div>
-            <div id="releaseHelp" class="hint">整批完成后计时，保留期间仍计费。请保持本地后台运行。</div>
+            <div id="releaseHelp" class="hint">任务队列空闲后计时，保留期间仍计费。请保持本地后台运行。</div>
             <div id="releaseStatus" class="release-status" role="status">读取释放配置…</div>
           </fieldset>
 </section><section class="card compute-account">        <section id="balanceDropdown" class="balance-dropdown" aria-label="计算单元完整信息">
@@ -146,7 +146,7 @@
 base = "http://127.0.0.1:7865"
 headers = {"X-LStudio-Key": "粘贴本机 Key"}
 r = requests.post(base + "/api/jobs", headers=headers,
-    json={"prompt": "A cat walking in a garden, birdsong.",
+    json={"prompt": "A blue cube moves slowly across a plain white table.",
           "aspect_ratio": "9:16",
           "people": False, "release_mode": "always"})
 r.raise_for_status()
@@ -201,6 +201,29 @@ while True:
         </div>
       </div>
     </div>
+  </dialog>
+  <!-- Queue placement modal -->
+  <dialog id="queuePlacementModal" class="modal" data-theme="dark" aria-labelledby="queuePlacementTitle" aria-describedby="queuePlacementSummary">
+    <div class="modal-box w-11/12 max-w-sm bg-base-100 border border-base-300 p-5 shadow-2xl overflow-visible">
+      <div class="flex items-center justify-between gap-3">
+        <h2 id="queuePlacementTitle" class="text-base font-semibold text-base-content">加入任务队列</h2>
+        <details id="queuePlacementHelp" class="dropdown dropdown-end">
+          <summary class="btn btn-ghost btn-xs btn-circle text-base-content/50" aria-label="完整排队说明">
+            <span class="inline-flex items-center justify-center w-4 h-4 border border-current rounded-full text-xs leading-none">i</span>
+          </summary>
+          <div id="queuePlacementHelpText" class="dropdown-content z-10 w-72 p-3 mt-2 rounded-box bg-base-200 border border-base-300 text-xs text-base-content/80 leading-relaxed whitespace-pre-line shadow-lg">优先复用同应用、同显卡环境。</div>
+        </details>
+      </div>
+      <p id="queuePlacementSummary" class="text-sm text-base-content/70 mt-2">选择任务的等待顺序。</p>
+      <div class="modal-action gap-2">
+        <button id="cancelQueuePlacement" type="button" class="btn btn-sm btn-ghost">取消</button>
+        <button id="queuePlacementFront" type="button" class="btn btn-sm btn-outline hidden" disabled>插到队首</button>
+        <button id="queuePlacementBack" type="button" class="btn btn-sm btn-success">排队（推荐）</button>
+      </div>
+    </div>
+    <form method="dialog" class="modal-backdrop">
+      <button>关闭</button>
+    </form>
   </dialog>
 </body>
 </html>

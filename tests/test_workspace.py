@@ -1,6 +1,5 @@
 """Workspace adapters and shared media, using temporary data and synthetic files."""
 import asyncio
-import hashlib
 import io
 import json
 from pathlib import Path
@@ -200,7 +199,6 @@ class AdapterTests(unittest.TestCase):
         factory.assert_called_once_with('controller')
 
     def test_h3_application_packaged_in_apps_directory(self):
-        from apps.h3 import H3Application, H3JobConfig, CharacterProfile
 
         h3_app = H3Application()
         source = h3_app.source(app.BASE, {'prompt_processing': 'faithful'})
@@ -320,6 +318,28 @@ class UiOptimizationTests(unittest.TestCase):
         self.assertIn("#toolPage .h3-gpu-name", css)
         self.assertIn("#toolPage .h3-gpu-status", css)
         self.assertIn("#toolPage #generate", css)
+
+    def test_shared_gpu_card_component_unified_across_apps(self):
+        ws_css = Path("static/workspace.css").read_text(encoding="utf-8")
+        self.assertIn(".gpu-card-wrap", ws_css)
+        self.assertIn(".gpu-card", ws_css)
+        self.assertIn(".gpu-dropdown-menu", ws_css)
+        self.assertIn(".gpu-menu-item", ws_css)
+        self.assertIn("color-scheme: dark !important", ws_css)
+
+        ws_js = Path("static/workspace.js").read_text(encoding="utf-8")
+        self.assertIn("renderGpuMenu", ws_js)
+        self.assertIn("toggleGpuMenu", ws_js)
+        self.assertIn("h3GpuMenu", ws_js)
+        self.assertIn("qiGpuMenu", ws_js)
+
+        h3_html = Path("apps/h3/web/content.html").read_text(encoding="utf-8")
+        self.assertIn('id="h3GpuMenu"', h3_html)
+        self.assertIn('class="gpu-card h3-gpu-card"', h3_html)
+
+        qi_html = Path("apps/qwen_image/web/content.html").read_text(encoding="utf-8")
+        self.assertIn('id="qiGpuMenu"', qi_html)
+        self.assertIn('class="gpu-card qi-gpu-card"', qi_html)
 
     def test_app_and_page_persistence_across_refresh(self):
         studio_html = Path("studio.html").read_text(encoding="utf-8")

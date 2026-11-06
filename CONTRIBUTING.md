@@ -10,7 +10,7 @@
 | 历史与回收 | `history_recycle.py` |
 | Drive | `drive_storage.py`、`drive_cache.py`、`drive_cache_remote.py`、`mounted_drive_cache.py`、`native_drive_mount.py` |
 | 运行时恢复 | `runtime_recovery.py`、`runtime_watchdog.py` |
-| 工作台架构 | `workspace_runtime.py`、`compute_colab.py`、`asset_library.py`、`ARCHITECTURE.md` |
+| 工作台架构 | `workspace_runtime.py`、`compute_colab.py`、`job_queue.py`、`remote_consumer.py`、`asset_library.py`、`ARCHITECTURE.md` |
 | 网页与公共组件 | `studio.html`（工作台壳层）、`static/` 下的公共组件 CSS 和 JavaScript，各应用前端独立存放于 `apps/<app_id>/web/` |
 | 本地回归验证 | `tests/`：离线 Python 和前端回归测试 |
 
@@ -22,9 +22,10 @@
 
 - `.private/`、`materials/`、`log/`、虚拟环境和 `.env`：用户资料、凭据、会话、本机配置和产物。
 - 新的运行产物应写入对应的用户数据目录，避免散落在源码根目录。
-- 历史截图、音视频、转录、实测报告、一次性诊断脚本和上游研究副本已移除，不为这些旧文件保留忽略规则。
 
 正式 UI 图片和经过检查的测试夹具可以正常提交，不按图片、音视频或 JSON 扩展名统一忽略。自动化测试使用临时数据和模拟传输，不依赖个人作品或历史生成结果。
+
+测试夹具、界面占位示例和文档中的提示词必须专门编写，使用通用、虚构的内容。不要直接复制业务提示词、剧本、角色姓名、对白、英文翻译、客户资料或真实生成记录；将它们改名或写进断言也不等于脱敏。提交检查应同时检查自然语言内容，而不只检查密钥与文件类型。
 
 ## 本地验证
 

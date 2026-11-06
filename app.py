@@ -46,6 +46,8 @@ from compute_colab import ColabProvider
 from apps.h3 import H3Application, H3JobConfig
 from apps.qwen_image import QwenImageApplication, QwenImageJobConfig
 from workspace_runtime import ApplicationRegistry, ProviderRegistry, ProviderSpec
+from job_queue import JobStore, waiting_jobs, application_id, queue_plan
+# These imports also provide the runtime_services API injected into providers.
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import AuthorizedSession
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -367,20 +369,21 @@ class Controller:
         self.monitor_thread = None
         self.worker_thread = None
         self._in_queue_worker = False
-        policy_path = directory / 'release-state.json'
-        if policy_path.exists():
+        self.store = JobStore(directory / 'studio.sqlite3')
+        self.consumer = {'state': 'disconnected', 'checked_at': None}
+        state = self.store.get_state('release')
+        if state:
             try:
-                state = json.loads(policy_path.read_text(encoding='utf-8'))
                 self.release_policy = ReleasePolicy(**state['policy'])
                 self.release_revision = int(state.get('revision', 0))
                 self.idle_since = state.get('idle_since') if valid_number(state.get('idle_since')) else None
             except (ValueError, KeyError, OSError, TypeError):
                 pass
-        if (directory / 'jobs.json').exists():
-            self.jobs = json.loads((directory / 'jobs.json').read_text(encoding='utf-8'))
+        self.jobs = self.store.load_jobs()
+        if self.jobs:
             for job in self.jobs.values():
-                if job['status'] in ('running', 'queued', 'cancelling'):
-                    job.update(status='interrupted', message='本地程序中断；运行时保留，可重新取回结果。')
+                if job['status'] in ('running', 'cancelling'):
+                    job.update(status='interrupted', message='本地程序中断；等待核对远端任务，可继续取回结果。')
             for batch_id in {j.get('batch_id') for j in self.jobs.values()} - {None}:
                 siblings = [j for j in self.jobs.values() if j.get('batch_id') == batch_id]
                 if all(j.get('file') for j in siblings):
@@ -394,10 +397,11 @@ class Controller:
         self.transport = transport or providers.create(self.provider_id, self)
         if self.session and self.idle_since is None:
             self.idle_since = self.now()
+        self.save_jobs()
 
     def save_release_state(self):
-        atomic(self.directory / 'release-state.json', json.dumps({
-            'policy': self.release_policy.model_dump(), 'revision': self.release_revision, 'idle_since': self.idle_since}))
+        self.store.set_state('release', {
+            'policy': self.release_policy.model_dump(), 'revision': self.release_revision, 'idle_since': self.idle_since})
 
     def configure_release(self, policy):
         with self.lock:
@@ -414,11 +418,38 @@ class Controller:
 
     def release_status(self):
         deadline = (self.idle_since + self.release_policy.idle_minutes * 60
-                    if self.session and not self.active and self.idle_since is not None and self.release_policy.mode == 'idle' else None)
+                    if self.session and not self.active and not waiting_jobs(self.jobs) and self.idle_since is not None and self.release_policy.mode == 'idle' else None)
         return {'policy': self.release_policy.model_dump(), 'revision': self.release_revision,
                 'deadline': deadline, 'checking': self.release_checking,
                 'error': self.release_error, 'message': self.release_message,
                 'monitor_running': bool(self.monitor_thread and self.monitor_thread.is_alive())}
+
+    def occupying_app_info(self, applications_registry=None):
+        registry = applications_registry or globals().get('applications')
+        active_id = self.active
+        active_job = self.jobs.get(active_id) if isinstance(active_id, str) else None
+        if active_job:
+            app_id = active_job.get('app_id') or active_job.get('config', {}).get('app_id')
+        elif self.session:
+            app_id = self.session.get('app_id')
+            if not app_id:
+                # Look for the most recent job matching this session endpoint
+                recent = sorted((j for j in self.jobs.values() if j.get('endpoint') == self.session.get('endpoint') and j.get('status') not in ('cancelled', 'discarded')),
+                                key=lambda j: j.get('created', 0), reverse=True)
+                if recent:
+                    app_id = recent[0].get('app_id') or recent[0].get('config', {}).get('app_id')
+                    self.session['app_id'] = app_id
+                    self.save_session()
+        else:
+            app_id = None
+        app_name = None
+        if app_id:
+            try:
+                app_obj = registry.get(app_id) if registry else None
+                app_name = app_obj.spec.name if app_obj else app_id
+            except Exception:
+                app_name = 'H3 视频' if app_id == 'h3' else ('Qwen-Image-2.1' if app_id == 'qwen_image_2_1' else app_id)
+        return app_id, app_name
 
     def pending_jobs(self):
         return [j for j in self.jobs.values() if j['status'] in ('error', 'interrupted', 'queued', 'running', 'cancelling')
@@ -464,9 +495,9 @@ class Controller:
                 for target in targets:
                     if target.get('status') == 'queued':
                         target.update(cancel_requested=True, status='cancelled', safe_release=True, batch_complete=True)
-                        self.event(target, 'cancelled', '排队已取消')
+                        self.event(target, 'cancelled', '任务已取消')
                 self.save_jobs()
-                return {'ok': True, 'pending': False, 'message': '排队已取消'}
+                return {'ok': True, 'pending': False, 'message': '任务已取消'}
             if self.active and self.active not in target_ids:
                 raise HTTPException(409,'另一个任务正在运行，不能取消它的显卡')
             if not self.active and all(j.get('file') or j.get('drive') or j.get('safe_release') for j in targets):
@@ -481,14 +512,11 @@ class Controller:
                 self.jobs[self.active]['cancel_requested'] = True
             self.cancel_wakeup.set()
             active = self.active
-            self.event(job,'cancel','正在取消任务并释放显卡；未保存的临时结果将丢弃')
-        if active:
-            stop = getattr(self.transport,'stop_running',None)
-            if stop:
-                stop()
-        else:
+            self.event(job,'cancel','正在取消任务，保留显卡和已准备的环境')
+        if not active:
             self.finish_cancel(job)
-        return {'ok':True,'pending':bool(self.active),'message':job.get('message')}
+        return_pending = bool(self.active)
+        return {'ok':True,'pending':return_pending,'message':job.get('message')}
 
     def finish_cancel(self, job):
         with self.lock:
@@ -499,7 +527,13 @@ class Controller:
             if self.session:
                 if job.get('endpoint') and job['endpoint'] != self.session['endpoint']:
                     raise RuntimeError('任务与当前运行时不一致，无法确认取消')
-                self.transport.release()
+                targets = self.cancel_targets(job)
+                remote_job = next((j for j in targets if j['id'] == self.active), None)
+                if remote_job is None:
+                    remote_job = max((j for j in targets if j.get('execution_started')
+                        and not (j.get('file') or j.get('drive'))),
+                        key=lambda j: j.get('batch_index', 0), default=job)
+                self.transport.cancel_job(remote_job)
             elif job.get('assignment_pending'):
                 self.transport.cancel_pending_assignment(job)
             with self.lock:
@@ -508,19 +542,19 @@ class Controller:
                     target.update(status='done' if saved else 'cancelled',safe_release=True,batch_complete=True)
                     target.pop('cancel_error',None)
                 self.release_error = self.release_message = None
-                message = ('已取消剩余执行，已保存的视频保留，显卡已释放' if job.get('file') or job.get('drive') else
-                           '任务已取消，显卡已释放，可以提交新任务')
+                message = ('已取消剩余执行，已保存的结果和显卡环境保留' if job.get('file') or job.get('drive') else
+                           '任务已取消，显卡环境保留，继续处理后续任务')
                 if job.get('auto_cancel_reason'):
                     message += '；失败原因：' + job['auto_cancel_reason']
                 self.event(job,'done' if job.get('file') or job.get('drive') else 'cancelled', message)
         except Exception as exc:
             job.update(status='error',safe_release=False,cancel_error=safe_error(exc))
-            self.event(job,'cancel','取消尚未确认：' + safe_error(exc) + '；请重试取消并释放显卡')
+            self.event(job,'cancel','取消尚未确认：' + safe_error(exc) + '；环境保留，请重试取消')
         finally:
             job.pop('cancel_finishing',None)
             self.save_jobs()
 
-    def resubmit(self, job_id):
+    def resubmit(self, job_id, placement="back"):
         with self.lock:
             job = self.jobs.get(job_id)
             if not job or not job.get('config'):
@@ -533,6 +567,9 @@ class Controller:
             job.update(status='queued', stage='connect', message='排队中，等待执行',
                        safe_release=False, batch_complete=False, created=self.now())
             job.pop('remote_result', None)
+            job.pop('execution_started', None)
+            job.pop('consumer_run_id', None)
+            job.pop('prompt_id', None)
             job.pop('cancel_requested', None)
             job.pop('auto_cancel_reason', None)
             job.pop('history_hidden', None)
@@ -540,11 +577,10 @@ class Controller:
             job.pop('gpu_release_error', None)
             job.pop('cancel_error', None)
 
+            job.update(queue_order=self.queue_order(placement == 'front'), queue_front=placement == 'front')
             self.event(job, 'connect', '已重新提交任务，加入排队')
 
-            if not self.worker_thread or not self.worker_thread.is_alive():
-                self.worker_thread = threading.Thread(target=self._run_queue, daemon=True)
-                self.worker_thread.start()
+            self.ensure_worker()
 
             return {'ok': True, 'id': job_id}
 
@@ -616,37 +652,41 @@ class Controller:
             self.release_message = '已检查：当前没有本控制台管理的显卡，无需释放'
             self.save_release_state()
 
-    def check_and_release(self, discard_pending=False):
+    def _discard_pending_jobs(self):
+        pending = self.pending_jobs()
+        for job in pending:
+            if job.get('status') == 'queued':
+                continue
+            job.update(safe_release=True, status='discarded')
+        if pending:
+            self.save_jobs()
+
+    def check_and_release(self, discard_pending=False, force=False):
         with self.lock:
             if self.active:
-                raise HTTPException(409, '任务执行中，不能释放显卡')
+                raise HTTPException(409, '任务执行中，请先取消任务，确认停止后再释放显卡')
             if not self.session:
-                pending = self.pending_jobs()
-                for job in pending:
-                    job.update(safe_release=True, status='discarded')
-                if pending:
-                    self.save_jobs()
+                self._discard_pending_jobs()
                 self.idle_since = None
                 self.release_message = '已检查：当前没有本控制台管理的显卡，无需释放'
                 self.release_error = None
                 self.save_release_state()
                 return {'ok': True, 'message': self.release_message}
             pending = self.pending_jobs()
-            if pending and not discard_pending:
+            if any(j.get('status') != 'queued' for j in pending) and not discard_pending and not force:
                 raise HTTPException(409, '存在未取回的视频。先重试取回，再检查并释放。')
             self.release_checking = True
             try:
-                self.verify_saved_results(self.session['endpoint'])
-                if not self.transport.check_idle():
-                    raise HTTPException(409, 'Colab 仍有任务运行或排队，显卡已保留，请稍后再检查。')
+                if not force:
+                    self.verify_saved_results(self.session['endpoint'])
+                    if not self.transport.check_idle():
+                        raise HTTPException(409, 'Colab 仍有任务运行或排队，显卡已保留，请稍后再检查。')
                 if self.session:
                     self.transport.release()
-                for job in pending:
-                    job.update(safe_release=True, status='discarded')
+                self._discard_pending_jobs()
                 self.idle_since = None
                 self.release_error = None
                 self.release_message = '已检查并确认显卡已释放'
-                self.save_jobs()
                 self.save_release_state()
                 return {'ok': True, 'message': self.release_message}
             except HTTPException as exc:
@@ -660,7 +700,7 @@ class Controller:
 
     def idle_tick(self):
         with self.lock:
-            if not self.session or self.active or self.release_policy.mode == 'manual' or self.now() < self.release_retry_at:
+            if not self.session or self.active or waiting_jobs(self.jobs) or self.release_policy.mode == 'manual' or self.now() < self.release_retry_at:
                 return
             deadline = self.release_status()['deadline']
             if self.release_policy.mode == 'idle' and (deadline is None or self.now() < deadline):
@@ -678,6 +718,9 @@ class Controller:
         def monitor():
             while not self.monitor_stop.wait(5):
                 try:
+                    self.refresh_consumer()
+                    if waiting_jobs(self.jobs):
+                        self.ensure_worker()
                     self.idle_tick()
                 except Exception as exc:
                     self.release_error = safe_error(exc)
@@ -694,8 +737,7 @@ class Controller:
 
     def save_jobs(self):
         with self.lock:
-            data = json.dumps(self.jobs, ensure_ascii=False)
-        atomic(self.directory / 'jobs.json', data)
+            self.store.save_jobs(self.jobs)
 
     def history_clearable(self, job):
         if job['id'] in self.recycling or job['id'] in self.preparing_videos:
@@ -964,69 +1006,130 @@ class Controller:
             job['events'] = job['events'][-120:]
             self.save_jobs()
 
+    def ensure_worker(self):
+        with self.lock:
+            if self.worker_thread is None or not self.worker_thread.is_alive():
+                self.worker_thread = threading.Thread(target=self._run_queue, daemon=True)
+                self.worker_thread.start()
+
+    def queue_order(self, front=False):
+        positions = [j.get('queue_order', j.get('created', 0)) for j in self.jobs.values()]
+        return (min(positions, default=0) - 100) if front else (max(positions, default=0) + 100)
+
+    def queue_snapshot(self):
+        with self.lock:
+            return queue_plan(self.jobs, self.session)
+
+    def refresh_consumer(self):
+        with self.lock:
+            endpoint = (self.session or {}).get('endpoint')
+            active_id = self.active
+        if not endpoint:
+            state = {'state': 'connecting' if active_id else 'disconnected'}
+        else:
+            try:
+                state = self.transport.consumer_status()
+            except Exception as exc:
+                state = {'state': 'unknown', 'error': safe_error(exc)}
+        with self.lock:
+            if endpoint == (self.session or {}).get('endpoint'):
+                self.consumer = {**state, 'endpoint': endpoint, 'checked_at': self.now()}
+                self.store.set_state('consumer', self.consumer)
+            return dict(self.consumer)
+
+    def queue_blocker(self):
+        endpoint = (self.session or {}).get('endpoint')
+        return next((j for j in self.pending_jobs() if j.get('status') in ('error', 'interrupted', 'cancelling')
+                     and (endpoint and j.get('endpoint') == endpoint or j.get('assignment_pending'))), None)
+
     def _run_queue(self):
         self._in_queue_worker = True
+        target = None
+        restart_if_queued = False
         try:
-            while True:
-                batch = None
-                target = None
+            while not self.monitor_stop.is_set():
                 with self.lock:
-                    active_job = self.jobs.get(self.active)
-                    if active_job and active_job.get('status') == 'running':
-                        target = active_job
-                    else:
-                        queued = [j for j in self.jobs.values() if j.get('status') == 'queued' and not j.get('cancel_requested')]
-                        if not queued:
-                            self.active = None
-                            self.idle_since = self.now() if self.session else None
-                            if self.release_policy.mode == 'always' and self.session:
-                                try:
-                                    self.transport.release()
-                                except Exception as exc:
-                                    self.release_error = safe_error(exc)
-                            self.save_release_state()
-                            self.save_jobs()
-                            break
-                        queued.sort(key=lambda j: j.get('created', 0))
-                        target = queued[0]
-                        self.active = target['id']
-                        target['status'] = 'running'
-
-                    batch_id = target.get('batch_id')
-                    if batch_id:
-                        batch = sorted([j for j in self.jobs.values() if j.get('batch_id') == batch_id
-                                        and j.get('status') in ('running', 'queued') and not j.get('cancel_requested')],
-                                       key=lambda j: j.get('batch_index', 0))
-                        for child in batch:
-                            child.pop('history_hidden', None)
-                    else:
-                        target.pop('history_hidden', None)
-
-                    self.cancel_wakeup.clear()
+                    blocker = self.queue_blocker()
+                    queued = waiting_jobs(self.jobs, self.session)
+                    if blocker or not queued:
+                        restart_if_queued = not blocker
+                        self.active = None
+                        self.idle_since = self.now() if self.session else None
+                        if blocker:
+                            self.consumer = {**self.consumer, 'state': 'blocked', 'job_id': blocker['id']}
+                        self.save_release_state()
+                        self.save_jobs()
+                        return
+                    target = queued[0]
+                    if 'release_mode' in target.get('config', {}):
+                        self.configure_release(ReleasePolicy(mode=target['config']['release_mode'],
+                            idle_minutes=target['config'].get('idle_minutes', 10)))
+                    self.active = target['id']
+                    target.update(status='running')
                     self.idle_since = None
                     self.release_error = self.release_message = None
-                    self.save_release_state()
                     self.save_jobs()
-
+                    self.save_release_state()
                 try:
-                    if batch:
-                        self.run_batch(batch)
-                    else:
-                        self.run(target)
-                except Exception:
-                    pass
+                    if self.session:
+                        state = self.refresh_consumer()
+                        recovering = (target.get('recover_existing') and state['state'] == 'busy'
+                                      and state.get('job_id') == target['id']
+                                      and state.get('run_id') == target.get('consumer_run_id'))
+                        if state['state'] != 'idle' and not recovering:
+                            with self.lock:
+                                target['status'] = 'queued'
+                            return
+                        config = target['config']
+                        if (self.provider_id != config.get('provider_id', 'colab') or
+                                self.session.get('app_id') != application_id(target) or
+                                self.session.get('accelerator') != config.get('gpu')):
+                            self.consumer = {**self.consumer, 'state': 'switching'}
+                            self.verify_saved_results(self.session['endpoint'])
+                            self.transport.release()
+                            # Providers clear session only after release has been confirmed.
+                            if self.session:
+                                raise RuntimeError('释放尚未确认，暂停环境切换')
+                    target['queue_front'] = False
+                    self.cancel_wakeup.clear()
+                    target.pop('history_hidden', None)
+                    self.run(target)
+                    with self.lock:
+                        target.pop('recover_existing', None)
+                        if target.get('batch_id'):
+                            siblings = self.cancel_targets(target)
+                            if target['status'] in ('error', 'interrupted'):
+                                for child in siblings:
+                                    if child['status'] == 'queued':
+                                        child.update(status='interrupted', message='本批暂停，重试后继续生成')
+                            if all(j['status'] not in ('queued', 'running', 'cancelling') for j in siblings):
+                                for child in siblings:
+                                    child['batch_complete'] = True
+                except Exception as exc:
+                    with self.lock:
+                        target.update(status='queued')
+                        self.release_error = safe_error(exc)
+                        self.consumer = {**self.consumer, 'state': 'unknown', 'error': self.release_error}
+                        self.event(target, 'connect', '消费者状态未确认，队列暂停：' + self.release_error)
+                    return
                 finally:
                     with self.lock:
-                        if target and self.active == target['id']:
-                            self.active = None
+                        self.active = None
+                        self.save_jobs()
         finally:
-            self._in_queue_worker = False
             with self.lock:
-                if not any(j.get('status') == 'queued' and not j.get('cancel_requested') for j in self.jobs.values()):
-                    self.active = None
-                    self.save_jobs()
+                self._in_queue_worker = False
+                self.active = None
+                self.worker_thread = None
+                self.idle_since = self.now() if self.session else None
+                self.save_release_state()
+                self.save_jobs()
+                # A submitter may have observed this worker as alive just after
+                # its empty-queue check. Transfer that wakeup before returning.
+                if restart_if_queued and waiting_jobs(self.jobs) and not self.monitor_stop.is_set():
+                    self.ensure_worker()
 
-    def start(self, config, retry=None):
+    def start(self, config, retry=None, placement="back"):
         if config is not None:
             providers.validate(applications.get(config.app_id), config.provider_id, config.gpu)
         with self.lock:
@@ -1051,22 +1154,16 @@ class Controller:
                     self.drive_storage.preflight()
                 except Exception as exc:
                     raise HTTPException(400, 'Drive 成片存储未就绪：' + safe_error(exc) + '；尚未申请显卡') from None
-            unretrieved = [j for j in self.pending_jobs() if j['status'] in ('error', 'interrupted')]
-            if not self.session:
-                for j in unretrieved:
-                    j.update(safe_release=True)
-                unretrieved = []
-            elif self.session:
-                unretrieved = [j for j in unretrieved if j.get('endpoint') == self.session['endpoint']]
-            if unretrieved and not retry:
-                raise HTTPException(409, '有未取回的任务，请先重试取回或明确释放运行时。')
             if retry:
                 job = self.jobs.get(retry)
                 if not job or job.get('file') or job.get('drive'):
                     raise HTTPException(400, '该任务无需重新取回')
                 if job.get('cancel_requested'):
-                    raise HTTPException(409,'任务正在取消或取消尚未确认，请重试取消并释放显卡')
-                if not self.session or job.get('endpoint') != self.session['endpoint'] or job['status'] == 'discarded':
+                    raise HTTPException(409,'任务正在取消或取消尚未确认，请先重试取消')
+                retry_endpoint = job.get('endpoint')
+                if not retry_endpoint and job.get('batch_id'):
+                    retry_endpoint = next((j.get('endpoint') for j in self.cancel_targets(job) if j.get('endpoint')), None)
+                if not self.session or retry_endpoint != self.session['endpoint'] or job['status'] == 'discarded':
                     raise HTTPException(409, '原任务的运行时已离线，无法在另一个运行时取回。')
                 batch = sorted((j for j in self.jobs.values() if j.get('batch_id') == job.get('batch_id')
                                 and job.get('batch_id') and not (j.get('file') or j.get('drive'))),
@@ -1074,15 +1171,14 @@ class Controller:
                 if batch:
                     job = batch[0]
                     for child in batch:
-                        child['status'] = 'queued'
+                        child.update(status='queued', recover_existing=True)
                         child.pop('history_hidden', None)
                 else:
-                    job['status'] = 'queued'
+                    job.update(status='queued', recover_existing=True)
                     job.pop('history_hidden', None)
                 target_id = job['id']
             else:
                 job_id = uuid.uuid4().hex
-                self.configure_release(ReleasePolicy(mode=config.release_mode, idle_minutes=config.idle_minutes))
                 job = dict(id=job_id, config=config.model_dump(), events=[], status='queued', stage='connect', message='排队中，等待执行', created=time.time())
                 self.jobs[job_id] = job
                 if config.count > 1:
@@ -1094,61 +1190,18 @@ class Controller:
                         self.jobs[child['id']] = child
                 target_id = job['id']
 
-            # If no active job is running, start the runner thread immediately
-            if self.active is None:
-                self.active = target_id
-                self.jobs[target_id]['status'] = 'running'
-                self.save_jobs()
-                self.worker_thread = threading.Thread(target=self._run_queue, daemon=True)
-                self.worker_thread.start()
-            else:
-                self.save_jobs()
+            front = placement == 'front'
+            position = self.queue_order(front)
+            for index, child in enumerate(batch if retry and batch else
+                    [j for j in self.jobs.values() if j['id'] == target_id or j.get('batch_id') == target_id]):
+                child.update(queue_order=position + index, queue_front=front)
+            self.idle_since = None
+            self.save_jobs()
+            self.save_release_state()
+            self.ensure_worker()
             return target_id
 
-    def run_batch(self, batch):
-        """Keep ownership throughout the batch; saved variants are never regenerated on retry."""
-        try:
-            for job in batch:
-                if job.get('cancel_requested'):
-                    return
-                with self.lock:
-                    self.active = job['id']
-                    job.update(status='running', safe_release=False)
-                self.run(job, in_batch=True)
-                if job['status'] != 'done' and not (job.get('drive') and job['status'] == 'warning'):
-                    for waiting in batch:
-                        if waiting['status'] == 'queued':
-                            waiting.update(status='interrupted', message='本批暂停，重试后继续生成')
-                    return
-            last = batch[-1]
-            has_more = any(j.get('status') == 'queued' and not j.get('cancel_requested') for j in self.jobs.values())
-            if self.release_policy.mode == 'always' and self.session and not last.get('gpu_release_error') and not has_more:
-                self.event(last, 'release', '本批视频全部保存并校验，正在释放 Colab 显卡')
-                try:
-                    self.transport.release()
-                except Exception as exc:
-                    last['status'] = 'warning'
-                    self.release_error = safe_error(exc)
-                    self.release_retry_at = self.now() + 60
-                    self.event(last, 'release', '本批视频已保存，但释放尚未确认：' + safe_error(exc))
-            if not has_more:
-                self.wait_drive_downloads([j['id'] for j in batch])
-            with self.lock:
-                for child in self.jobs.values():
-                    if child.get('batch_id') == last['batch_id']:
-                        child['batch_complete'] = True
-                missing = sum(bool(j.get('local_download_error')) for j in batch)
-                self.event(last, 'download' if missing else 'done',
-                    f'本批视频已保存；{missing} 条尚未下载到本机，可分别重新下载' if missing else '本批视频全部生成并保存到本机')
-        finally:
-            with self.lock:
-                if not getattr(self, '_in_queue_worker', False):
-                    self.active = None
-                    self.idle_since = self.now() if self.session else None
-                self.save_release_state()
-                self.save_jobs()
-
-    def run(self, job, in_batch=False):
+    def run(self, job):
         application = applications.get(job['config'].get('app_id', 'h3'))
         config = application.config_model(**job['config'])
         try:
@@ -1164,15 +1217,9 @@ class Controller:
             self.connected_operation(job,lambda:self.transport.connect(config), '连接／申请 ' + config.gpu)
             job['endpoint'] = self.session['endpoint']
             self.check_cancelled(job)
-            if in_batch:
-                for child in self.jobs.values():
-                    if child.get('batch_id') == job['batch_id']:
-                        child['endpoint'] = job['endpoint']
             self.save_jobs()
             self.event(job, 'connect', config.gpu + ' 运行时已连接，准备执行任务')
             if not job.get('remote_result'):
-                job['execution_started'] = True
-                self.save_jobs()
                 self.connected_operation(job,lambda:self.transport.execute(job))
             self.check_cancelled(job)
             result = job['remote_result']
@@ -1199,10 +1246,8 @@ class Controller:
             saved = '图片已保存到本机' if output_kind == 'image' else ('视频已上传 Drive 并校验' if job.get('drive') else '视频已保存到本机')
             self.event(job, 'saved', saved)
             self.check_cancelled(job)
-            last_in_batch = bool(in_batch and job.get('drive') and job.get('batch_index') == job.get('batch_total')
-                and all(j.get('file') or j.get('drive') for j in self.cancel_targets(job)))
             has_more = any(j.get('status') == 'queued' and not j.get('cancel_requested') for j in self.jobs.values())
-            release_now = self.release_policy.mode == 'always' and (not in_batch or last_in_batch) and not has_more
+            release_now = self.release_policy.mode == 'always' and not has_more
             if release_now:
                 self.event(job, 'release', '正在释放 Colab 显卡')
                 try:
@@ -1216,12 +1261,11 @@ class Controller:
                     if not job.get('drive'):
                         return
             if job.get('drive'):
-                next_waiting = (in_batch and not last_in_batch) or has_more
+                next_waiting = has_more
                 if next_waiting:
                     job['status'] = 'warning' if job.get('gpu_release_error') else 'done'
-                    kept = ('本条视频已上传 Drive，继续本批生成' if in_batch else
-                            (f'{saved}，闲置 {self.release_policy.idle_minutes} 分钟后检查并释放显卡'
-                             if self.release_policy.mode == 'idle' else saved + '，显卡保留；请手动检查并释放'))
+                    kept = (f'{saved}，闲置 {self.release_policy.idle_minutes} 分钟后检查并释放显卡'
+                             if self.release_policy.mode == 'idle' else saved + '，显卡保留；请手动检查并释放')
                     self.event(job, 'done', saved + '，显卡已释放' if release_now else kept)
                     self.start_drive_download(job)
                     self.check_cancelled(job)
@@ -1230,16 +1274,15 @@ class Controller:
                 self.check_cancelled(job)
                 return
             job['status'] = 'done'
-            kept = ('本条视频已保存，继续本批生成' if in_batch else
-                    (f'{saved}，闲置 {self.release_policy.idle_minutes} 分钟后检查并释放显卡'
-                     if self.release_policy.mode == 'idle' else saved + '，显卡保留；请手动检查并释放'))
+            kept = (f'{saved}，闲置 {self.release_policy.idle_minutes} 分钟后检查并释放显卡'
+                     if self.release_policy.mode == 'idle' else saved + '，显卡保留；请手动检查并释放')
             self.event(job, 'done', saved + '，显卡已释放' if release_now else kept)
         except Exception as exc:
             if job.get('cancel_requested') or isinstance(exc, (TaskCancelled,ReconnectExhausted)):
                 job['cancel_requested'] = True
                 if isinstance(exc,ReconnectExhausted):
                     job['auto_cancel_reason'] = str(exc)
-                    self.event(job,'cancel','自动重连连续失败：' + str(exc) + '；正在取消原任务并释放显卡')
+                    self.event(job,'cancel','自动重连连续失败：' + str(exc) + '；正在确认原任务状态，保留显卡环境')
                 self.finish_cancel(job)
                 return
             job['status'] = 'error'
@@ -1248,15 +1291,14 @@ class Controller:
                 job['drive_backup_needed'] = True
             can_retrieve = bool(self.session and job.get('endpoint') and job.get('endpoint') == self.session['endpoint']
                                 and (job.get('remote_result') or job.get('execution_started')))
-            if not in_batch and self.release_policy.mode == 'always' and job.get('safe_release') and not job.get('remote_result') and self.session:
+            if self.release_policy.mode == 'always' and job.get('safe_release') and not job.get('remote_result') and self.session and not waiting_jobs(self.jobs):
                 try:
                     self.transport.release()
                     message += '；失败任务的显卡已释放。'
                 except Exception as release_exc:
                     message += '；释放失败：' + safe_error(release_exc)
             elif can_retrieve:
-                if in_batch:
-                    job['safe_release'] = False
+                job['safe_release'] = False
                 message += '；运行时保留，请重试取回结果。'
             else:
                 job['safe_release'] = True
@@ -1267,7 +1309,7 @@ class Controller:
             self.event(job, 'error', message)
         finally:
             with self.lock:
-                if not in_batch and not getattr(self, '_in_queue_worker', False):
+                if not getattr(self, '_in_queue_worker', False):
                     self.active = None
                     self.idle_since = self.now() if self.session else None
                 self.save_release_state()
@@ -1281,7 +1323,7 @@ class Controller:
         except Exception as exc:
             return {**stored, 'download_url': None, 'expires_at': None, 'error': safe_error(exc)}
 
-    def public_job(self, job):
+    def public_job(self, job, queue_info=None):
         config = job.get('config', {})
         active = self.jobs.get(self.active) or {}
         siblings = sorted((j for j in self.jobs.values() if job.get('batch_id') and j.get('batch_id') == job['batch_id']),
@@ -1318,7 +1360,10 @@ class Controller:
                 enriched_refs.append(ref_dict)
             creation_data['references'] = enriched_refs
 
+        if queue_info is None:
+            queue_info = next((j for j in self.queue_snapshot() if j['id'] == job['id']), {})
         return {'app_id': app_id, 'provider_id': config.get('provider_id', 'colab'),
+                'queue_position': queue_info.get('position'), 'queue_reason': queue_info.get('reason'),
                 **{k: v for k, v in job.items() if k not in ('remote_result', 'config', 'safe_release', 'drive_upload_id')},
                 'local_file': local_file,
                 'is_preparing': is_preparing,
@@ -1348,6 +1393,8 @@ else:
 @asynccontextmanager
 async def lifespan(application):
     controller.start_idle_monitor()
+    if waiting_jobs(controller.jobs):
+        controller.ensure_worker()
     yield
     controller.monitor_stop.set()
 
@@ -1409,20 +1456,26 @@ def index():
 @app.get('/api/status')
 def status():
     controller.recover_history()
-    ordered = sorted((j for j in controller.jobs.values() if not j.get('history_hidden')),
-                     key=lambda j: j['created'], reverse=True)
-    saved = [j for j in ordered if j.get('file') or j.get('drive')]
-    active_or_queued = [j for j in ordered if j['status'] in ('running', 'queued', 'cancelling')]
-    recent_ids = {j['id'] for j in active_or_queued + ordered[:20] + saved[:20]}
-    recent_batches = {j['batch_id'] for j in ordered if j['id'] in recent_ids and j.get('batch_id')}
-    return {'authorized': (PRIVATE / 'google-token.dat').exists(), 'active': controller.active,
-            'compute': {'provider_id': controller.provider_id, 'gpu': (controller.session or {}).get('accelerator')},
-            'gpu_online_available': True,
-            'drive_cache': drive_cache.status(),
-            'managed_gpu': bool(controller.session), 'release': controller.release_status(),
-            'history': {'count': len(saved), 'clearable': sum(controller.history_clearable(j) for j in saved)},
-            'jobs': [controller.public_job(j) for j in ordered if j['id'] in recent_ids or j.get('batch_id') in recent_batches]}
-
+    with controller.lock:
+        ordered = sorted((j for j in controller.jobs.values() if not j.get('history_hidden')),
+                         key=lambda j: j['created'], reverse=True)
+        saved = [j for j in ordered if j.get('file') or j.get('drive')]
+        active_or_queued = [j for j in ordered if j['status'] in ('running', 'queued', 'cancelling')]
+        recent_ids = {j['id'] for j in active_or_queued + ordered[:20] + saved[:20]}
+        recent_batches = {j['batch_id'] for j in ordered if j['id'] in recent_ids and j.get('batch_id')}
+        queue = controller.queue_snapshot()
+        queue_lookup = {j['id']: j for j in queue}
+        occupying_app_id, occupying_app_name = controller.occupying_app_info(applications)
+        return {'authorized': (PRIVATE / 'google-token.dat').exists(), 'active': controller.active,
+                'compute': {'provider_id': controller.provider_id, 'gpu': (controller.session or {}).get('accelerator'),
+                            'occupying_app_id': occupying_app_id, 'occupying_app_name': occupying_app_name},
+                'occupying_app_id': occupying_app_id, 'occupying_app_name': occupying_app_name,
+                'consumer': dict(controller.consumer), 'queue': queue,
+                'gpu_online_available': True,
+                'drive_cache': drive_cache.status(),
+                'managed_gpu': bool(controller.session), 'release': controller.release_status(),
+                'history': {'count': len(saved), 'clearable': sum(controller.history_clearable(j) for j in saved)},
+                'jobs': [controller.public_job(j, queue_lookup.get(j['id'], {})) for j in ordered if j['id'] in recent_ids or j.get('batch_id') in recent_batches]}
 
 def asset_scopes():
     scopes = [{'app_id': 'shared', 'app_name': '共享素材', 'purpose': 'imports',
@@ -1450,10 +1503,17 @@ def workspace():
 @app.get('/api/compute')
 def compute_status():
     session = controller.session or {}
+    occupying_app_id, occupying_app_name = controller.occupying_app_info(applications)
     return {'provider_id': controller.provider_id, 'provider_name': providers.get(controller.provider_id).name,
             'authorized': (PRIVATE / 'google-token.dat').exists(),
-            'connected': bool(session), 'busy': bool(controller.active),
-            'gpu': session.get('accelerator'), 'release': controller.release_status()}
+            'connected': bool(session), 'busy': bool(controller.active), 'consumer': dict(controller.consumer),
+            'gpu': session.get('accelerator'), 'release': controller.release_status(),
+            'occupying_app_id': occupying_app_id, 'occupying_app_name': occupying_app_name}
+
+
+@app.get('/api/consumer')
+def consumer_status():
+    return controller.refresh_consumer()
 
 
 @app.get('/api/assets')
@@ -1717,11 +1777,11 @@ def authorize_finish(payload: AuthCode):
         raise HTTPException(400, '授权未完成，授权码可能过期；请重新打开 Google 授权链接。') from None
 
 
-JobConfig = Annotated[Union[H3JobConfig, QwenImageJobConfig], Body(...)]
+JobConfig = Annotated[Union[H3JobConfig, QwenImageJobConfig], Field(discriminator='app_id'), Body(...)]
 
 
 @app.post('/api/jobs', status_code=202)
-def create_job(config: JobConfig):
+def create_job(config: JobConfig, placement: Literal["back", "front"] = "back"):
     if not (PRIVATE / 'google-token.dat').exists():
         raise HTTPException(401, '请先授权 Google 账号')
     if not config.prompt.strip():
@@ -1744,15 +1804,7 @@ def create_job(config: JobConfig):
                     raise ValueError('声音样本时长不匹配，请重新上传')
             except ValueError as exc:
                 raise HTTPException(400, str(exc)) from None
-    # Fast duplicate guard: within 3s if identical config submitted, return existing job
-    now_ts = time.time()
-    for existing in controller.jobs.values():
-        if existing.get('status') in ('queued', 'running') and (now_ts - existing.get('created', 0)) < 3.0:
-            cfg = existing.get('config') or {}
-            if cfg.get('app_id', 'h3') == app_id and cfg.get('prompt') == config.prompt and cfg.get('count', 1) == config.count and cfg.get('seed') == config.seed and cfg.get('aspect_ratio') == getattr(config, 'aspect_ratio', None):
-                batch_id = existing.get('batch_id')
-                return {'id': existing['id'], 'ids': [j['id'] for j in controller.jobs.values() if j.get('batch_id') == batch_id] if batch_id else [existing['id']]}
-    job_id = controller.start(config)
+    job_id = controller.start(config, placement=placement)
     batch_id = controller.jobs[job_id].get('batch_id')
     return {'id': job_id, 'ids': [j['id'] for j in controller.jobs.values() if j.get('batch_id') == batch_id]
             if batch_id else [job_id]}
@@ -1790,17 +1842,18 @@ def cancel_job(job_id: str):
 
 
 @app.post('/api/jobs/{job_id}/resubmit')
-def resubmit_job(job_id: str):
-    return controller.resubmit(job_id)
+def resubmit_job(job_id: str, placement: Literal["back", "front"] = "back"):
+    return controller.resubmit(job_id, placement=placement)
 
 
 class ReleaseConfig(BaseModel):
     discard_pending: bool = False
+    force: bool = False
 
 
 @app.post('/api/release')
 def release(config: ReleaseConfig):
-    return controller.check_and_release(discard_pending=config.discard_pending)
+    return controller.check_and_release(discard_pending=config.discard_pending, force=config.force)
 
 
 @app.post('/api/images')

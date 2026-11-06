@@ -3,6 +3,7 @@ function updateH3GpuDisplay() {
   if (!select || !display) return;
   const opt = select.selectedOptions?.[0];
   const t = (opt ? opt.textContent : select.value) || '';
+  const val = select.value;
   if (t.includes('(🟢')) {
     const parts = t.split('(🟢');
     display.textContent = parts[0].trim();
@@ -14,7 +15,14 @@ function updateH3GpuDisplay() {
   } else {
     display.textContent = t.trim();
     if (status) {
-      status.textContent = 'Wan 2.1 推荐配置';
+      const hints = {
+        G4: 'Wan 2.1 推荐配置',
+        A100: '高速视频配置 (80GB)',
+        H100: '旗舰算力 (80GB)',
+        L4: '显存受限 · 适合短视频',
+        T4: '显存不足 · 不推荐视频'
+      };
+      status.textContent = hints[val] || '按需启动';
       status.classList.remove('status-online');
       status.classList.add('status-idle');
     }
@@ -169,7 +177,7 @@ function updateGenerate() {
   if (recoveryJob && !serverActive) {
     $('generate').formNoValidate = true;
     $('generate').disabled = isCooldown || !authorized || retrying || cancelling || submitting || cacheTestRunning || releaseActionBusy || !!lastReleaseState?.checking;
-    $('generate').textContent = cancelling ? '正在取消任务…' : recoveryJob.cancel_requested ? '重试取消并释放显卡' : retrying ? '正在恢复任务…' : '恢复未完成任务';
+    $('generate').textContent = cancelling ? '正在取消任务…' : recoveryJob.cancel_requested ? '重试取消' : retrying ? '正在恢复任务…' : '恢复未完成任务';
     $('generate').title = '恢复原任务并沿用原任务的设置；远端仍在执行时重新跟踪进度。';
     return;
   }
@@ -392,7 +400,7 @@ function updateReleaseUI(state = null) {
   $('manualRelease').textContent = checking ? '正在检查…' : '检查并释放';
   $('release').disabled = serverActive || checking;
   renderOnlineGpuState();
-  $('releaseHelp').textContent = mode === 'always' ? '整批保存后释放，下次重新准备模型。' : mode === 'idle' ? '整批完成后计时，保留期间仍计费。请保持本地后台运行。' : '保留 GPU 以连续生成，期间仍计费。使用后请手动释放。';
+  $('releaseHelp').textContent = mode === 'always' ? '队列任务全部保存后释放，下次重新准备环境。' : mode === 'idle' ? '任务队列空闲后计时，保留期间仍计费。请保持本地后台运行。' : '保留 GPU 以连续生成，期间仍计费。使用后请手动释放。';
   let message = '当前未占用 GPU';
   if (!releasePolicyReady) message = '读取释放配置…';
   else if (releasePolicyBusy) message = '正在保存释放配置…';
@@ -1037,7 +1045,7 @@ function renderTaskStream(jobs) {
   if ($('taskStreamSummary')) $('taskStreamSummary').textContent = summaryText;
 
   const runningGroups = groups.filter(g => g.isRunning);
-  const queuedGroups = groups.filter(g => g.isQueued).sort((a, b) => a.created - b.created);
+  const queuedGroups = groups.filter(g => g.isQueued).sort((a, b) => Math.min(...a.queuedSiblings.map(j => j.queue_position || Infinity)) - Math.min(...b.queuedSiblings.map(j => j.queue_position || Infinity)));
   const completedGroups = groups.filter(g => !g.isRunning && !g.isQueued).sort((a, b) => b.created - a.created);
   const sortedGroups = [...runningGroups, ...queuedGroups, ...completedGroups];
 
@@ -1050,7 +1058,7 @@ function renderTaskStream(jobs) {
     });
 
     const fingerprint = JSON.stringify(group.siblings.map(j => [
-      j.id, j.status, j.file, j.local_file, j.is_preparing, j.is_downloading, j.local_download_error,
+      j.id, j.status, j.queue_position, j.queue_reason, j.file, j.local_file, j.is_preparing, j.is_downloading, j.local_download_error,
       j.drive?.file_id, j.can_cancel, j.can_retry, j.can_resubmit,
       j.message, j.stage, j.events?.length, j.creation?.title, j.metadata
     ]));
@@ -1113,9 +1121,9 @@ function renderTaskStream(jobs) {
     const stateBadge = document.createElement('span');
 
     if (group.isQueued) {
-      const qPos = queuedGroups.findIndex(q => q.id === group.id) + 1;
+      const qPos = Math.min(...group.queuedSiblings.map(j => j.queue_position || Infinity));
       stateBadge.className = 'task-badge badge-queued';
-      stateBadge.textContent = group.isBatch ? `排队中 #${qPos}（共 ${group.total} 个）` : `排队中 #${qPos}`;
+      stateBadge.textContent = group.isBatch ? `预计 #${Number.isFinite(qPos) ? qPos : '—'}（共 ${group.total} 个）` : `预计 #${Number.isFinite(qPos) ? qPos : '—'}`;
     } else if (group.isRunning) {
       stateBadge.className = 'task-badge badge-running';
       const actIdx = group.runningSibling.batch_index || 1;
@@ -1135,11 +1143,11 @@ function renderTaskStream(jobs) {
       stateBadge.textContent = '未完成 / 已暂停';
     } else {
       stateBadge.className = 'task-badge';
-      stateBadge.textContent = job.status;
+      stateBadge.textContent = job.status === 'cancelled' ? '已取消' : job.status;
     }
     badges.append(stateBadge);
-    header.append(metaEl, badges);
-    row.append(header);
+    header.append(badges);
+    row.append(header, metaEl);
 
     if (job.creation?.prompt) {
       const promptText = job.creation.prompt.trim();
@@ -1208,19 +1216,7 @@ function renderTaskStream(jobs) {
 
       setTimeout(() => { pre.scrollTop = pre.scrollHeight; }, 0);
       row.append(liveMonitor);
-    } else if (group.isQueued) {
-      const qBox = document.createElement('div');
-      qBox.className = 'task-card-queued-box';
-      const qText = document.createElement('div');
-      qText.className = 'task-card-queued-text';
-      qText.innerHTML = `<span class="queued-icon">⏳</span><span>前序任务正在执行，已加入队列，轮到时将自动开始${group.isBatch ? `（共 ${group.total} 个视频）` : ''}。</span>`;
-      const qCancelBtn = document.createElement('button');
-      qCancelBtn.type = 'button';
-      qCancelBtn.className = 'task-action-btn btn-cancel task-queued-cancel';
-      qCancelBtn.textContent = '取消排队';
-      qCancelBtn.onclick = () => cancelTask(group.primaryJob.id);
-      qBox.append(qText, qCancelBtn);
-      row.append(qBox);
+
     }
 
     // Determine default selected variant for batch
@@ -1279,7 +1275,9 @@ function renderTaskStream(jobs) {
       const cancelBtn = document.createElement('button');
       cancelBtn.type = 'button';
       cancelBtn.className = 'task-action-btn btn-cancel';
-      cancelBtn.textContent = group.isQueued ? '取消排队' : (group.isBatch ? '取消批次任务并释放显卡' : '取消任务并释放显卡');
+      cancelBtn.disabled = group.siblings.some(s => s.status === 'cancelling');
+      cancelBtn.textContent = cancelBtn.disabled ? '正在取消…' : '取消任务';
+      cancelBtn.title = group.isBatch ? '取消本批次尚未完成的任务，已完成的作品保留' : '取消此任务，保留显卡环境';
       cancelBtn.onclick = () => cancelTask(group.primaryJob.id);
       actionsLeft.append(cancelBtn);
     }
@@ -1341,7 +1339,7 @@ function renderTaskStream(jobs) {
     }
 
     actions.append(actionsLeft, actionsRight);
-    row.append(actions);
+    header.append(actions);
 
     updateCardVariantActions(row, group, currentVariant);
 
@@ -1418,8 +1416,10 @@ async function refreshStatus() {
     $('connection').textContent = s.active ? 'Colab 正在生成' : s.managed_gpu ? 'GPU 已保留，仍在计费' : authorized ? 'Google 已连接 · 按需启动 GPU' : '首次使用请连接 Google';
     $('connection').classList.toggle('ok', authorized);
     window.Workspace?.updateCompute(s);
-    serverActive = !!s.active;
-    activeJobId = s.active || null;
+    const activeJob = s.jobs ? s.jobs.find(j => j.id === s.active) : null;
+    const isH3Active = !!s.active && (activeJob ? (activeJob.app_id === 'h3' || !activeJob.app_id) : true);
+    serverActive = isH3Active;
+    activeJobId = isH3Active ? (s.active || null) : null;
     recoveryJob = s.jobs.find(j => (j.app_id === 'h3' || !j.app_id) && ((j.can_retry && j.recovery_kind !== 'download') || (j.can_cancel && j.cancel_requested))) || null;
     updateReleaseUI(s.release);
     updateGenerate();
@@ -1620,10 +1620,16 @@ $('generateForm').onsubmit = async e => {
     if (!$('prompt').value.trim()) return error('请先描述想生成的画面、动作和声音。');
     window.H3Characters?.validate();
     if (studioMode === 'image' && (!references.length && !window.H3Characters?.used().length || references.some(r => !r.image_id || r.pending || r.error))) return error('请先上传图片或引用角色，并替换或移除未就绪的图片。');
+    const targetGpu = $('h3Gpu')?.value || $('gpu')?.value || 'G4';
+    const gpuOk = await (window.Workspace?.chooseQueuePlacement ? window.Workspace.chooseQueuePlacement({
+      targetAppId: 'h3',
+      targetGpu
+    }) : Promise.resolve('back'));
+    if (!gpuOk) return;
     submitting = true;
     const started = Date.now();
     updateGenerate();
-    const jobId = (await api('jobs', {method:'POST',body:JSON.stringify(generationConfig())})).id;
+    const jobId = (await api('jobs?placement=' + gpuOk, {method:'POST',body:JSON.stringify(generationConfig())})).id;
     runStarts[jobId] = started;
     runStarts = Object.fromEntries(Object.entries(runStarts).sort((a,b)=>b[1]-a[1]).slice(0,100));
     try { localStorage.setItem('lstudio-h3-run-starts-v1',JSON.stringify(runStarts)); } catch (_) {}
@@ -1643,10 +1649,16 @@ async function retryJob(id) {
 }
 async function resubmitJob(id) {
   if (!id || resubmitting || submitting || retrying || cancelling) return;
+  const targetGpu = $('h3Gpu')?.value || $('gpu')?.value || 'G4';
+  const gpuOk = await (window.Workspace?.chooseQueuePlacement ? window.Workspace.chooseQueuePlacement({
+    targetAppId: 'h3',
+    targetGpu
+  }) : Promise.resolve('back'));
+  if (!gpuOk) return;
   resubmitting = true;
   error('');
   try {
-    await api('jobs/' + encodeURIComponent(id) + '/resubmit', {method: 'POST'});
+    await api('jobs/' + encodeURIComponent(id) + '/resubmit?placement=' + gpuOk, {method: 'POST'});
     await refreshStatus();
   } catch (e) {
     error('重新提交失败：' + e.message);

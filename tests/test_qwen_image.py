@@ -12,16 +12,14 @@ from pydantic import ValidationError
 
 import app
 from apps.qwen_image import (
-    DIFFUSION_MODELS,
     DIMENSIONS,
-    ENCODER_MODELS,
     REPO_ID,
-    VAE_MODEL,
     QwenImageApplication,
     QwenImageJobConfig,
     ReferenceImage,
     build_graph,
     files_for,
+    normalize_edit_prompt,
 )
 from asset_library import AssetLibrary
 
@@ -192,6 +190,46 @@ class QwenImageRemoteWorkflowTests(unittest.TestCase):
         self.assertEqual(g['7']['class_type'], 'SamplerCustomAdvanced')
         self.assertEqual(g['14']['class_type'], 'SplitSigmasDenoise')
         self.assertEqual(g['14']['inputs']['denoise'], 0.7)
+
+    def test_normalize_edit_prompt(self):
+        self.assertEqual(normalize_edit_prompt('@图片1  参考 @图片2 姿势'), 'Picture 1  参考 Picture 2 姿势')
+        self.assertEqual(normalize_edit_prompt('保持 @图片1 的面容，换上 @图片2 的衣服'), '保持 Picture 1 的面容，换上 Picture 2 的衣服')
+        self.assertEqual(normalize_edit_prompt('@图1 与 @image2 融合'), 'Picture 1 与 Picture 2 融合')
+        self.assertEqual(normalize_edit_prompt('自然风景图'), '自然风景图')
+
+    def test_build_graph_qwen_image_edit_multi_reference(self):
+        cfg = {
+            'job_id': 'job_edit_02',
+            'prompt': '@图片1  参考 @图片2 姿势',
+            'model_file': 'qwen-image-edit-2511-Q4_K_M.gguf',
+            'aspect_ratio': '1:1',
+            'references': [
+                {'slot': 1, 'image_id': 'ref1.jpg'},
+                {'slot': 2, 'image_id': 'ref2.png'},
+            ],
+            'steps': 20,
+            'cfg': 4.0,
+        }
+        g = build_graph(cfg)
+        self.assertEqual(g['4']['inputs']['prompt'], 'Picture 1  参考 Picture 2 姿势')
+        self.assertEqual(g['4']['inputs']['image1'], ['21', 0])
+        self.assertEqual(g['4']['inputs']['image2'], ['23', 0])
+        self.assertEqual(g['20']['inputs']['image'], 'ref1.jpg')
+        self.assertEqual(g['22']['inputs']['image'], 'ref2.png')
+
+    def test_files_for_qwen_image_edit(self):
+        cfg = {
+            'model_file': 'qwen-image-edit-2511-Q4_K_M.gguf',
+            'references': [{'slot': 1, 'image_id': 'a' * 32 + '.png'}]
+        }
+        files = files_for(cfg)
+        self.assertEqual(len(files), 3)
+        self.assertEqual(files[0][0], 'unsloth/Qwen-Image-Edit-2511-GGUF')
+        self.assertEqual(files[0][1], 'qwen-image-edit-2511-Q4_K_M.gguf')
+        self.assertEqual(files[1][0], 'Comfy-Org/Qwen-Image_ComfyUI')
+        self.assertEqual(files[1][1], 'split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors')
+        self.assertEqual(files[2][0], 'Comfy-Org/Qwen-Image_ComfyUI')
+        self.assertEqual(files[2][1], 'split_files/vae/qwen_image_vae.safetensors')
 
     def test_build_graph_turbo_8step_manual_sigmas(self):
         cfg = {
@@ -509,6 +547,22 @@ class QwenImageFrontendModularityTests(unittest.TestCase):
         self.assertIn("fetch('/api/images/' + ref.image_id", js)
         self.assertIn("img.onerror", js)
         self.assertIn("ref.name || ref.image_id", js)
+
+        # 6. Caret-following @ mention menu positioning like H3
+        self.assertIn("getCaretCoordinates", js)
+        self.assertIn("positionQiMentionMenu", js)
+        self.assertIn("positionQiMentionMenu(ctx.start)", js)
+        self.assertIn("#qiMentionMenu", css)
+        self.assertIn(".mention-option", css)
+
+        # 7. Model segregation between Text-to-Image (Turbo) and Image-Edit (Edit)
+        html = Path('apps/qwen_image/web/content.html').read_text(encoding='utf-8')
+        self.assertIn('id="qiModelGroupEdit"', html)
+        self.assertIn('id="qiModelGroupTurbo"', html)
+        self.assertIn('qiModelGroupEdit', js)
+        self.assertIn('qiModelGroupTurbo', js)
+        self.assertIn('editGroup.hidden = !isImage', js)
+        self.assertIn('turboGroup.hidden = isImage', js)
 
 
 if __name__ == '__main__':

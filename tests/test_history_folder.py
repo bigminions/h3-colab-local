@@ -1,6 +1,5 @@
 """Folder opening uses isolated files and a mocked Explorer launcher."""
 import hashlib
-import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -57,7 +56,7 @@ class HistoryFolderTests(unittest.TestCase):
         self.control.open_history_folder(self.job['id'])
         filename = self.job['id'] + '.mp4'
         self.assertEqual((self.videos / filename).read_bytes(),b'cloud video')
-        self.assertEqual(json.loads((self.root / 'jobs.json').read_text(encoding='utf-8'))[self.job['id']]['file'],filename)
+        self.assertEqual(self.control.store.load_jobs()[self.job['id']]['file'],filename)
         self.control.open_history_folder(self.job['id'])
         self.storage.open_download.assert_called_once_with(self.job['drive'])
         self.assertEqual(self.control.open_video_directory.call_count,2)

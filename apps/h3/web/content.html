@@ -43,7 +43,7 @@
           </div>
           <div id="promptPanel">
             <div class="prompt-heading"><label class="field-label" for="prompt">画面描述</label><span class="hint">@ 引用图片或角色</span></div>
-            <textarea id="prompt" aria-label="视频描述" required aria-autocomplete="list" aria-controls="mentionMenu" aria-expanded="false" placeholder="描述画面、动作与声音，输入 @ 引用图片或角色…&#10;&#10;例如：@图片1 作为场景参考，@图片2 作为人物参考，人物在雨中缓缓走来。"></textarea>
+            <textarea id="prompt" aria-label="视频描述" required aria-autocomplete="list" aria-controls="mentionMenu" aria-expanded="false" placeholder="描述画面、动作与声音，输入 @ 引用图片或角色…&#10;&#10;例如：@图片1 作为场景参考，一个方块沿桌面向右移动，保持固定镜头。"></textarea>
             <div id="mentionMenu" class="mention-menu hidden" role="listbox" aria-label="图片与角色引用建议"></div>
             <div id="characterUse" class="character-use hidden" role="status"></div>
           </div>
@@ -122,25 +122,26 @@
             <div class="hint">留空自动随机；多条生成时，仅第一条使用指定种子。</div>
             <button type="button" id="resetAdvanced" class="preset-reset">恢复推荐设置</button>
           </div></details>
-          <div class="h3-gpu-card-wrap">
-            <div class="h3-gpu-card" id="h3GpuCard" role="button" aria-haspopup="listbox" title="点击切换运行显卡">
-              <div class="h3-gpu-card-header">
-                <span class="h3-gpu-badge">
-                  <svg class="h3-gpu-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <div class="gpu-card-wrap h3-gpu-card-wrap">
+            <div class="gpu-card h3-gpu-card" id="h3GpuCard" role="button" tabindex="0" aria-haspopup="listbox" aria-expanded="false" title="点击切换运行显卡">
+              <div class="gpu-card-header h3-gpu-card-header">
+                <span class="gpu-badge h3-gpu-badge">
+                  <svg class="gpu-icon h3-gpu-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <rect x="4" y="4" width="16" height="16" rx="2"/>
                     <rect x="9" y="9" width="6" height="6"/>
                     <path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/>
                   </svg>
                   运行显卡
                 </span>
-                <span class="h3-gpu-action">切换 ▾</span>
+                <span class="gpu-action h3-gpu-action">切换 <span class="gpu-action-arrow h3-gpu-action-arrow">▾</span></span>
               </div>
-              <div class="h3-gpu-card-body">
-                <span id="h3GpuDisplay" class="h3-gpu-name">G4 · Blackwell · 96GB</span>
-                <span id="h3GpuStatus" class="h3-gpu-status">Wan 2.1 推荐配置</span>
+              <div class="gpu-card-body h3-gpu-card-body">
+                <span id="h3GpuDisplay" class="gpu-name h3-gpu-name">G4 · Blackwell · 96GB</span>
+                <span id="h3GpuStatus" class="gpu-status h3-gpu-status">Wan 2.1 推荐配置</span>
               </div>
-              <select id="h3Gpu" class="h3-gpu-select" aria-label="切换运行显卡"></select>
+              <select id="h3Gpu" class="gpu-select h3-gpu-select" aria-label="切换运行显卡"></select>
             </div>
+            <div class="gpu-dropdown-menu hidden" id="h3GpuMenu" role="listbox" aria-label="切换运行显卡选项"></div>
           </div>
           <div id="error" class="error hidden" role="alert"></div>
           <button class="primary" id="generate" type="submit" disabled>请先连接 Google</button>
@@ -238,7 +239,7 @@
                 <label class="label py-1" for="characterName">
                   <span class="label-text text-xs font-semibold">角色名称</span>
                 </label>
-                <input id="characterName" class="input input-sm input-bordered bg-base-100" required maxlength="30" pattern="[A-Za-z0-9_\u4e00-\u9fff\-]+" placeholder="例如：男主、小明、机械巨龙">
+                <input id="characterName" class="input input-sm input-bordered bg-base-100" required maxlength="30" pattern="[A-Za-z0-9_\u4e00-\u9fff\-]+" placeholder="例如：示例角色、机器人">
                 <label class="label py-0.5">
                   <span class="label-text-alt opacity-60">用于 @ 引用，名称不含空格。</span>
                 </label>
@@ -247,7 +248,7 @@
                 <label class="label py-1" for="characterDescription">
                   <span class="label-text text-xs font-semibold">外观与保留特征</span>
                 </label>
-                <textarea id="characterDescription" class="textarea textarea-bordered bg-base-100 h-24 text-xs" maxlength="500" placeholder="例如：红衣少年，保留面部、短发和红色外套"></textarea>
+                <textarea id="characterDescription" class="textarea textarea-bordered bg-base-100 h-24 text-xs" maxlength="500" placeholder="例如：圆形头部、银色外壳，保留主体外形"></textarea>
               </div>
               <div class="form-control">
                 <div class="flex items-center justify-between py-1">
@@ -264,7 +265,7 @@
                 <label class="label py-1" for="characterVoice">
                   <span class="label-text text-xs font-semibold">声音描述 · 可选</span>
                 </label>
-                <input id="characterVoice" class="input input-sm input-bordered bg-base-100" maxlength="300" placeholder="例如：年轻男声，偏低沉，普通话，略带沙哑">
+                <input id="characterVoice" class="input input-sm input-bordered bg-base-100" maxlength="300" placeholder="例如：清晰中性声音，普通话，语速适中">
               </div>
               <div class="form-control">
                 <div class="flex items-center justify-between py-1">

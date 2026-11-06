@@ -359,7 +359,10 @@
     const active = status.jobs?.find(job => job.id === status.active);
     const gpu = active?.gpu_info?.name || status.compute?.gpu;
     $('computeGpuName').textContent = gpu || `${$('gpu').value} · 按需启动`;
-    $('computeSummary').textContent = busy ? '正在运行' : connected ? 'GPU 已保留 · 仍在计费' : status.authorized ? '账号已连接 · GPU 未启动' : '未连接账号';
+    const consumer = status.consumer || {};
+    const labels = { connecting: '正在连接', busy: '正在处理', switching: '正在切换环境', cancelling: '正在取消', unknown: '远端状态待确认', blocked: '等待处理未完成任务' };
+    $('computeSummary').textContent = labels[consumer.state] || (busy ? '正在运行' : connected ? '空闲 · 环境已保留' : status.authorized ? '账号已连接 · GPU 未启动' : '未连接账号');
+    $('computeSummary').title = [consumer.job_id ? '任务 ' + consumer.job_id.slice(0, 8) : '', consumer.stage || '', consumer.error || ''].filter(Boolean).join(' · ');
     $('computePageTab').title = `${$('computeProviderName').textContent} · ${$('computeGpuName').textContent} · ${$('computeSummary').textContent} · ${$('balance').textContent} 单元`;
     $('computeIndicator').classList.toggle('connected', connected || status.authorized);
     $('computeIndicator').classList.toggle('busy', busy);
@@ -646,16 +649,34 @@
   function syncGpuSelects(allRuntimes) {
     if (allRuntimes && allRuntimes.length) lastDiscoveredRuntimes = allRuntimes;
     const targets = [
-      { id: 'h3Gpu', defaultGpu: 'G4', storageKey: 'lstudio-h3-gpu' },
-      { id: 'qiGpu', defaultGpu: 'T4', storageKey: 'lstudio-qi-gpu' },
+      { id: 'h3Gpu', cardId: 'h3GpuCard', menuId: 'h3GpuMenu', defaultGpu: 'G4', storageKey: 'lstudio-h3-gpu' },
+      { id: 'qiGpu', cardId: 'qiGpuCard', menuId: 'qiGpuMenu', defaultGpu: 'T4', storageKey: 'lstudio-qi-gpu' },
       { id: 'gpu', defaultGpu: 'G4', storageKey: 'lstudio-compute-gpu' }
     ];
+
+    const GPU_STATUS_HINTS = {
+      qiGpu: {
+        L4: '推荐 · 编辑首选 (24GB)',
+        A100: '极速推理 · 高显存 (80GB)',
+        H100: '旗舰算力 · 极速 (80GB)',
+        T4: '显存友好 · 适于文生图',
+        G4: '超大显存 (96GB)'
+      },
+      h3Gpu: {
+        G4: 'Wan 2.1 推荐配置',
+        A100: '高速视频配置 (80GB)',
+        H100: '旗舰算力 (80GB)',
+        L4: '显存受限 · 适合短视频',
+        T4: '显存不足 · 不推荐视频'
+      }
+    };
 
     function updateGpuCardDisplay(selectId, displayId, statusId, defaultDesc) {
       const select = $(selectId), display = $(displayId), status = $(statusId);
       if (!select || !display) return;
       const opt = select.selectedOptions?.[0];
       const text = (opt ? opt.textContent : select.value) || '';
+      const val = select.value;
       if (text.includes('(🟢')) {
         const parts = text.split('(🟢');
         display.textContent = parts[0].trim();
@@ -667,10 +688,117 @@
       } else {
         display.textContent = text.trim();
         if (status) {
-          status.textContent = defaultDesc || '按需启动';
+          const appHints = GPU_STATUS_HINTS[selectId] || {};
+          status.textContent = appHints[val] || defaultDesc || '按需启动';
           status.classList.remove('status-online');
           status.classList.add('status-idle');
         }
+      }
+    }
+
+    function closeGpuMenu(target) {
+      if (!target || !target.menuId) return;
+      const menu = $(target.menuId);
+      const card = $(target.cardId);
+      if (menu) menu.classList.add('hidden');
+      if (card) card.setAttribute('aria-expanded', 'false');
+    }
+
+    function closeAllGpuMenus() {
+      for (const t of targets) {
+        if (t.menuId) closeGpuMenu(t);
+      }
+    }
+
+    function renderGpuMenu(target) {
+      if (!target.menuId || !target.cardId) return;
+      const menu = $(target.menuId);
+      const card = $(target.cardId);
+      const select = $(target.id);
+      if (!menu || !card || !select) return;
+
+      const currentVal = select.value;
+      const hints = GPU_STATUS_HINTS[target.id] || {};
+      menu.replaceChildren();
+
+      for (const opt of select.options) {
+        const val = opt.value;
+        const rawText = opt.textContent || val;
+        let baseName = rawText;
+        let onlineCount = 0;
+        if (rawText.includes('(🟢')) {
+          const parts = rawText.split('(🟢');
+          baseName = parts[0].trim();
+          onlineCount = parseInt(parts[1].replace(/\D/g, ''), 10) || 1;
+        }
+        const hint = hints[val] || '';
+        const isSelected = val === currentVal;
+
+        const item = document.createElement('div');
+        item.className = 'gpu-menu-item' + (isSelected ? ' selected' : '');
+        item.setAttribute('role', 'option');
+        item.setAttribute('aria-selected', isSelected ? 'true' : 'false');
+        item.dataset.val = val;
+
+        const info = document.createElement('div');
+        info.className = 'gpu-menu-item-info';
+
+        const header = document.createElement('div');
+        header.className = 'gpu-menu-item-header';
+
+        const nameSpan = document.createElement('strong');
+        nameSpan.className = 'gpu-menu-item-name';
+        nameSpan.textContent = baseName;
+        header.appendChild(nameSpan);
+
+        if (onlineCount > 0) {
+          const onlinePill = document.createElement('span');
+          onlinePill.className = 'gpu-menu-online-pill';
+          onlinePill.textContent = `🟢 ${onlineCount}台在线`;
+          header.appendChild(onlinePill);
+        }
+        info.appendChild(header);
+
+        if (hint) {
+          const descSpan = document.createElement('div');
+          descSpan.className = 'gpu-menu-item-desc';
+          descSpan.textContent = hint;
+          info.appendChild(descSpan);
+        }
+
+        item.appendChild(info);
+
+        if (isSelected) {
+          const check = document.createElement('span');
+          check.className = 'gpu-menu-check';
+          check.setAttribute('aria-hidden', 'true');
+          check.textContent = '✓';
+          item.appendChild(check);
+        }
+
+        item.addEventListener('click', (e) => {
+          e.stopPropagation();
+          select.value = val;
+          select.dispatchEvent(new Event('change'));
+          closeGpuMenu(target);
+          card.focus();
+        });
+
+        menu.appendChild(item);
+      }
+    }
+
+    function toggleGpuMenu(target) {
+      if (!target.menuId || !target.cardId) return;
+      const menu = $(target.menuId);
+      const card = $(target.cardId);
+      if (!menu || !card) return;
+      const isOpen = !menu.classList.contains('hidden');
+      closeAllGpuMenus();
+      if (!isOpen) {
+        renderGpuMenu(target);
+        menu.classList.remove('hidden');
+        card.setAttribute('aria-expanded', 'true');
       }
     }
 
@@ -687,14 +815,40 @@
       } else {
         select.value = target.defaultGpu;
       }
-      if (target.id === 'h3Gpu') updateGpuCardDisplay('h3Gpu', 'h3GpuDisplay', 'h3GpuStatus', 'Wan 2.1 推荐配置');
-      if (target.id === 'qiGpu') updateGpuCardDisplay('qiGpu', 'qiGpuDisplay', 'qiGpuStatus', '推荐 · 显存友好');
+      if (target.id === 'h3Gpu') updateGpuCardDisplay('h3Gpu', 'h3GpuDisplay', 'h3GpuStatus');
+      if (target.id === 'qiGpu') updateGpuCardDisplay('qiGpu', 'qiGpuDisplay', 'qiGpuStatus');
+
+      if (target.cardId && target.menuId) {
+        const card = $(target.cardId);
+        if (card && !card.dataset.gpuCardBound) {
+          card.dataset.gpuCardBound = 'true';
+          card.setAttribute('tabindex', '0');
+          card.setAttribute('role', 'button');
+          card.setAttribute('aria-haspopup', 'listbox');
+          card.setAttribute('aria-expanded', 'false');
+          card.addEventListener('click', (e) => {
+            if (e.target.closest('.gpu-dropdown-menu')) return;
+            toggleGpuMenu(target);
+          });
+          card.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              toggleGpuMenu(target);
+            } else if (e.key === 'Escape') {
+              closeGpuMenu(target);
+            }
+          });
+        }
+        renderGpuMenu(target);
+      }
+
       if (!select.dataset.syncBound) {
         select.dataset.syncBound = 'true';
         select.addEventListener('change', () => {
           try { localStorage.setItem(target.storageKey, select.value); } catch (_) {}
-          if (target.id === 'h3Gpu') updateGpuCardDisplay('h3Gpu', 'h3GpuDisplay', 'h3GpuStatus', 'Wan 2.1 推荐配置');
-          if (target.id === 'qiGpu') updateGpuCardDisplay('qiGpu', 'qiGpuDisplay', 'qiGpuStatus', '推荐 · 显存友好');
+          if (target.id === 'h3Gpu') updateGpuCardDisplay('h3Gpu', 'h3GpuDisplay', 'h3GpuStatus');
+          if (target.id === 'qiGpu') updateGpuCardDisplay('qiGpu', 'qiGpuDisplay', 'qiGpuStatus');
+          if (target.cardId && target.menuId) renderGpuMenu(target);
           if (target.id === 'h3Gpu' || target.id === 'qiGpu') {
             const computeGpu = $('gpu');
             if (computeGpu && [...computeGpu.options].some(o => o.value === select.value)) {
@@ -709,13 +863,87 @@
             try { localStorage.setItem(targetStorage, select.value); } catch (_) {}
             if (targetSelect && [...targetSelect.options].some(o => o.value === select.value)) {
               targetSelect.value = select.value;
-              if (isQI) updateGpuCardDisplay('qiGpu', 'qiGpuDisplay', 'qiGpuStatus', '推荐 · 显存友好');
-              else updateGpuCardDisplay('h3Gpu', 'h3GpuDisplay', 'h3GpuStatus', 'Wan 2.1 推荐配置');
+              if (isQI) updateGpuCardDisplay('qiGpu', 'qiGpuDisplay', 'qiGpuStatus');
+              else updateGpuCardDisplay('h3Gpu', 'h3GpuDisplay', 'h3GpuStatus');
+              const tConfig = targets.find(t => t.id === (isQI ? 'qiGpu' : 'h3Gpu'));
+              if (tConfig) renderGpuMenu(tConfig);
             }
             updateBalance();
           }
         });
       }
+    }
+
+    if (typeof document !== 'undefined' && document.body && !document.body.dataset.gpuDropdownBound) {
+      document.body.dataset.gpuDropdownBound = 'true';
+      document.addEventListener('click', (e) => {
+        if (!e.target.closest('.gpu-card-wrap') && !e.target.closest('.h3-gpu-card-wrap') && !e.target.closest('.qi-gpu-card-wrap')) {
+          closeAllGpuMenus();
+        }
+      });
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeAllGpuMenus();
+      });
+    }
+  }
+
+
+  let queuePlacementResolve = null;
+
+  function closeQueuePlacementModal(result = false) {
+    const dialog = $('queuePlacementModal');
+    if (dialog && dialog.open) {
+      dialog.close();
+    }
+    if (queuePlacementResolve) {
+      const resolve = queuePlacementResolve;
+      queuePlacementResolve = null;
+      resolve(result);
+    }
+  }
+
+  let queueChoicePending = false;
+  async function chooseQueuePlacement({ targetAppId, targetGpu }) {
+    if (queueChoicePending) return null;
+    queueChoicePending = true;
+    try {
+      const status = await api('status');
+      const consumer = status.consumer || {};
+      const waiting = status.queue || [];
+      const needsQueue = !!status.active || waiting.length > 0 ||
+        ['busy', 'connecting', 'switching', 'cancelling', 'blocked', 'unknown'].includes(consumer.state) && status.managed_gpu;
+      if (!needsQueue) return 'back';
+      const dialog = $('queuePlacementModal');
+      if (!dialog) return 'back';
+      $('queuePlacementTitle').textContent = '加入任务队列';
+      const current = status.jobs?.find(j => j.id === status.active || j.id === consumer.job_id);
+      const currentApp = current?.app_id || consumer.app_id || status.occupying_app_id || waiting[0]?.app_id || targetAppId;
+      const name = currentApp === 'h3' ? 'H3 视频' : currentApp === 'qwen_image_2_1' ? 'Qwen-Image-2.1' : currentApp || '当前应用';
+      const hasWaiting = waiting.length > 0;
+      const processing = status.active || ['busy', 'connecting', 'switching', 'cancelling'].includes(consumer.state);
+      $('queuePlacementSummary').textContent = `${name}${processing ? '正在处理' : status.managed_gpu ? '已保留环境' : '等待执行'} · 当前排队 ${waiting.length} 项`;
+      const switching = status.compute?.gpu && (status.compute.gpu !== targetGpu || status.occupying_app_id !== targetAppId);
+      $('queuePlacementHelpText').textContent = [
+        '排队数仅包含等待中的任务，不包含正在执行的任务。',
+        '排队后，优先执行与当前环境应用、显卡一致的任务，其余按入队顺序执行。',
+        hasWaiting ? '插到队首会将本任务放到等待队列最前方，当前任务继续执行，其他等待任务的相对顺序保留。'
+          : '当前没有其他等待任务，无需插队。当前任务完成后，将自动开始本任务。',
+        switching ? '轮到本任务时，将自动切换应用或显卡环境。' : '相同应用与显卡会继续复用已准备好的环境。'
+      ].join('\n\n');
+      $('queuePlacementHelp').open = false;
+      $('queuePlacementBack').classList.remove('hidden');
+      $('queuePlacementBack').textContent = hasWaiting ? '排队（推荐）' : '排队';
+      $('queuePlacementFront').classList.toggle('hidden', !hasWaiting);
+      $('queuePlacementFront').disabled = !hasWaiting;
+      $('queuePlacementFront').textContent = '插到队首';
+      const choice = await new Promise(resolve => {
+        queuePlacementResolve = resolve;
+        dialog.showModal();
+        $('queuePlacementBack').focus();
+      });
+      return choice;
+    } finally {
+      queueChoicePending = false;
     }
   }
 
@@ -726,6 +954,7 @@
     buildGpuOptions,
     syncGpuSelects,
     openAssetPicker,
+    chooseQueuePlacement,
     get page(){ return page; },
     get activeApp(){ return activeApp; }
   };
@@ -737,6 +966,15 @@
   $('computePageTab').onclick = () => show('compute');
   $('connectionPageTab').onclick = () => show('connections');
   $('settingsOpenLibrary').onclick = () => show('library');
+
+
+  $('cancelQueuePlacement')?.addEventListener('click', () => closeQueuePlacementModal(false));
+  $('queuePlacementBack')?.addEventListener('click', () => closeQueuePlacementModal('back'));
+  $('queuePlacementModal')?.addEventListener('cancel', () => closeQueuePlacementModal(false));
+  $('queuePlacementModal')?.addEventListener('click', e => {
+    if (e.target === $('queuePlacementModal')) closeQueuePlacementModal(false);
+  });
+  $('queuePlacementFront')?.addEventListener('click', () => closeQueuePlacementModal('front'));
 
   $('confirmAssetPicker')?.addEventListener('click', confirmPicker);
   $('cancelAssetPicker')?.addEventListener('click', closePicker);

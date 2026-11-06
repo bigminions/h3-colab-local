@@ -55,7 +55,7 @@ class ReleaseTests(unittest.TestCase):
             job_id = self.c.start(app.H3JobConfig(prompt='next',release_mode='idle'))
         self.assertIsNone(self.c.release_status()['deadline'])
         self.clock=1400; self.c.idle_tick(); self.assertNotIn('release',self.fake.calls)
-        self.c.run(self.c.jobs[job_id]); self.assertEqual(self.c.release_status()['deadline'],2000)
+        self.c._run_queue(); self.assertEqual(self.c.release_status()['deadline'],2000)
     def test_manual_never_times_out_and_button_checks_before_release(self):
         self.finish('manual'); self.clock += 100000
         self.c.idle_tick(); self.assertNotIn('release',self.fake.calls)

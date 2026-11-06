@@ -21,10 +21,10 @@ class QueueStreamTests(unittest.TestCase):
 
     def test_queue_submission_while_active_enqueues_and_runs_fifo(self):
         with patch.object(app.threading, 'Thread'):
-            # 1. Start job 1 while idle
+            # Submissions stay queued until the consumer claims them.
             id1 = self.control.start(app.H3JobConfig(prompt='job 1'))
-            self.assertEqual(self.control.active, id1)
-            self.assertEqual(self.control.jobs[id1]['status'], 'running')
+            self.assertIsNone(self.control.active)
+            self.assertEqual(self.control.jobs[id1]['status'], 'queued')
 
             # 2. Start job 2 while active is running
             id2 = self.control.start(app.H3JobConfig(prompt='job 2'))
@@ -38,10 +38,13 @@ class QueueStreamTests(unittest.TestCase):
             res = self.control.cancel(id2)
             self.assertTrue(res['ok'])
             self.assertEqual(self.control.jobs[id2]['status'], 'cancelled')
-            # Active job 1 is unaffected and still active
-            self.assertEqual(self.control.active, id1)
+            self.assertFalse(self.control.public_job(self.control.jobs[id2])['can_cancel'])
+            # Cancelling an entry does not claim or interrupt another task.
+            self.assertIsNone(self.control.active)
 
             # 5. Let job 1 finish
+            self.control.jobs[id1]['status'] = 'running'
+            self.control.active = id1
             self.control.run(self.control.jobs[id1])
             self.assertEqual(self.control.jobs[id1]['status'], 'done')
 

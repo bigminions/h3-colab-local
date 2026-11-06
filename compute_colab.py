@@ -8,12 +8,12 @@ from pathlib import PurePosixPath
 import threading
 import time
 import uuid
+import base64
 
 class ColabProvider:
     def __init__(self, controller, services):
         self.services = services
         self.controller = controller
-        self.running_runtime = None
         self.application_id = 'h3'
         self.assignment_hash = uuid.uuid4()
 
@@ -46,9 +46,72 @@ class ColabProvider:
             self._unassign_confirmed(client,endpoint)
         job['assignment_pending'] = False
 
-    def stop_running(self):
-        if self.running_runtime is not None:
-            self.running_runtime.stop()
+    def _proxy_request(self, method, path, **kwargs):
+        import requests
+        session = self.controller.session
+        response = requests.request(method, session['url'].rstrip('/') + path,
+            params={'authuser': '0', 'colab-runtime-proxy-token': session['token']},
+            headers={'X-Colab-Client-Agent': 'colab-cli', 'X-Colab-Runtime-Proxy-Token': session['token']},
+            timeout=(5, 10), **kwargs)
+        if response.status_code != 404:
+            response.raise_for_status()
+        return response
+
+    def _consumer_record(self):
+        response = self._proxy_request('GET', '/api/contents/content/lstudio-consumer.json')
+        if response.status_code == 404:
+            return {}
+        data = response.json()
+        content = data.get('content', '')
+        if data.get('format') == 'base64':
+            content = base64.b64decode(content).decode('utf-8')
+        record = json.loads(content)
+        if not isinstance(record, dict) or not record.get('run_id'):
+            raise RuntimeError('消费者状态记录无效')
+        return record
+
+    def consumer_status(self):
+        """Observe through Jupyter HTTP, never enqueue code behind a busy cell."""
+        if not self.controller.session:
+            return {'state': 'disconnected'}
+        response = self._proxy_request('GET', '/api/kernels')
+        response.raise_for_status()
+        kernels = response.json()
+        if not isinstance(kernels, list):
+            raise RuntimeError('无法确认远端内核状态')
+        busy = any(k.get('execution_state') != 'idle' for k in kernels)
+        record = self._consumer_record()
+        heartbeat = record.get('heartbeat')
+        fresh = isinstance(heartbeat, (int, float)) and abs(time.time() - heartbeat) < 30
+        detail = {k: record[k] for k in ('job_id', 'app_id', 'run_id', 'stage', 'prompt_id',
+                                        'heartbeat', 'running', 'pending') if k in record}
+        if busy:
+            return {**detail, 'state': 'cancelling' if fresh and record.get('state') == 'cancelling' else
+                    'busy' if fresh else 'unknown', 'fresh': fresh}
+        # A finished notebook cell alone does not prove the ComfyUI subprocess is idle.
+        idle = self.check_idle()
+        return {**detail, 'state': 'idle' if idle else 'busy', 'fresh': fresh}
+
+    def request_cancel(self, job):
+        if not self.controller.session:
+            return
+        record = self._consumer_record()
+        if record.get('job_id') != job['id'] or record.get('run_id') != job.get('consumer_run_id'):
+            if not job.get('execution_started'):
+                return
+            raise RuntimeError('远端任务身份尚未确认，未发送取消请求')
+        payload = json.dumps({'job_id': job['id'], 'run_id': record['run_id']})
+        self._proxy_request('PUT', '/api/contents/content/lstudio-cancel.json',
+            json={'type': 'file', 'format': 'text', 'content': payload}).raise_for_status()
+
+    def cancel_job(self, job):
+        self.request_cancel(job)
+        for _ in range(30):
+            state = self.consumer_status()
+            if state['state'] in ('idle', 'disconnected'):
+                return
+            time.sleep(1)
+        raise RuntimeError('远端任务停止尚未确认，保留环境并暂停后续任务')
 
     def client(self):
         path = self.services.PRIVATE / 'google-token.dat'
@@ -118,6 +181,15 @@ class ColabProvider:
                 raise RuntimeError('请先释放本控制台正在管理的运行时，再选择其他显卡。')
             if previous.get('accelerator', 'A100') != config.gpu:
                 raise RuntimeError('请先释放当前运行时，再切换显卡型号。')
+            prev_app = previous.get('app_id')
+            new_app = getattr(config, 'app_id', 'h3')
+            if prev_app and prev_app != new_app:
+                apps_reg = getattr(self.services, 'applications', None)
+                prev_app_obj = apps_reg.get(prev_app) if apps_reg else None
+                new_app_obj = apps_reg.get(new_app) if apps_reg else None
+                prev_name = prev_app_obj.spec.name if prev_app_obj else prev_app
+                new_name = new_app_obj.spec.name if new_app_obj else new_app
+                raise RuntimeError(f'请先释放 {prev_name} 的显卡运行时，再切换到 {new_name}。')
             return self.connection_step('检查已有 Colab 运行时', self.refresh)
         accelerator = self.resolve_accelerator(config.gpu)
         shape = self.resolve_shape(self.services, config.gpu)
@@ -145,7 +217,8 @@ class ColabProvider:
         self.controller.session = dict(endpoint=assignment.endpoint, url=proxy.url, token=proxy.token,
             name='h3-local', variant='GPU', accelerator=config.gpu,
             machine_shape='HIGH_RAM' if shape is not None else 'STANDARD',
-            kernel_id=None, session_id=None)
+            kernel_id=None, session_id=None,
+            app_id=getattr(config, 'app_id', 'h3'))
         self.controller.save_session()
         if owned_job:
             owned_job['assignment_pending'] = False
@@ -174,8 +247,16 @@ class ColabProvider:
         runtime.on_kernel_started = lambda value: remember('kernel_id', value)
         runtime.on_session_started = lambda value: remember('session_id', value)
         self.application_id = job['config'].get('app_id', 'h3')
+        if self.controller.session:
+            self.controller.session['app_id'] = self.application_id
+            self.controller.save_session()
         application = self.services.applications.get(self.application_id)
         source = application.source(self.services.BASE, job['config'])
+        job.setdefault('consumer_run_id', uuid.uuid4().hex)
+        self.controller.save_jobs()
+        control_source = (self.services.BASE / 'remote_consumer.py').read_text(encoding='utf-8')
+        source += '\n' + control_source + '\n_lstudio_app_run = run\n'
+        source += 'def run(config):\n    config["_consumer_run_id"] = ' + repr(job['consumer_run_id']) + '\n    return consumer_run(_lstudio_app_run, config)\n'
         if self.services.drive_cache.enabled:
             import base64
             cache_source = (self.services.BASE / 'drive_cache_remote.py').read_bytes()
@@ -206,6 +287,8 @@ class ColabProvider:
                     lines_seen.add(line)
                     if payload.get('gpu_info'):
                         job['gpu_info'] = payload['gpu_info']
+                    if payload.get('prompt_id'):
+                        job['prompt_id'] = payload['prompt_id']
                     if payload.get('timings'):
                         job.setdefault('timings', {}).update(payload['timings'])
                     if payload.get('acceleration'):
@@ -226,7 +309,6 @@ class ColabProvider:
                         job['safe_release'] = payload.get('safe_release', False)
                     self.controller.event(job, payload['stage'], payload['message'])
         try:
-            self.running_runtime = runtime
             self.services.enable_cancellation(runtime, lambda: self.controller.check_cancelled(job))
             if s.kernel_id and s.session_id:
                 import requests
@@ -247,6 +329,8 @@ class ColabProvider:
                     if job.get('remote_result'):
                         return
                     self.controller.event(job, 'recover', '原内核已空闲，检查并恢复本任务已生成的结果')
+            job['execution_started'] = True
+            self.controller.save_jobs()
             outputs = runtime.execute_code(code, allow_stdin=self.services.drive_cache.enabled,
                 stdin_hook=self.services.drive_cache.runtime_stdin_hook(runtime) if self.services.drive_cache.enabled and self.services.drive_cache.backend == 'api' else None,
                 output_hook=output_hook, timeout=4500)
@@ -259,8 +343,6 @@ class ColabProvider:
                 raise RuntimeError('远程执行结束，但未收到应用结果；运行时保留以便检查。')
         finally:
             runtime.stop()
-            if self.running_runtime is runtime:
-                self.running_runtime = None
 
     def download(self, result, target):
         path = PurePosixPath(result['path'])
@@ -278,7 +360,6 @@ class ColabProvider:
         runtime.on_kernel_started = lambda value: remember('kernel_id', value)
         runtime.on_session_started = lambda value: remember('session_id', value)
         try:
-            self.running_runtime = runtime
             active_job = self.controller.jobs.get(self.controller.active)
             if active_job:
                 self.services.enable_cancellation(runtime, lambda: self.controller.check_cancelled(active_job))
@@ -293,8 +374,6 @@ class ColabProvider:
             raise RuntimeError('Colab 未返回上传确认，远端结果保留')
         finally:
             runtime.stop()
-            if self.running_runtime is runtime:
-                self.running_runtime = None
 
     def upload_drive(self, job):
         storage = self.controller.drive_storage
@@ -348,9 +427,10 @@ print('H3_DRIVE_UPLOAD ' + json.dumps(value))
         raise RuntimeError('尚未确认显卡已释放，请稍后重试或在 Colab 删除运行时。')
 
     def release(self):
-        self._unassign_confirmed(self.client(), self.controller.session['endpoint'])
-        self.controller.session = None
-        self.controller.save_session()
+        if self.controller.session:
+            self._unassign_confirmed(self.client(), self.controller.session['endpoint'])
+            self.controller.session = None
+            self.controller.save_session()
 
     def release_detected_gpu(self, endpoint):
         client = self.client()

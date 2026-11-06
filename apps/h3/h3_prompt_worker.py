@@ -89,17 +89,25 @@ def rewrite(request, clip, generator, tail, image=None, diagnostics_path=None, m
     understanding = None
     first = None
     first_record = None
+    last_error = ''
     for attempt in range(1, max_attempts + 1):
         sampling_mode = 'greedy' if attempt == 1 else 'sample'
         temp = 0.2 if attempt == 1 else 0.4
         seed = 0 if attempt == 1 else 42
-        first, first_record = call('understanding', UNDERSTAND_PROMPT, understanding_context(request),
+        sys_prompt = UNDERSTAND_PROMPT
+        if attempt > 1 and last_error:
+            sys_prompt += (
+                f'\n\nIMPORTANT: Your previous attempt failed validation ({last_error}). '
+                'Fix this error and return a valid JSON object matching the required schema.'
+            )
+        first, first_record = call('understanding', sys_prompt, understanding_context(request),
                                    None, 0, 4096, attempt=attempt, sampling=sampling_mode,
                                    temperature=temp, seed=seed)
         try:
             understanding = prepare_understanding(decode_plan(first[0]), request)
             break
         except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
+            last_error = str(exc)
             if attempt < max_attempts:
                 first_record['error'] = f'第 {attempt} 次解析失败（自动重试中）：{exc}'
                 save_diagnostics(diagnostics_path, records)
@@ -110,17 +118,26 @@ def rewrite(request, clip, generator, tail, image=None, diagnostics_path=None, m
     result = None
     second = None
     second_record = None
+    last_error = ''
     for attempt in range(1, max_attempts + 1):
         sampling_mode = 'greedy' if attempt == 1 else 'sample'
         temp = 0.2 if attempt == 1 else 0.4
         seed = 0 if attempt == 1 else 42
-        second, second_record = call('translation', TRANSLATE_PROMPT, translation_context(understanding, request),
+        sys_prompt = TRANSLATE_PROMPT
+        if attempt > 1 and last_error:
+            sys_prompt += (
+                f'\n\nIMPORTANT: Your previous attempt failed validation ({last_error}). '
+                'Ensure every shot, style, delivery, and soundscape field is translated into English '
+                'and matches the required shot count and JSON schema.'
+            )
+        second, second_record = call('translation', sys_prompt, translation_context(understanding, request),
                                      image, len(request['pictures']), 6144,
                                      attempt=attempt, sampling=sampling_mode, temperature=temp, seed=seed)
         try:
             result = render(understanding, decode_plan(second[0]), request, strict_english=(attempt < max_attempts))
             break
         except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
+            last_error = str(exc)
             if attempt < max_attempts:
                 second_record['error'] = f'第 {attempt} 次解析失败（自动重试中）：{exc}'
                 save_diagnostics(diagnostics_path, records)

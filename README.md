@@ -87,7 +87,7 @@ py -3.12 -m venv .venv
 - **默认配置**：Q4_K_M 模型、INT8 编码器、8 步、CFG 1.0；网页和 API 默认 GPU 为 T4。实际显存需求随模型和画幅变化。
 - **批量生成**：一次 1–8 张，顺序执行并使用独立种子；生成图片可放大查看、下载或再次引用。
 
-H3 与 Qwen-Image 分别保留创作草稿、GPU 选择和作品视图，生成任务共用串行队列。
+H3 与 Qwen-Image 分别保留创作草稿、GPU 选择和作品视图，生成任务共用 SQLite 持久化串行队列。排队优先复用同应用、同显卡环境；插队进入等待队首，不中断当前任务。取消任务保留显卡环境，释放显卡单独操作。
 
 ## 素材与本机数据
 
@@ -127,7 +127,7 @@ materials/
 
 ## 算力释放
 
-算力页提供三种策略：整批完成后释放、闲置后释放、手动释放。默认在闲置 10 分钟后检查释放。
+算力页提供三种策略：队列完成后释放、闲置后释放、手动释放。默认在闲置 10 分钟后检查释放。
 
 保留运行时期间仍可能消耗额度。释放前会检查运行时是否空闲，以及结果是否已保存和校验。取消任务或网络中断后，可在算力页检查实际状态。
 
@@ -165,10 +165,12 @@ Invoke-RestMethod -Method Put -Uri http://127.0.0.1:7865/api/drive-cache -Header
 | `POST /api/assets` | 导入素材，multipart 字段为 `file`、`app_id`、`purpose`，默认 `shared/imports` |
 | `GET /api/assets/{id}/file` | 读取素材；加 `?download=true` 下载 |
 | `POST /api/images` | 上传应用图片，multipart 字段为 `file`、`app_id`、`purpose`，默认 `h3/references`，返回 `image_id` |
-| `POST /api/jobs` | 提交生成任务，通过 `app_id` 选择 `h3` 或 `qwen_image_2_1` |
+| `POST /api/jobs` | 提交生成任务，通过 `app_id` 选择应用；`?placement=front` 插入等待队首，默认 `back` |
 | `GET /api/jobs/{id}` | 查询任务 |
 | `POST /api/jobs/{id}/cancel` | 取消任务 |
 | `POST /api/jobs/{id}/retry` | 恢复任务或取回已有结果 |
+| `POST /api/jobs/{id}/resubmit` | 重新提交未完成任务，支持 `placement=back/front` |
+| `GET /api/consumer` | 主动核对远端消费者状态 |
 | `GET /video/{id}.mp4` | 播放本机视频，支持 Range；加 `?download=true` 下载 |
 | `GET /image/{id}.png` | 预览生成图片；加 `?download=true` 下载 |
 | `GET` / `PUT /api/release-policy` | 查询或修改释放策略 |
@@ -185,7 +187,7 @@ headers = {"X-LStudio-Key": "从本机设置页复制的 Key"}
 response = requests.post(base + "/api/jobs", headers=headers, json={
     "app_id": "h3",
     "provider_id": "colab",
-    "prompt": "A quiet garden in soft morning light, leaves moving in the breeze.",
+    "prompt": "A blue cube moves slowly across a plain white table.",
     "prompt_processing": "direct",
     "gpu": "G4",
     "resolution": "480p",
@@ -225,7 +227,7 @@ Qwen-Image 文生图可向同一 `POST /api/jobs` 接口提交以下请求体：
 {
   "app_id": "qwen_image_2_1",
   "provider_id": "colab",
-  "prompt": "清晨湖边的小木屋，柔和自然光，写实摄影风格",
+  "prompt": "白色背景上的一个蓝色立方体，柔和光照",
   "gpu": "T4",
   "aspect_ratio": "1:1",
   "model_file": "qwen-image-2.1-turbo-Q4_K_M.gguf",

@@ -5,6 +5,7 @@ function updateQiGpuDisplay() {
   if (!select || !display) return;
   const opt = select.selectedOptions?.[0];
   const t = (opt ? opt.textContent : select.value) || '';
+  const val = select.value;
   if (t.includes('(🟢')) {
     const parts = t.split('(🟢');
     display.textContent = parts[0].trim();
@@ -16,7 +17,14 @@ function updateQiGpuDisplay() {
   } else {
     display.textContent = t.trim();
     if (status) {
-      status.textContent = '推荐 · 显存友好';
+      const hints = {
+        L4: '推荐 · 编辑首选 (24GB)',
+        A100: '极速推理 · 高显存 (80GB)',
+        H100: '旗舰算力 · 极速 (80GB)',
+        T4: '显存友好 · 适于文生图',
+        G4: '超大显存 (96GB)'
+      };
+      status.textContent = hints[val] || '按需启动';
       status.classList.remove('status-online');
       status.classList.add('status-idle');
     }
@@ -49,7 +57,9 @@ function updateQiGpuDisplay() {
   };
 
   let mode = 'text'; // 'text' | 'image'
-  let referenceImage = null; // { image_id, name, url }
+  let references = []; // [{ slot: 1..3, image_id, name, url, pending, error }]
+  let qiActiveMentionIndex = 0;
+  let qiMentionMatches = [];
   let submitting = false;
   let historyRemoval = null;
   let historyBusy = false;
@@ -68,7 +78,13 @@ function updateQiGpuDisplay() {
       let errDetail = `请求失败 (${res.status})`;
       try {
         const data = await res.json();
-        errDetail = data.detail || errDetail;
+        if (typeof data.detail === 'string') {
+          errDetail = data.detail;
+        } else if (Array.isArray(data.detail)) {
+          errDetail = data.detail.map(item => String(item.msg || item.message || JSON.stringify(item)).replace(/^Value error, /, '')).join('；');
+        } else if (data.detail && typeof data.detail === 'object') {
+          errDetail = JSON.stringify(data.detail);
+        }
       } catch (_) {}
       throw new Error(errDetail);
     }
@@ -95,6 +111,70 @@ function updateQiGpuDisplay() {
       panel.hidden = !isImage;
       panel.classList.toggle('hidden', !isImage);
     }
+
+    const promptLabel = document.querySelector('label[for="qiPrompt"]');
+    const promptArea = $('qiPrompt');
+    const modelSelect = $('qiModelFile');
+    const modelLabel = $('qiModelLabel') || document.querySelector('label[for="qiModelFile"]');
+    const stepsInput = $('qiSteps');
+    const cfgInput = $('qiCfg');
+    const denoiseGroup = $('qiDenoiseGroup');
+    const isRepaint = $('qiEditType')?.value === 'repaint';
+    if (denoiseGroup) denoiseGroup.classList.toggle('hidden', !isImage || !isRepaint);
+
+    // 区分模型列表：图生图仅展示编辑模型，文生图仅展示 Turbo 加速模型
+    const editGroup = $('qiModelGroupEdit');
+    const turboGroup = $('qiModelGroupTurbo');
+    if (editGroup) {
+      editGroup.hidden = !isImage;
+      editGroup.style.display = isImage ? '' : 'none';
+      [...editGroup.children].forEach(opt => {
+        opt.hidden = !isImage;
+        opt.disabled = !isImage;
+        opt.style.display = isImage ? '' : 'none';
+      });
+    }
+    if (turboGroup) {
+      turboGroup.hidden = isImage;
+      turboGroup.style.display = !isImage ? '' : 'none';
+      [...turboGroup.children].forEach(opt => {
+        opt.hidden = isImage;
+        opt.disabled = isImage;
+        opt.style.display = !isImage ? '' : 'none';
+      });
+    }
+
+    if (isImage) {
+      if (promptLabel) promptLabel.textContent = '编辑指令 (Instruction)';
+      if (modelLabel) modelLabel.textContent = '编辑模型 (Qwen-Image-Edit 20B)';
+      if (promptArea) {
+        promptArea.placeholder = '输入编辑指令，说明需要保留和修改的内容…\n\n例如：\n• 把 @图片1 中的圆形改成方形\n• 将 @图片1 的背景替换为 @图片2 的背景\n• 保留主体的位置和大小';
+      }
+      if (modelSelect && (modelSelect.value.includes('turbo') || !modelSelect.value)) {
+        modelSelect.value = 'qwen-image-edit-2511-Q4_K_M.gguf';
+      }
+      if (stepsInput && Number(stepsInput.value) <= 8) {
+        stepsInput.value = '20';
+      }
+      if (cfgInput && Number(cfgInput.value) <= 1.0) {
+        cfgInput.value = '4.0';
+      }
+    } else {
+      if (promptLabel) promptLabel.textContent = '画面描述 (Prompt)';
+      if (modelLabel) modelLabel.textContent = '生图模型 (Qwen-Image Turbo)';
+      if (promptArea) {
+        promptArea.placeholder = '描述画面主体、背景、光影细节与艺术风格…\n\n例如：白色背景上放着一个蓝色立方体，柔和光照，固定视角。';
+      }
+      if (modelSelect && (modelSelect.value.includes('edit') || !modelSelect.value)) {
+        modelSelect.value = 'qwen-image-2.1-turbo-Q4_K_M.gguf';
+      }
+      if (stepsInput && Number(stepsInput.value) === 20) {
+        stepsInput.value = '8';
+      }
+      if (cfgInput && Number(cfgInput.value) === 4.0) {
+        cfgInput.value = '1.0';
+      }
+    }
   }
 
   function selectedRatio() {
@@ -114,113 +194,378 @@ function updateQiGpuDisplay() {
     box.classList.toggle('hidden', !msg);
   }
 
-  async function handleReferenceFile(file) {
-    if (!file) return;
-    showError('');
-    $('qiReferenceStatus').textContent = '正在上传…';
-    const form = new FormData();
-    form.append('file', file);
-    form.append('purpose', 'references');
-    form.append('app_id', 'qwen_image_2_1');
-    try {
-      const res = await api('images', { method: 'POST', body: form });
-      referenceImage = {
-        image_id: res.image_id,
-        name: file.name,
-        url: URL.createObjectURL(file)
-      };
-      renderReferencePreview();
-    } catch (e) {
-      showError('参考图上传失败：' + e.message);
-      $('qiReferenceStatus').textContent = '上传失败';
-    }
-  }
+  function renderReferences() {
+    references.forEach((ref, idx) => { ref.slot = idx + 1; });
+    const countText = `${references.length} / 3 张`;
+    if ($('qiReferenceCount')) $('qiReferenceCount').textContent = countText;
+    if ($('qiReferenceStatus')) $('qiReferenceStatus').textContent = countText;
 
-  function renderReferencePreview() {
-    const placeholder = $('qiReferencePlaceholder');
-    const preview = $('qiReferencePreview');
-    const img = $('qiReferenceImg');
-    const nameEl = $('qiReferenceName');
-    const status = $('qiReferenceStatus');
-    if (referenceImage) {
-      if (placeholder) placeholder.classList.add('hidden');
-      if (preview) {
-        preview.hidden = false;
-        preview.classList.remove('hidden');
-      }
-      if (img) {
+    const dropZone = $('qiReferenceDropZone');
+    const cardsContainer = $('qiReferenceCards');
+    if (!cardsContainer) return;
+
+    cardsContainer.replaceChildren();
+    cardsContainer.classList.toggle('has-images', references.length > 0);
+
+    for (const ref of [...references].sort((a, b) => a.slot - b.slot)) {
+      const card = document.createElement('article');
+      card.className = 'reference-card';
+
+      const preview = document.createElement('div');
+      preview.className = 'reference-preview';
+
+      if (ref.url) {
+        const img = document.createElement('img');
+        img.src = ref.url;
+        img.alt = `图片${ref.slot}预览`;
         img.onerror = () => {
-          if (referenceImage?.image_id && !img.dataset.retried) {
+          if (ref.image_id && !img.dataset.retried) {
             img.dataset.retried = '1';
-            fetch('/api/images/' + referenceImage.image_id, { headers: { 'X-LStudio-Key': getApiKey() } })
+            fetch('/api/images/' + ref.image_id, { headers: { 'X-LStudio-Key': getApiKey() } })
               .then(res => res.ok ? res.blob() : null)
               .then(blob => {
-                if (blob && referenceImage) {
+                if (blob && references.includes(ref)) {
                   const blobUrl = URL.createObjectURL(blob);
-                  referenceImage.url = blobUrl;
+                  ref.url = blobUrl;
                   img.src = blobUrl;
                 }
               })
               .catch(() => {});
           }
         };
-        img.dataset.retried = '';
-        if (referenceImage.url) {
-          img.src = referenceImage.url;
-        } else {
-          img.removeAttribute('src');
-        }
+        preview.append(img);
       }
-      if (nameEl) nameEl.textContent = referenceImage.name || referenceImage.image_id || '';
-      if (status) status.textContent = '已就绪 (1 张)';
+
+      const badge = document.createElement('span');
+      badge.className = 'reference-badge';
+      badge.textContent = `图片${ref.slot}`;
+      preview.append(badge);
+
+      const state = document.createElement('div');
+      state.className = 'hint';
+      state.textContent = ref.pending ? '正在上传到本机…' : (ref.error || '');
+      state.hidden = !state.textContent;
+      state.classList.toggle('reference-error', !!ref.error);
+
+      // Actions bar (exact H3 .reference-actions)
+      const actions = document.createElement('div');
+      actions.className = 'reference-actions';
+
+      const insert = document.createElement('button');
+      insert.type = 'button';
+      insert.textContent = `引用 @图片${ref.slot}`;
+      insert.disabled = !!ref.pending || !!ref.error || !ref.image_id;
+      insert.onclick = () => insertMention(`图片${ref.slot}`);
+
+      const replace = document.createElement('button');
+      replace.type = 'button';
+      replace.textContent = '替换';
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.className = 'file-input';
+      input.accept = 'image/png,image/jpeg,image/webp';
+      input.setAttribute('aria-label', `替换图片${ref.slot}`);
+      input.onchange = () => {
+        if (input.files && input.files[0]) uploadSingleReference(input.files[0], ref);
+      };
+      replace.onclick = () => input.click();
+      replace.disabled = !!ref.pending;
+
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.textContent = '移除';
+      remove.setAttribute('aria-label', `移除图片${ref.slot}`);
+      remove.onclick = () => {
+        if (ref.url && ref.url.startsWith('blob:')) URL.revokeObjectURL(ref.url);
+        references = references.filter(r => r !== ref);
+        references.forEach((r, idx) => { r.slot = idx + 1; });
+        renderReferences();
+      };
+
+      actions.append(insert, replace, remove);
+      card.append(preview, state, actions, input);
+      cardsContainer.append(card);
+    }
+
+    if (references.length < 3) {
+      dropZone.hidden = false;
+      dropZone.classList.remove('hidden');
+      dropZone.style.display = '';
+      cardsContainer.append(dropZone);
     } else {
-      if (placeholder) placeholder.classList.remove('hidden');
-      if (preview) {
-        preview.hidden = true;
-        preview.classList.add('hidden');
-      }
-      if (img) {
-        img.onerror = null;
-        img.removeAttribute('src');
-      }
-      if (nameEl) nameEl.textContent = '';
-      if (status) status.textContent = '未选择';
+      dropZone.hidden = true;
+      dropZone.classList.add('hidden');
+      dropZone.style.display = 'none';
     }
   }
 
-  async function pickLibraryImage() {
+  async function uploadSingleReference(file, existingRef = null) {
+    if (!file) return;
+    showError('');
+    const form = new FormData();
+    form.append('file', file);
+    form.append('purpose', 'references');
+    form.append('app_id', 'qwen_image_2_1');
+
+    let targetRef = existingRef;
+    if (!targetRef) {
+      if (references.length >= 3) return;
+      targetRef = {
+        slot: references.length + 1,
+        image_id: '',
+        name: file.name,
+        url: URL.createObjectURL(file),
+        pending: true
+      };
+      references.push(targetRef);
+    } else {
+      targetRef.pending = true;
+      targetRef.name = file.name;
+      if (targetRef.url && targetRef.url.startsWith('blob:')) URL.revokeObjectURL(targetRef.url);
+      targetRef.url = URL.createObjectURL(file);
+    }
+    renderReferences();
+
+    try {
+      const res = await api('images', { method: 'POST', body: form });
+      targetRef.image_id = res.image_id;
+      targetRef.pending = false;
+      renderReferences();
+    } catch (e) {
+      showError('参考图上传失败：' + e.message);
+      references = references.filter(r => r !== targetRef);
+      renderReferences();
+    }
+  }
+
+  async function handleReferenceFiles(files) {
+    if (!files || !files.length) return;
+    const availableSlots = 3 - references.length;
+    const toAdd = Array.from(files).slice(0, availableSlots);
+    for (const f of toAdd) {
+      await uploadSingleReference(f);
+    }
+  }
+
+  async function pickLibraryImages() {
     if (!window.Workspace?.openAssetPicker) return;
+    const maxAvailable = 3 - references.length;
+    if (maxAvailable <= 0) return;
     const picked = await window.Workspace.openAssetPicker({
       kind: 'images',
-      maxCount: 1,
-      alreadySelectedIds: referenceImage ? [referenceImage.image_id] : [],
-      title: '从素材库选择参考图片'
+      maxCount: maxAvailable,
+      alreadySelectedIds: references.map(r => r.image_id).filter(Boolean),
+      title: '从素材库选择参考图片 (最多可选 ' + maxAvailable + ' 张)'
     });
     if (!picked || !picked.length) return;
-    const asset = picked[0];
-    let url = '';
-    try {
-      const resp = await fetch(asset.url, { headers: { 'X-LStudio-Key': window.KEY || '' } });
-      if (resp.ok) url = URL.createObjectURL(await resp.blob());
-    } catch (_) {}
-    if (referenceImage?.url && referenceImage.url.startsWith('blob:')) {
-      URL.revokeObjectURL(referenceImage.url);
+    for (const asset of picked) {
+      if (references.length >= 3) break;
+      let url = '';
+      try {
+        const resp = await fetch(asset.url, { headers: { 'X-LStudio-Key': window.KEY || '' } });
+        if (resp.ok) url = URL.createObjectURL(await resp.blob());
+      } catch (_) {}
+      references.push({
+        slot: references.length + 1,
+        image_id: asset.id,
+        name: asset.name,
+        url: url || asset.url,
+        pending: false
+      });
     }
-    referenceImage = {
-      image_id: asset.id,
-      name: asset.name,
-      url: url || asset.url
-    };
-    renderReferencePreview();
+    renderReferences();
   }
 
-  function clearReference() {
-    if (referenceImage?.url && referenceImage.url.startsWith('blob:')) {
-      URL.revokeObjectURL(referenceImage.url);
+  function clearAllReferences() {
+    for (const ref of references) {
+      if (ref.url && ref.url.startsWith('blob:')) URL.revokeObjectURL(ref.url);
     }
-    referenceImage = null;
+    references = [];
     if ($('qiReferenceFile')) $('qiReferenceFile').value = '';
-    renderReferencePreview();
+    renderReferences();
+  }
+
+  function insertMention(name) {
+    const textarea = $('qiPrompt');
+    if (!textarea) return;
+    const text = textarea.value;
+    const start = textarea.selectionStart ?? text.length;
+    const end = textarea.selectionEnd ?? text.length;
+    const before = text.slice(0, start);
+
+    const mentionMatch = before.match(/(?<![A-Za-z0-9_@])@([\w\u4e00-\u9fa5]*)$/);
+    let insertText = '@' + name + ' ';
+    let repStart = start;
+    if (mentionMatch) {
+      repStart = start - mentionMatch[0].length;
+    } else if (start > 0 && !/[\s\n，。！？；、]$/.test(before)) {
+      insertText = ' ' + insertText;
+    }
+
+    textarea.setRangeText(insertText, repStart, end, 'end');
+    closeQiMentionMenu();
+    textarea.focus();
+  }
+
+  function getCaretCoordinates(element, position) {
+    const div = document.createElement('div');
+    const style = div.style;
+    const computed = window.getComputedStyle(element);
+
+    style.whiteSpace = 'pre-wrap';
+    style.wordWrap = 'break-word';
+    style.position = 'absolute';
+    style.visibility = 'hidden';
+    style.overflow = 'hidden';
+    style.top = '0';
+    style.left = '-9999px';
+
+    const properties = [
+      'direction', 'boxSizing', 'width', 'height', 'overflowX', 'overflowY',
+      'borderTopWidth', 'borderRightWidth', 'borderBottomWidth', 'borderLeftWidth',
+      'borderStyle', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft',
+      'fontStyle', 'fontVariant', 'fontWeight', 'fontStretch', 'fontSize',
+      'fontSizeAdjust', 'lineHeight', 'fontFamily', 'textAlign', 'textTransform',
+      'textIndent', 'textDecoration', 'letterSpacing', 'wordSpacing', 'tabSize', 'MozTabSize'
+    ];
+    properties.forEach(prop => { style[prop] = computed[prop]; });
+
+    div.textContent = element.value.substring(0, position);
+    const span = document.createElement('span');
+    span.textContent = element.value.substring(position) || '.';
+    div.appendChild(span);
+
+    document.body.appendChild(div);
+    const coordinates = {
+      top: span.offsetTop + parseInt(computed.borderTopWidth || 0),
+      left: span.offsetLeft + parseInt(computed.borderLeftWidth || 0),
+      height: parseInt(computed.lineHeight) || parseInt(computed.fontSize || 14) * 1.5 || 24
+    };
+    document.body.removeChild(div);
+    return coordinates;
+  }
+
+  function positionQiMentionMenu(startPos) {
+    const textarea = $('qiPrompt');
+    const menu = $('qiMentionMenu');
+    if (!textarea || !menu) return;
+    const coords = getCaretCoordinates(textarea, startPos);
+    const textareaOffsetTop = textarea.offsetTop;
+    const textareaOffsetLeft = textarea.offsetLeft;
+
+    let top = textareaOffsetTop + coords.top - textarea.scrollTop + coords.height + 4;
+    let left = textareaOffsetLeft + coords.left - textarea.scrollLeft;
+
+    const menuWidth = 240;
+    const maxLeft = textareaOffsetLeft + textarea.offsetWidth - menuWidth - 8;
+    if (left > maxLeft) left = Math.max(textareaOffsetLeft + 8, maxLeft);
+    if (left < textareaOffsetLeft + 8) left = textareaOffsetLeft + 8;
+
+    const menuHeight = 220;
+    if (top + menuHeight > textareaOffsetTop + textarea.offsetHeight && coords.top > menuHeight) {
+      top = textareaOffsetTop + coords.top - textarea.scrollTop - menuHeight - 4;
+    }
+
+    menu.style.position = 'absolute';
+    menu.style.top = `${top}px`;
+    menu.style.left = `${left}px`;
+    menu.style.bottom = 'auto';
+    menu.style.right = 'auto';
+  }
+
+  function getQiMentionContext() {
+    const textarea = $('qiPrompt');
+    if (!textarea) return null;
+    const text = textarea.value;
+    const end = textarea.selectionStart;
+    const match = text.slice(0, end).match(/(?<![A-Za-z0-9_@])@([\w\u4e00-\u9fa5]*)$/);
+    if (!match) return null;
+    return {
+      start: end - match[0].length,
+      end: end,
+      query: match[1].toLowerCase()
+    };
+  }
+
+  function updateQiMentionMenu() {
+    const menu = $('qiMentionMenu');
+    const textarea = $('qiPrompt');
+    if (!menu || !textarea) return;
+    const ctx = getQiMentionContext();
+    if (!ctx) {
+      closeQiMentionMenu();
+      return;
+    }
+
+    const available = [];
+    for (const r of references) {
+      available.push({
+        slot: r.slot,
+        name: `图片${r.slot}`,
+        altName: `图${r.slot}`,
+        label: `图片 ${r.slot}`,
+        url: r.url
+      });
+    }
+
+    qiMentionMatches = available.filter(item =>
+      item.name.toLowerCase().includes(ctx.query) ||
+      item.altName.toLowerCase().includes(ctx.query) ||
+      item.label.toLowerCase().includes(ctx.query)
+    );
+
+    if (!qiMentionMatches.length) {
+      closeQiMentionMenu();
+      return;
+    }
+
+    if (qiActiveMentionIndex >= qiMentionMatches.length) qiActiveMentionIndex = 0;
+
+    menu.replaceChildren();
+    qiMentionMatches.forEach((item, idx) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.id = 'qi-mention-option-' + item.slot;
+      btn.className = 'mention-option';
+      btn.setAttribute('role', 'option');
+      btn.setAttribute('aria-selected', String(idx === qiActiveMentionIndex));
+
+      const thumb = document.createElement('div');
+      thumb.className = 'mention-thumb-box';
+      if (item.url) {
+        const img = document.createElement('img');
+        img.src = item.url;
+        img.alt = item.name;
+        thumb.append(img);
+      } else {
+        thumb.textContent = '🖼️';
+      }
+
+      const nameText = document.createElement('span');
+      nameText.className = 'mention-name';
+      nameText.textContent = `@${item.name}`;
+
+      const tagText = document.createElement('span');
+      tagText.className = 'mention-tag';
+      tagText.textContent = `图${item.slot}`;
+
+      btn.append(thumb, nameText, tagText);
+      btn.onmousedown = e => e.preventDefault();
+      btn.onclick = () => insertMention(item.name);
+      menu.append(btn);
+    });
+
+    menu.classList.remove('hidden');
+    menu.style.display = 'block';
+    positionQiMentionMenu(ctx.start);
+  }
+
+  function closeQiMentionMenu() {
+    const menu = $('qiMentionMenu');
+    if (menu) {
+      menu.classList.add('hidden');
+      menu.style.display = 'none';
+    }
   }
 
   function getReleaseMode() {
@@ -235,8 +580,8 @@ function updateQiGpuDisplay() {
       showError('请输入画面描述 (Prompt)');
       return;
     }
-    if (mode === 'image' && !referenceImage) {
-      showError('图生图模式需要至少上传一张参考图片');
+    if (mode === 'image' && references.length === 0) {
+      showError('智能图像编辑模式需要至少添加一张图片（图1 作为主体基底）');
       return;
     }
 
@@ -253,8 +598,11 @@ function updateQiGpuDisplay() {
     const gpu = $('qiGpu')?.value || localStorage.getItem('lstudio-qi-gpu') || 'T4';
     const idleMinutes = Number($('idleMinutes')?.value || 10);
 
+    const editType = $('qiEditType')?.value || 'instruction';
+
     const payload = {
       app_id: 'qwen_image_2_1',
+      edit_type: editType,
       provider_id: 'colab',
       prompt: prompt,
       negative_prompt: negativePrompt,
@@ -269,8 +617,14 @@ function updateQiGpuDisplay() {
       gpu: gpu,
       release_mode: getReleaseMode(),
       idle_minutes: idleMinutes,
-      references: mode === 'image' && referenceImage ? [{ slot: 1, image_id: referenceImage.image_id }] : []
+      references: mode === 'image' ? references.map(r => ({ slot: r.slot, image_id: r.image_id })) : []
     };
+
+    const gpuOk = await (window.Workspace?.chooseQueuePlacement ? window.Workspace.chooseQueuePlacement({
+      targetAppId: 'qwen_image_2_1',
+      targetGpu: gpu || 'T4'
+    }) : Promise.resolve('back'));
+    if (!gpuOk) return;
 
     const submitBtn = $('qiGenerate');
     try {
@@ -279,7 +633,7 @@ function updateQiGpuDisplay() {
         submitBtn.disabled = true;
         submitBtn.textContent = '正在提交任务…';
       }
-      await api('jobs', {
+      await api('jobs?placement=' + gpuOk, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -489,8 +843,14 @@ function updateQiGpuDisplay() {
 
   async function resubmitJob(id) {
     if (!id) return;
+    const targetGpu = $('qiGpu')?.value || localStorage.getItem('lstudio-qi-gpu') || 'T4';
+    const gpuOk = await (window.Workspace?.chooseQueuePlacement ? window.Workspace.chooseQueuePlacement({
+      targetAppId: 'qwen_image_2_1',
+      targetGpu: targetGpu
+    }) : Promise.resolve('back'));
+    if (!gpuOk) return;
     try {
-      await api('jobs/' + encodeURIComponent(id) + '/resubmit', { method: 'POST' });
+      await api('jobs/' + encodeURIComponent(id) + '/resubmit?placement=' + gpuOk, { method: 'POST' });
       await refreshStatusNow();
     } catch (e) {
       showError('重新提交失败：' + e.message);
@@ -517,7 +877,11 @@ function updateQiGpuDisplay() {
         const mapped = creation.model_file.replace('qwen-image-2.1-UC-', 'qwen-image-2.1-turbo-');
         $('qiModelFile').value = mapped;
         if (!$('qiModelFile').value) {
-          $('qiModelFile').value = creation.model_file;
+          const opt = document.createElement('option');
+          opt.value = mapped;
+          opt.textContent = mapped + ' (历史配置)';
+          $('qiModelFile').appendChild(opt);
+          $('qiModelFile').value = mapped;
         }
       }
       if ($('qiEncoder') && creation.encoder) $('qiEncoder').value = creation.encoder;
@@ -532,32 +896,39 @@ function updateQiGpuDisplay() {
         $('qiDenoise').value = creation.denoise;
         if ($('qiDenoiseVal')) $('qiDenoiseVal').textContent = parseFloat(creation.denoise).toFixed(2);
       }
+      if ($('qiEditType') && creation.edit_type) {
+        $('qiEditType').value = creation.edit_type;
+        const denoiseGroup = $('qiDenoiseGroup');
+        if (denoiseGroup) denoiseGroup.classList.toggle('hidden', creation.edit_type !== 'repaint');
+      }
       // Note: Seed is explicitly NOT applied per requirement ("应用完整的配置项，除种子外")
 
       if (creation.references && creation.references.length > 0) {
-        const ref = creation.references[0];
-        if (referenceImage?.url && referenceImage.url.startsWith('blob:')) {
-          URL.revokeObjectURL(referenceImage.url);
+        for (const ref of references) {
+          if (ref.url && ref.url.startsWith('blob:')) URL.revokeObjectURL(ref.url);
         }
-        const displayName = ref.name || ref.image_id;
-        referenceImage = {
+        references = creation.references.slice(0, 3).map((ref, idx) => ({
+          slot: idx + 1,
           image_id: ref.image_id,
-          name: displayName,
-          url: '/image/' + ref.image_id
-        };
+          name: ref.name || ref.image_id,
+          url: '/image/' + ref.image_id,
+          pending: false
+        }));
         setMode('image');
-        renderReferencePreview();
+        renderReferences();
 
-        fetch('/api/images/' + ref.image_id, { headers: { 'X-LStudio-Key': getApiKey() } })
-          .then(res => res.ok ? res.blob() : null)
-          .then(blob => {
-            if (blob && referenceImage && referenceImage.image_id === ref.image_id) {
-              const blobUrl = URL.createObjectURL(blob);
-              referenceImage.url = blobUrl;
-              if ($('qiReferenceImg')) $('qiReferenceImg').src = blobUrl;
-            }
-          })
-          .catch(() => {});
+        references.forEach(ref => {
+          fetch('/api/images/' + ref.image_id, { headers: { 'X-LStudio-Key': getApiKey() } })
+            .then(res => res.ok ? res.blob() : null)
+            .then(blob => {
+              if (blob && references.includes(ref)) {
+                const blobUrl = URL.createObjectURL(blob);
+                ref.url = blobUrl;
+                renderReferences();
+              }
+            })
+            .catch(() => {});
+        });
       } else {
         setMode('text');
       }
@@ -597,10 +968,18 @@ function updateQiGpuDisplay() {
   async function saveImageToLocation(url, suggestedName, button) {
     const safeName = (suggestedName || 'image.png').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/[. ]+$/, '').trim();
     const filename = safeName.endsWith('.png') ? safeName : safeName + '.png';
+    const isIcon = button && (button.classList?.contains('qi-overlay-icon-btn') || button.querySelector('svg'));
     const originalText = button ? button.textContent : '';
+    const originalHtml = button ? button.innerHTML : '';
+    const originalTitle = button ? button.title : '';
     if (button) {
       button.disabled = true;
-      button.textContent = '正在下载…';
+      if (isIcon) {
+        button.title = '正在下载…';
+        button.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="qi-spin"><circle cx="12" cy="12" r="10" stroke-dasharray="32" stroke-dashoffset="10"/></svg>';
+      } else {
+        button.textContent = '正在下载…';
+      }
     }
     try {
       const a = document.createElement('a');
@@ -609,14 +988,35 @@ function updateQiGpuDisplay() {
       document.body.appendChild(a);
       a.click();
       a.remove();
-      if (button) button.textContent = '已下载';
+      if (button) {
+        if (isIcon) {
+          button.title = '已下载';
+          button.classList.add('is-success');
+          button.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#4ade80" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+        } else {
+          button.textContent = '已下载';
+        }
+      }
     } catch (e) {
-      if (button) button.textContent = '下载失败';
+      if (button) {
+        if (isIcon) {
+          button.title = '下载失败';
+          button.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+        } else {
+          button.textContent = '下载失败';
+        }
+      }
     } finally {
       setTimeout(() => {
         if (button) {
           button.disabled = false;
-          button.textContent = originalText;
+          if (isIcon) {
+            button.innerHTML = originalHtml;
+            button.title = originalTitle;
+            button.classList.remove('is-success');
+          } else {
+            button.textContent = originalText;
+          }
         }
       }, 1500);
     }
@@ -659,32 +1059,50 @@ function updateQiGpuDisplay() {
 
   function setAsReference(sibling, button) {
     if (!sibling?.file) return;
-    if (referenceImage?.url && referenceImage.url.startsWith('blob:')) {
-      URL.revokeObjectURL(referenceImage.url);
-    }
-    referenceImage = {
+    const newRef = {
+      slot: Math.min(references.length + 1, 3),
       image_id: sibling.file,
       name: sibling.file,
-      url: '/image/' + sibling.file
+      url: '/image/' + sibling.file,
+      pending: false
     };
+    if (references.length >= 3) {
+      references[0] = newRef;
+    } else {
+      references.push(newRef);
+    }
     setMode('image');
-    renderReferencePreview();
+    renderReferences();
 
     fetch('/api/images/' + sibling.file, { headers: { 'X-LStudio-Key': getApiKey() } })
       .then(res => res.ok ? res.blob() : null)
       .then(blob => {
-        if (blob && referenceImage && referenceImage.image_id === sibling.file) {
+        if (blob && references.includes(newRef)) {
           const blobUrl = URL.createObjectURL(blob);
-          referenceImage.url = blobUrl;
-          if ($('qiReferenceImg')) $('qiReferenceImg').src = blobUrl;
+          newRef.url = blobUrl;
+          renderReferences();
         }
       })
       .catch(() => {});
 
     if (button) {
-      const orig = button.textContent;
-      button.textContent = '已设为参考图';
-      setTimeout(() => (button.textContent = orig), 1500);
+      const isIcon = button.classList?.contains('qi-overlay-icon-btn') || button.querySelector('svg');
+      const origHtml = button.innerHTML;
+      const origTitle = button.title;
+      if (isIcon) {
+        button.title = `已添加为图${newRef.slot}`;
+        button.classList.add('is-success');
+        button.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#4ade80" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+        setTimeout(() => {
+          button.innerHTML = origHtml;
+          button.title = origTitle;
+          button.classList.remove('is-success');
+        }, 1500);
+      } else {
+        const orig = button.textContent;
+        button.textContent = `已添加为图${newRef.slot}`;
+        setTimeout(() => (button.textContent = orig), 1500);
+      }
     }
     $('qiPromptPanel')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
@@ -820,7 +1238,7 @@ function updateQiGpuDisplay() {
     // Sorting: Newest in front (最新在前面)
     // Running groups at top, queued next, completed groups sorted newest first (b.created - a.created)
     const runningGroups = groups.filter(g => g.isRunning).sort((a, b) => b.created - a.created);
-    const queuedGroups = groups.filter(g => g.isQueued).sort((a, b) => a.created - b.created);
+    const queuedGroups = groups.filter(g => g.isQueued).sort((a, b) => Math.min(...a.queuedSiblings.map(j => j.queue_position || Infinity)) - Math.min(...b.queuedSiblings.map(j => j.queue_position || Infinity)));
     const completedGroups = groups.filter(g => !g.isRunning && !g.isQueued).sort((a, b) => b.created - a.created);
     const sortedGroups = [...runningGroups, ...queuedGroups, ...completedGroups];
 
@@ -834,7 +1252,7 @@ function updateQiGpuDisplay() {
       });
 
       const fingerprint = JSON.stringify(group.siblings.map(j => [
-        j.id, j.status, j.file, j.local_file, j.local_download_error,
+        j.id, j.status, j.queue_position, j.queue_reason, j.file, j.local_file, j.local_download_error,
         j.can_cancel, j.can_retry, j.can_resubmit,
         j.message, j.events?.length, j.creation?.prompt, j.creation?.seed
       ]));
@@ -900,9 +1318,9 @@ function updateQiGpuDisplay() {
       const stateBadge = document.createElement('span');
 
       if (group.isQueued) {
-        const qPos = queuedGroups.findIndex(q => q.id === group.id) + 1;
+        const qPos = Math.min(...group.queuedSiblings.map(j => j.queue_position || Infinity));
         stateBadge.className = 'task-badge badge-queued';
-        stateBadge.textContent = group.isBatch ? `排队中 #${qPos}（共 ${group.total} 张）` : `排队中 #${qPos}`;
+        stateBadge.textContent = group.isBatch ? `预计 #${Number.isFinite(qPos) ? qPos : '—'}（共 ${group.total} 张）` : `预计 #${Number.isFinite(qPos) ? qPos : '—'}`;
       } else if (group.isRunning) {
         stateBadge.className = 'task-badge badge-running';
         const actIdx = group.runningSibling.batch_index || 1;
@@ -922,8 +1340,8 @@ function updateQiGpuDisplay() {
         stateBadge.textContent = statusLabel(job.status);
       }
       badges.append(stateBadge);
-      header.append(metaEl, badges);
-      row.append(header);
+      header.append(badges);
+      row.append(header, metaEl);
 
       // Prompt Box
       const promptText = (creation.prompt || '').trim();
@@ -1001,19 +1419,7 @@ function updateQiGpuDisplay() {
 
         setTimeout(() => { pre.scrollTop = pre.scrollHeight; }, 0);
         row.append(liveMonitor);
-      } else if (group.isQueued) {
-        const qBox = document.createElement('div');
-        qBox.className = 'task-card-queued-box';
-        const qText = document.createElement('div');
-        qText.className = 'task-card-queued-text';
-        qText.innerHTML = `<span class="queued-icon">⏳</span><span>前序任务正在执行，已加入队列，轮到时将自动开始${group.isBatch ? `（共 ${group.total} 张图片）` : ''}。</span>`;
-        const qCancelBtn = document.createElement('button');
-        qCancelBtn.type = 'button';
-        qCancelBtn.className = 'task-action-btn btn-cancel task-queued-cancel';
-        qCancelBtn.textContent = '取消排队';
-        qCancelBtn.onclick = () => cancelTask(group.primaryJob.id);
-        qBox.append(qText, qCancelBtn);
-        row.append(qBox);
+
       }
 
       // Variant Tabs (if batch > 1)
@@ -1080,37 +1486,41 @@ function updateQiGpuDisplay() {
 
           const overlay = document.createElement('div');
           overlay.className = 'qi-img-overlay';
-          overlay.style.cursor = 'pointer';
-          overlay.onclick = (e) => {
-            if (e.target.closest('.qi-overlay-btn')) return;
-            openLightboxViewer(galleryData, 0);
-          };
-          stage.style.cursor = 'pointer';
-          stage.onclick = (e) => {
-            if (e.target.closest('.qi-overlay-btn')) return;
-            openLightboxViewer(galleryData, 0);
-          };
 
-          const viewBtn = document.createElement('button');
-          viewBtn.type = 'button';
-          viewBtn.className = 'qi-overlay-btn';
-          viewBtn.innerHTML = '🔍 放大查看';
-          viewBtn.onclick = () => openLightboxViewer(galleryData, 0);
+          const actions = document.createElement('div');
+          actions.className = 'qi-overlay-actions';
+          actions.onclick = (e) => e.stopPropagation();
 
           const dlBtn = document.createElement('button');
           dlBtn.type = 'button';
-          dlBtn.className = 'qi-overlay-btn';
-          dlBtn.innerHTML = '💾 下载原图';
-          dlBtn.onclick = () => saveImageToLocation('/image/' + sibling.file, sibling.file, dlBtn);
+          dlBtn.className = 'qi-overlay-btn qi-overlay-icon-btn';
+          dlBtn.title = '下载原图';
+          dlBtn.setAttribute('aria-label', '下载原图');
+          dlBtn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
+          dlBtn.onclick = (e) => {
+            e.stopPropagation();
+            saveImageToLocation('/image/' + sibling.file, sibling.file, dlBtn);
+          };
 
           const refBtn = document.createElement('button');
           refBtn.type = 'button';
-          refBtn.className = 'qi-overlay-btn';
-          refBtn.innerHTML = '🎨 设为参考图';
-          refBtn.onclick = () => setAsReference(sibling, refBtn);
+          refBtn.className = 'qi-overlay-btn qi-overlay-icon-btn';
+          refBtn.title = '设为参考图';
+          refBtn.setAttribute('aria-label', '设为参考图');
+          refBtn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>';
+          refBtn.onclick = (e) => {
+            e.stopPropagation();
+            setAsReference(sibling, refBtn);
+          };
 
-          overlay.append(viewBtn, dlBtn, refBtn);
+          actions.append(dlBtn, refBtn);
+          overlay.append(actions);
           stage.append(img, overlay);
+          stage.style.cursor = 'zoom-in';
+          stage.onclick = (e) => {
+            if (e.target.closest('.qi-overlay-btn') || e.target.closest('.qi-overlay-actions')) return;
+            openLightboxViewer(galleryData, 0);
+          };
           mediaWrap.append(stage);
         } else if (sibling.status === 'running') {
           const placeholder = document.createElement('div');
@@ -1158,35 +1568,17 @@ function updateQiGpuDisplay() {
 
             const overlay = document.createElement('div');
             overlay.className = 'qi-img-overlay';
-            overlay.style.cursor = 'pointer';
-            overlay.onclick = (e) => {
-              if (e.target.closest('.qi-overlay-btn')) return;
-              const galleryIdx = galleryData.findIndex(g => g.filename === sib.file);
-              openLightboxViewer(galleryData, galleryIdx >= 0 ? galleryIdx : 0);
-            };
-            item.style.cursor = 'pointer';
-            item.onclick = (e) => {
-              if (e.target.closest('.qi-overlay-btn')) return;
-              const galleryIdx = galleryData.findIndex(g => g.filename === sib.file);
-              openLightboxViewer(galleryData, galleryIdx >= 0 ? galleryIdx : 0);
-            };
 
-            const viewBtn = document.createElement('button');
-            viewBtn.type = 'button';
-            viewBtn.className = 'qi-overlay-btn';
-            viewBtn.innerHTML = '🔍';
-            viewBtn.title = '放大预览';
-            viewBtn.onclick = e => {
-              e.stopPropagation();
-              const galleryIdx = galleryData.findIndex(g => g.filename === sib.file);
-              openLightboxViewer(galleryData, galleryIdx >= 0 ? galleryIdx : 0);
-            };
+            const actions = document.createElement('div');
+            actions.className = 'qi-overlay-actions';
+            actions.onclick = (e) => e.stopPropagation();
 
             const dlBtn = document.createElement('button');
             dlBtn.type = 'button';
-            dlBtn.className = 'qi-overlay-btn';
-            dlBtn.innerHTML = '💾';
-            dlBtn.title = '下载';
+            dlBtn.className = 'qi-overlay-btn qi-overlay-icon-btn';
+            dlBtn.title = '下载图片';
+            dlBtn.setAttribute('aria-label', '下载图片');
+            dlBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
             dlBtn.onclick = e => {
               e.stopPropagation();
               saveImageToLocation('/image/' + sib.file, sib.file, dlBtn);
@@ -1194,16 +1586,24 @@ function updateQiGpuDisplay() {
 
             const refBtn = document.createElement('button');
             refBtn.type = 'button';
-            refBtn.className = 'qi-overlay-btn';
-            refBtn.innerHTML = '🎨';
-            refBtn.title = '设为图生图参考图';
+            refBtn.className = 'qi-overlay-btn qi-overlay-icon-btn';
+            refBtn.title = '设为参考图';
+            refBtn.setAttribute('aria-label', '设为参考图');
+            refBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>';
             refBtn.onclick = e => {
               e.stopPropagation();
               setAsReference(sib, refBtn);
             };
 
-            overlay.append(viewBtn, dlBtn, refBtn);
+            actions.append(dlBtn, refBtn);
+            overlay.append(actions);
             item.append(badge, img, overlay);
+            item.style.cursor = 'zoom-in';
+            item.onclick = (e) => {
+              if (e.target.closest('.qi-overlay-btn') || e.target.closest('.qi-overlay-actions')) return;
+              const galleryIdx = galleryData.findIndex(g => g.filename === sib.file);
+              openLightboxViewer(galleryData, galleryIdx >= 0 ? galleryIdx : 0);
+            };
             grid.append(item);
           } else if (sib.status === 'running') {
             const pl = document.createElement('div');
@@ -1240,7 +1640,9 @@ function updateQiGpuDisplay() {
         const cancelBtn = document.createElement('button');
         cancelBtn.type = 'button';
         cancelBtn.className = 'task-action-btn btn-cancel';
-        cancelBtn.textContent = group.isQueued ? '取消排队' : (group.isBatch ? '取消批次任务并释放显卡' : '取消任务并释放显卡');
+        cancelBtn.disabled = group.siblings.some(s => s.status === 'cancelling');
+        cancelBtn.textContent = cancelBtn.disabled ? '正在取消…' : '取消任务';
+        cancelBtn.title = group.isBatch ? '取消本批次尚未完成的任务，已完成的作品保留' : '取消此任务，保留显卡环境';
         cancelBtn.onclick = () => cancelTask(group.primaryJob.id);
         actionsLeft.append(cancelBtn);
       }
@@ -1308,7 +1710,7 @@ function updateQiGpuDisplay() {
       }
 
       actions.append(actionsLeft, actionsRight);
-      row.append(actions);
+      header.append(actions);
 
       const currentVariant = group.siblings.find(s => s.id === selectedVariantId) || group.primaryJob;
       updateCardActionButtons(row, group, currentVariant);
@@ -1400,6 +1802,7 @@ function updateQiGpuDisplay() {
       case 'error': return '错误';
       case 'interrupted': return '已中断';
       case 'cancelling': return '正在取消';
+      case 'cancelled': return '已取消';
       default: return status || '就绪';
     }
   }
@@ -1444,6 +1847,10 @@ function updateQiGpuDisplay() {
   function initialize() {
     $('qiTextTab')?.addEventListener('click', () => setMode('text'));
     $('qiImageTab')?.addEventListener('click', () => setMode('image'));
+    $('qiEditType')?.addEventListener('change', e => {
+      const isRepaint = e.target.value === 'repaint';
+      $('qiDenoiseGroup')?.classList.toggle('hidden', !isRepaint);
+    });
 
     document.querySelectorAll('input[name="qiAspectRatio"]').forEach(r => {
       r.addEventListener('change', updateRatioNote);
@@ -1451,6 +1858,14 @@ function updateQiGpuDisplay() {
 
     $('qiDenoise')?.addEventListener('input', e => {
       if ($('qiDenoiseVal')) $('qiDenoiseVal').textContent = parseFloat(e.target.value).toFixed(2);
+    });
+
+    // Help toggle
+    $('qiReferenceHelpToggle')?.addEventListener('click', () => {
+      const btn = $('qiReferenceHelpToggle');
+      const open = btn.getAttribute('aria-expanded') !== 'true';
+      btn.setAttribute('aria-expanded', String(open));
+      $('qiReferenceHelp')?.classList.toggle('hidden', !open);
     });
 
     // Reference file handling
@@ -1462,14 +1877,14 @@ function updateQiGpuDisplay() {
         fileInput.click();
       };
       fileInput.onchange = () => {
-        if (fileInput.files?.[0]) handleReferenceFile(fileInput.files[0]);
+        if (fileInput.files) handleReferenceFiles(fileInput.files);
       };
       dropZone.ondragover = e => { e.preventDefault(); dropZone.classList.add('dragging'); };
       dropZone.ondragleave = () => dropZone.classList.remove('dragging');
       dropZone.ondrop = e => {
         e.preventDefault();
         dropZone.classList.remove('dragging');
-        if (e.dataTransfer.files?.[0]) handleReferenceFile(e.dataTransfer.files[0]);
+        if (e.dataTransfer.files) handleReferenceFiles(e.dataTransfer.files);
       };
     }
 
@@ -1480,13 +1895,43 @@ function updateQiGpuDisplay() {
 
     $('qiChooseLibraryImage')?.addEventListener('click', e => {
       e.stopPropagation();
-      pickLibraryImage();
+      pickLibraryImages();
     });
 
-    $('qiRemoveReference')?.addEventListener('click', e => {
-      e.stopPropagation();
-      clearReference();
-    });
+    // Mention Menu & Prompt bindings
+    const promptEl = $('qiPrompt');
+    if (promptEl) {
+      promptEl.addEventListener('input', updateQiMentionMenu);
+      promptEl.addEventListener('click', updateQiMentionMenu);
+      promptEl.addEventListener('scroll', () => {
+        const menu = $('qiMentionMenu');
+        if (menu && !menu.classList.contains('hidden') && menu.style.display !== 'none') {
+          const ctx = getQiMentionContext();
+          if (ctx) positionQiMentionMenu(ctx.start);
+        }
+      });
+      promptEl.addEventListener('blur', () => setTimeout(closeQiMentionMenu, 250));
+      promptEl.addEventListener('keydown', e => {
+        const menu = $('qiMentionMenu');
+        if (!menu || menu.classList.contains('hidden') || menu.style.display === 'none') return;
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          qiActiveMentionIndex = (qiActiveMentionIndex + 1) % qiMentionMatches.length;
+          updateQiMentionMenu();
+        } else if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          qiActiveMentionIndex = (qiActiveMentionIndex - 1 + qiMentionMatches.length) % qiMentionMatches.length;
+          updateQiMentionMenu();
+        } else if (e.key === 'Enter' || e.key === 'Tab') {
+          if (qiMentionMatches[qiActiveMentionIndex]) {
+            e.preventDefault();
+            insertMention(qiMentionMatches[qiActiveMentionIndex].name);
+          }
+        } else if (e.key === 'Escape') {
+          closeQiMentionMenu();
+        }
+      });
+    }
 
     $('qiGenerateForm')?.addEventListener('submit', submitJob);
 
@@ -1528,8 +1973,17 @@ function updateQiGpuDisplay() {
       }
     });
 
+    window.addEventListener('resize', () => {
+      const menu = $('qiMentionMenu');
+      if (menu && !menu.classList.contains('hidden') && menu.style.display !== 'none') {
+        const ctx = getQiMentionContext();
+        if (ctx) positionQiMentionMenu(ctx.start);
+      }
+    });
+
     setupStepper();
     updateRatioNote();
+    setMode('text');
     setInterval(updateRunMonitor, 1000);
   }
 
@@ -1539,16 +1993,20 @@ function updateQiGpuDisplay() {
       const resp = await fetch(asset.url, { headers: { 'X-LStudio-Key': getApiKey() } });
       if (resp.ok) url = URL.createObjectURL(await resp.blob());
     } catch (_) {}
-    if (referenceImage?.url && referenceImage.url.startsWith('blob:')) {
-      URL.revokeObjectURL(referenceImage.url);
-    }
-    referenceImage = {
+    const newRef = {
+      slot: Math.min(references.length + 1, 3),
       image_id: asset.id,
       name: asset.name,
-      url: url || asset.url
+      url: url || asset.url,
+      pending: false
     };
+    if (references.length >= 3) {
+      references[0] = newRef;
+    } else {
+      references.push(newRef);
+    }
     setMode('image');
-    renderReferencePreview();
+    renderReferences();
     window.Workspace?.show?.('qwen_image');
   }
 

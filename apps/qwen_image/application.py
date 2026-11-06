@@ -45,6 +45,11 @@ class QwenImageJobConfig(BaseModel):
         'qwen-image-2.1-UC-BF16.gguf',
         'qwen-image-2.1-UC-Q8_0.gguf',
         'qwen-image-2.1-UC-Q5_K_M.gguf',
+        'qwen-image-edit-2511-Q4_K_M.gguf',
+        'qwen-image-edit-2511-Q5_K_M.gguf',
+        'qwen-image-edit-2511-Q8_0.gguf',
+        'qwen_image_edit_2511_fp8mixed.safetensors',
+        'qwen_image_edit_fp8_e4m3fn.safetensors',
     ] = 'qwen-image-2.1-turbo-Q4_K_M.gguf'
     encoder: Literal['int8_convrot', 'bf16'] = 'int8_convrot'
     steps: int = Field(default=8, ge=1, le=60)
@@ -56,6 +61,7 @@ class QwenImageJobConfig(BaseModel):
     gpu: str = 'T4'
     endpoint: str | None = None
     generation_type: Literal['text', 'image'] | None = None
+    edit_type: Literal['instruction', 'repaint'] = 'instruction'
     references: list[ReferenceImage] = Field(default_factory=list, max_length=4)
     denoise: float = Field(default=0.75, ge=0.0, le=1.0)
 
@@ -85,6 +91,8 @@ class QwenImageJobConfig(BaseModel):
         if self.references:
             if len({r.slot for r in self.references}) != len(self.references):
                 raise ValueError('参考图编号不能重复')
+            if self.edit_type == 'instruction' and self.model_file == 'qwen-image-2.1-turbo-Q4_K_M.gguf':
+                self.model_file = 'qwen-image-edit-2511-Q4_K_M.gguf'
         return self
 
 
@@ -94,7 +102,7 @@ class QwenImageApplication:
     spec = ApplicationSpec(
         id='qwen_image_2_1',
         name='Qwen-Image-2.1',
-        description='文生图与图生图 · 社区量化加速版 (abenzerps/Qwen-Image-2.1-Turbo-Quantized)',
+        description='文生图与智能图像编辑 · Qwen-Image-Edit (unsloth/Qwen-Image-Edit-2511-GGUF)',
         output_kind='image',
         providers=('colab',),
         tabs=({'id': 'tool', 'name': '创作'},),
@@ -130,6 +138,8 @@ print('QWEN_IMAGE_IDLE_CHECK ' + json.dumps({'idle': idle}))
     def source(self, base, config):
         app_dir = Path(__file__).resolve().parent
         remote_path = app_dir / 'remote_qwen_image.py'
+        if not remote_path.exists():
+            remote_path = Path(base) / 'apps' / 'qwen_image' / 'remote_qwen_image.py'
         return remote_path.read_text(encoding='utf-8')
 
     def validate_assets(self, config, asset_library):

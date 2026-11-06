@@ -1,12 +1,12 @@
 """Qwen-Image-2.1 ComfyUI orchestration and inference on Colab.
 
-Uses community quantized weights from https://huggingface.co/abenzerps/Qwen-Image-2.1-Turbo-Quantized
-supporting both GGUF diffusion models (via ComfyUI-GGUF) and native safetensors formats.
+Supports both Qwen-Image-2.1 Turbo (Text-to-Image) and Qwen-Image-Edit (Instruction-based Image Editing),
+utilizing community quantized GGUF weights via ComfyUI-GGUF and native safetensors formats.
 """
 import hashlib
 import json
-import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import threading
@@ -14,6 +14,9 @@ import time
 
 ROOT = Path('/content/ComfyUI')
 REPO_ID = 'abenzerps/Qwen-Image-2.1-Turbo-Quantized'
+EDIT_REPO_ID = 'unsloth/Qwen-Image-Edit-2511-GGUF'
+COMFY_ORG_IMAGE_REPO = 'Comfy-Org/Qwen-Image_ComfyUI'
+COMFY_ORG_EDIT_REPO = 'Comfy-Org/Qwen-Image-Edit_ComfyUI'
 GGUF_NODE_REPO = 'https://github.com/leejet/ComfyUI-GGUF.git'
 
 DIFFUSION_MODELS = (
@@ -24,6 +27,19 @@ DIFFUSION_MODELS = (
     'qwen-image-2.1-turbo-Q8_0.gguf',
     'qwen-image-2.1-turbo-Q4_0.gguf',
     'qwen-image-2.1-turbo-Q6_K.gguf',
+    'qwen-image-edit-2511-Q4_K_M.gguf',
+    'qwen-image-edit-2511-Q5_K_M.gguf',
+    'qwen-image-edit-2511-Q8_0.gguf',
+    'qwen_image_edit_2511_fp8mixed.safetensors',
+    'qwen_image_edit_fp8_e4m3fn.safetensors',
+)
+
+EDIT_MODELS = (
+    'qwen-image-edit-2511-Q4_K_M.gguf',
+    'qwen-image-edit-2511-Q5_K_M.gguf',
+    'qwen-image-edit-2511-Q8_0.gguf',
+    'qwen_image_edit_2511_fp8mixed.safetensors',
+    'qwen_image_edit_fp8_e4m3fn.safetensors',
 )
 
 MODEL_ALIASES = {
@@ -36,14 +52,28 @@ MODEL_ALIASES = {
 }
 
 
-def normalize_model_file(name: str | None) -> str:
+def normalize_model_file(name: str | None, is_edit: bool = False) -> str:
     if not name:
-        return 'qwen-image-2.1-turbo-Q4_K_M.gguf'
+        return 'qwen-image-edit-2511-Q4_K_M.gguf' if is_edit else 'qwen-image-2.1-turbo-Q4_K_M.gguf'
     if name in MODEL_ALIASES:
         return MODEL_ALIASES[name]
     if name.startswith('qwen-image-2.1-UC-'):
         return name.replace('qwen-image-2.1-UC-', 'qwen-image-2.1-turbo-')
     return name
+
+
+def is_edit_job(c: dict) -> bool:
+    if not c.get('references'):
+        return False
+    model = str(c.get('model_file', '')).lower()
+    if any(k in model for k in ('edit', '2511', '2509')):
+        return True
+    if c.get('edit_type') == 'instruction':
+        return True
+    if not any(k in model for k in ('turbo', 't2i')):
+        return True
+    return False
+
 
 ENCODER_MODELS = {
     'int8_convrot': 'text_encoders/qwen3vl_8b_int8_convrot.safetensors',
@@ -77,6 +107,20 @@ def event(stage, message, **extra):
 
 
 def files_for(c):
+    if is_edit_job(c):
+        raw_model = c.get('model_file', 'qwen-image-edit-2511-Q4_K_M.gguf')
+        if not raw_model or 'turbo' in raw_model:
+            model = 'qwen-image-edit-2511-Q4_K_M.gguf'
+        else:
+            model = normalize_model_file(raw_model, is_edit=True)
+        if model.startswith('qwen_image_edit_'):
+            model_entry = (COMFY_ORG_EDIT_REPO, 'split_files/diffusion_models/' + model, 'diffusion_models')
+        else:
+            model_entry = (EDIT_REPO_ID, model, 'diffusion_models')
+        encoder_entry = (COMFY_ORG_IMAGE_REPO, 'split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors', 'text_encoders')
+        vae_entry = (COMFY_ORG_IMAGE_REPO, 'split_files/vae/qwen_image_vae.safetensors', 'vae')
+        return [model_entry, encoder_entry, vae_entry]
+
     model = normalize_model_file(c.get('model_file', 'qwen-image-2.1-turbo-Q4_K_M.gguf'))
     encoder_key = c.get('encoder', 'int8_convrot')
     encoder = ENCODER_MODELS.get(encoder_key, ENCODER_MODELS['int8_convrot'])
@@ -87,19 +131,21 @@ def files_for(c):
     ]
 
 
+def normalize_edit_prompt(prompt: str) -> str:
+    if not prompt:
+        return prompt
+    prompt = re.sub(r'(?<![A-Za-z0-9_])@?图片\s*(\d+)', r'Picture \1', prompt)
+    prompt = re.sub(r'(?<![A-Za-z0-9_])@?图\s*(\d+)', r'Picture \1', prompt)
+    prompt = re.sub(r'(?<![A-Za-z0-9_])@?[pP]icture\s*(\d+)', r'Picture \1', prompt)
+    prompt = re.sub(r'(?<![A-Za-z0-9_])@?[iI]mage\s*(\d+)', r'Picture \1', prompt)
+    return prompt
+
 def build_graph(c):
     def node(cls, **inputs):
         return {'class_type': cls, 'inputs': inputs}
 
     aspect_ratio = c.get('aspect_ratio', '1:1')
     width, height = DIMENSIONS.get(aspect_ratio, (1024, 1024))
-    model_file = normalize_model_file(c.get('model_file', 'qwen-image-2.1-turbo-Q4_K_M.gguf'))
-    is_gguf = model_file.endswith('.gguf')
-
-    encoder_key = c.get('encoder', 'int8_convrot')
-    encoder_file = Path(ENCODER_MODELS.get(encoder_key, ENCODER_MODELS['int8_convrot'])).name
-    vae_file = Path(VAE_MODEL).name
-
     prompt = c.get('prompt', '')
     negative_prompt = c.get('negative_prompt', '')
     seed = c.get('seed', 0)
@@ -107,6 +153,84 @@ def build_graph(c):
     cfg = c.get('cfg', 1.0)
     denoise = c.get('denoise', 0.75)
     job_id = c.get('job_id', 'preview')
+    refs = c.get('references', [])
+
+    if is_edit_job(c):
+        raw_model = c.get('model_file', 'qwen-image-edit-2511-Q4_K_M.gguf')
+        if not raw_model or 'turbo' in raw_model:
+            model_file = 'qwen-image-edit-2511-Q4_K_M.gguf'
+        else:
+            model_file = normalize_model_file(raw_model, is_edit=True)
+        is_gguf = model_file.endswith('.gguf')
+
+        encoder_file = 'qwen_2.5_vl_7b_fp8_scaled.safetensors'
+        vae_file = 'qwen_image_vae.safetensors'
+
+        edit_steps = steps if steps > 8 else 20
+        edit_cfg = cfg if cfg > 1.01 else 4.0
+        sorted_refs = sorted(refs, key=lambda r: r.get('slot', 1)) if refs else []
+        ref_id = sorted_refs[0]['image_id'] if sorted_refs else 'input.png'
+
+        g = {}
+        if is_gguf:
+            g['1'] = node('UnetLoaderGGUF', unet_name=model_file)
+        else:
+            g['1'] = node('UNETLoader', unet_name=model_file, weight_dtype='default')
+
+        g['2'] = node('CLIPLoader', clip_name=encoder_file, type='qwen_image', device='default')
+        g['3'] = node('VAELoader', vae_name=vae_file)
+
+        g['20'] = node('LoadImage', image=ref_id)
+        g['21'] = node('ImageScale', image=['20', 0], upscale_method='bicubic', width=width, height=height, crop='center')
+
+        norm_pos_prompt = normalize_edit_prompt(prompt)
+        norm_neg_prompt = normalize_edit_prompt(negative_prompt)
+
+        inputs_pos = {'clip': ['2', 0], 'prompt': norm_pos_prompt, 'image1': ['21', 0], 'vae': ['3', 0]}
+        inputs_neg = {'clip': ['2', 0], 'prompt': norm_neg_prompt, 'image1': ['21', 0], 'vae': ['3', 0]}
+
+        if len(sorted_refs) > 1:
+            g['22'] = node('LoadImage', image=sorted_refs[1]['image_id'])
+            g['23'] = node('ImageScale', image=['22', 0], upscale_method='bicubic', width=width, height=height, crop='center')
+            inputs_pos['image2'] = ['23', 0]
+            inputs_neg['image2'] = ['23', 0]
+        if len(sorted_refs) > 2:
+            g['24'] = node('LoadImage', image=sorted_refs[2]['image_id'])
+            g['25'] = node('ImageScale', image=['24', 0], upscale_method='bicubic', width=width, height=height, crop='center')
+            inputs_pos['image3'] = ['25', 0]
+            inputs_neg['image3'] = ['25', 0]
+
+        g['4'] = node('TextEncodeQwenImageEditPlus', **inputs_pos)
+        g['5'] = node('TextEncodeQwenImageEditPlus', **inputs_neg)
+        g['40'] = node('FluxKontextMultiReferenceLatentMethod', conditioning=['4', 0], reference_latents_method='index_timestep_zero')
+        g['41'] = node('FluxKontextMultiReferenceLatentMethod', conditioning=['5', 0], reference_latents_method='index_timestep_zero')
+        g['6'] = node('VAEEncode', pixels=['21', 0], vae=['3', 0])
+
+        g['30'] = node('ModelSamplingAuraFlow', model=['1', 0], shift=3.0)
+        g['31'] = node('CFGNorm', model=['30', 0], strength=1.0)
+
+        g['7'] = node('KSampler',
+                      model=['31', 0],
+                      positive=['40', 0],
+                      negative=['41', 0],
+                      latent_image=['6', 0],
+                      seed=seed,
+                      steps=edit_steps,
+                      cfg=edit_cfg,
+                      sampler_name='euler',
+                      scheduler='simple',
+                      denoise=1.0)
+
+        g['8'] = node('VAEDecode', samples=['7', 0], vae=['3', 0])
+        g['9'] = node('SaveImage', images=['8', 0], filename_prefix='QwenImage/local_' + job_id)
+        return g
+
+    model_file = normalize_model_file(c.get('model_file', 'qwen-image-2.1-turbo-Q4_K_M.gguf'))
+    is_gguf = model_file.endswith('.gguf')
+
+    encoder_key = c.get('encoder', 'int8_convrot')
+    encoder_file = Path(ENCODER_MODELS.get(encoder_key, ENCODER_MODELS['int8_convrot'])).name
+    vae_file = Path(VAE_MODEL).name
 
     g = {}
     if is_gguf:
@@ -119,7 +243,6 @@ def build_graph(c):
     g['4'] = node('CLIPTextEncode', clip=['2', 0], text=prompt)
     g['5'] = node('CLIPTextEncode', clip=['2', 0], text=negative_prompt)
 
-    refs = c.get('references', [])
     if refs:
         g['20'] = node('LoadImage', image=refs[0]['image_id'])
         g['21'] = node('ImageScale', image=['20', 0], upscale_method='bicubic', width=width, height=height, crop='center')
@@ -187,7 +310,6 @@ def prepare_model(repo, filename, category, downloader, cache=None, loads=None):
     event('prepare', '从 Hugging Face 获取模型文件：%s (%s)' % (Path(filename).name, repo))
     started = time.monotonic()
     downloader(repo_id=repo, filename=filename, local_dir=str(target.parent))
-    # If downloaded file has directory components, move to expected flat location
     nested = target.parent / filename
     if nested.exists() and nested != target:
         nested.replace(target)
@@ -217,7 +339,6 @@ def prepare():
         event('prepare', '克隆 ComfyUI 核心代码…')
         subprocess.run(['git', 'clone', '--depth', '1', 'https://github.com/Comfy-Org/ComfyUI.git', str(ROOT)], check=True)
 
-    # ComfyUI-GGUF custom node
     gguf_node_dir = ROOT / 'custom_nodes' / 'ComfyUI-GGUF'
     if not gguf_node_dir.exists():
         event('prepare', '安装 ComfyUI-GGUF 扩展以支持 Qwen-Image GGUF 量化…')
@@ -228,7 +349,6 @@ def prepare():
         subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', '-r', str(ROOT / 'requirements.txt'), 'gguf', 'huggingface_hub', 'pillow'], check=True)
         ready_marker.touch()
 
-    # Model preparation
     from huggingface_hub import hf_hub_download
     for repo, filename, category in files_for(c):
         prepare_model(repo, filename, category, hf_hub_download, MODEL_CACHE)
@@ -243,7 +363,7 @@ def prepare():
 
     if not serving:
         start_comfy()
-    event('prepare', 'Qwen-Image-2.1 模型与服务已就绪')
+    event('prepare', 'Qwen-Image 模型与服务已就绪')
 
 
 def start_comfy():
@@ -276,7 +396,22 @@ def generate(c):
     graph = build_graph(c)
     event('generate', '向 ComfyUI 提交生图工作流…')
     res = requests.post(base + '/prompt', json={'prompt': graph}, timeout=30)
-    res.raise_for_status()
+    if not res.ok:
+        err_msg = f'ComfyUI 拒绝任务请求 ({res.status_code})'
+        try:
+            err_json = res.json()
+            node_errors = err_json.get('node_errors', {})
+            details = []
+            for nid, nerr in node_errors.items():
+                for e in nerr.get('errors', []):
+                    details.append(f"Node {nid} ({nerr.get('class_type', '')}): {e.get('message', '')}")
+            if details:
+                err_msg += ': ' + '; '.join(details)
+            else:
+                err_msg += ': ' + json.dumps(err_json, ensure_ascii=False)
+        except Exception:
+            err_msg += ': ' + res.text
+        raise RuntimeError(err_msg)
     prompt_id = res.json().get('prompt_id')
     event('generate', '任务已进入 ComfyUI 队列，正在生成…', prompt_id=prompt_id)
 
@@ -290,7 +425,6 @@ def generate(c):
             continue
         if prompt_id in history:
             outputs = history[prompt_id].get('outputs', {})
-            # Look for node 9 (SaveImage) output
             save_node = outputs.get('9', {})
             images = save_node.get('images', [])
             if images:
@@ -300,7 +434,6 @@ def generate(c):
                 output_path = ROOT / 'output' / subfolder / filename
                 if output_path.exists():
                     return result_for(output_path)
-            # Check for error outputs
             status = history[prompt_id].get('status', {})
             if status.get('status_str') == 'error':
                 messages = status.get('messages', [])
@@ -319,7 +452,7 @@ def run(c):
     def heartbeat():
         started = time.monotonic()
         while not stop.wait(15):
-            event('heartbeat', 'Qwen-Image-2.1 正在生成中，已用时 %d 秒' % (time.monotonic() - started))
+            event('heartbeat', 'Qwen-Image 正在处理中，已用时 %d 秒' % (time.monotonic() - started))
 
     threading.Thread(target=heartbeat, daemon=True).start()
     try:
