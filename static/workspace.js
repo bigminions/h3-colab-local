@@ -19,10 +19,15 @@
     if (savedApp === 'tool' || savedApp === 'qwen_image') activeApp = savedApp;
   } catch (_) {}
 
-  let savedKind = '';
-  try { savedKind = localStorage.getItem('lstudio-library-kind') || ''; } catch (_) {}
+  const libraryTags = {kind: new Set(), source: new Set(), app: new Set()};
+  try {
+    const saved = JSON.parse(localStorage.getItem('lstudio-library-kind') || '[]');
+    if (Array.isArray(saved)) for (const item of saved) if (['images', 'videos', 'audios'].includes(item)) libraryTags.kind.add(item);
+  } catch (_) {}
 
-  let page = 'tool', h3Page = 'tool', kind = savedKind, scopes = [], assets = [], loading = false, importing = false;
+  let page = 'tool', h3Page = 'tool', scopes = [], assets = [], loading = false, importing = false;
+  const librarySelected = new Set();
+  let isManageMode = false;
   let libraryRequest = 0, librarySignature = '', previewRequest = 0, previewURL = null;
   const thumbnails = new Map();
   const panels = {tool:'toolPage', characters:'characterPage', qwen_image:'qwenImagePage', library:'libraryPage', compute:'computePage', connections:'connectionPage'};
@@ -384,39 +389,71 @@
     $('computePageTab').classList.toggle('stale', !!failure || !!currentData?.stale);
   }
 
-  function scopeName(asset) {
-    const scope = scopes.find(item => item.app_id === asset.app_id && item.purpose === asset.purpose);
-    return scope ? `${scope.app_name} / ${scope.purpose_name}` : `${asset.app_id} / ${asset.purpose}`;
-  }
+  function isGenerated(asset) { return asset.purpose === 'outputs'; }
 
-  function importDestination() {
-    const app = $('libraryAppFilter').value, purpose = $('libraryPurposeFilter').value;
-    return scopes.find(scope => (!app || scope.app_id === app) && (!purpose || scope.purpose === purpose) && (!kind || scope.kinds.includes(kind)));
+  function appName(asset) {
+    const scope = scopes.find(item => item.app_id === asset.app_id);
+    return scope ? scope.app_name : asset.app_id;
   }
 
   function updateImportTarget() {
-    const scope = importDestination();
-    $('libraryImportTarget').textContent = scope ? `导入位置：${scope.app_name} / ${scope.purpose_name}` : '当前筛选下没有可导入的位置';
-    $('libraryFiles').disabled = importing || !scope;
     const label = document.querySelector('label[for="libraryFiles"]');
-    label.setAttribute('aria-disabled',String(importing || !scope));
-    $('libraryFiles').accept = scope ? scope.kinds.map(value => ({images:'.png,.jpg,.jpeg,.webp',videos:'.mp4',audios:'.wav,.mp3,.m4a,.ogg,.flac,.aac'}[value])).join(',') : '';
+    $('libraryFiles').disabled = importing;
+    if (label) {
+      label.setAttribute('aria-disabled', String(importing));
+      label.classList.toggle('disabled', importing);
+    }
+  }
+
+  function toggleLibraryTag(group, value) {
+    const set = libraryTags[group];
+    if (set.has(value)) set.delete(value); else set.add(value);
+    if (group === 'kind') {
+      try { localStorage.setItem('lstudio-library-kind', JSON.stringify([...set])); } catch (_) {}
+    }
+    renderLibrary();
   }
 
   function updateScopeFilters() {
-    let savedApp = '';
-    try { savedApp = localStorage.getItem('lstudio-library-app') || ''; } catch (_) {}
-    const app = $('libraryAppFilter').value || savedApp, purpose = $('libraryPurposeFilter').value;
-    const apps = new Map(scopes.map(scope => [scope.app_id,scope.app_name]));
-    for (const asset of assets) if (!apps.has(asset.app_id)) apps.set(asset.app_id,asset.app_id);
-    $('libraryAppFilter').replaceChildren(new Option('全部应用',''));
-    for (const [id,name] of apps) $('libraryAppFilter').add(new Option(name,id));
-    if (apps.has(app)) $('libraryAppFilter').value = app;
-    const purposes = new Map(scopes.filter(scope => !app || scope.app_id === app).map(scope => [scope.purpose,scope.purpose_name]));
-    $('libraryPurposeFilter').replaceChildren(new Option('全部用途',''));
-    for (const [id,name] of purposes) $('libraryPurposeFilter').add(new Option(name,id));
-    if (purposes.has(purpose)) $('libraryPurposeFilter').value = purpose;
-    updateImportTarget();
+    const apps = new Map(scopes.filter(scope => scope.purpose === 'outputs').map(scope => [scope.app_id, scope.app_name]));
+    for (const asset of assets) if (isGenerated(asset) && !apps.has(asset.app_id)) apps.set(asset.app_id, asset.app_id);
+    for (const id of [...libraryTags.app]) if (!apps.has(id)) libraryTags.app.delete(id);
+    const groups = [
+      ['kind', Object.entries(kinds)],
+      ['source', [['imported', '导入'], ['generated', '生成']]],
+      ['app', [...apps].map(([id, name]) => [id, name + '生成'])]
+    ].filter(([, items]) => items.length);
+    const box = $('libraryTags');
+    box.replaceChildren();
+    groups.forEach(([group, items], index) => {
+      if (index) { const sep = document.createElement('span'); sep.className = 'library-tag-sep'; sep.setAttribute('aria-hidden', 'true'); box.append(sep); }
+      for (const [value, label] of items) {
+        const tag = document.createElement('button');
+        tag.type = 'button'; tag.className = 'library-tag'; tag.textContent = label;
+        tag.dataset.group = group; tag.dataset.value = value;
+        tag.onclick = () => toggleLibraryTag(group, value);
+        box.append(tag);
+      }
+    });
+    syncLibraryTags();
+  }
+
+  function syncLibraryTags() {
+    for (const tag of document.querySelectorAll('#libraryTags .library-tag')) {
+      const on = libraryTags[tag.dataset.group].has(tag.dataset.value);
+      tag.classList.toggle('active', on);
+      tag.setAttribute('aria-pressed', String(on));
+    }
+    const any = Object.values(libraryTags).some(set => set.size);
+    $('libraryTagClear')?.classList.toggle('hidden', !any);
+  }
+
+  function matchesTags(asset) {
+    const {kind, source, app} = libraryTags;
+    if (kind.size && !kind.has(asset.kind)) return false;
+    if (source.size && !source.has(isGenerated(asset) ? 'generated' : 'imported')) return false;
+    if (app.size && !(isGenerated(asset) && app.has(asset.app_id))) return false;
+    return true;
   }
 
   function libraryError(message) {
@@ -444,27 +481,163 @@
     thumbnails.get(asset.id).then(url => { if (img.isConnected) img.src = url; }, () => { img.alt = '图片读取失败'; });
   }
 
+
+  function setLibraryManageMode(enabled) {
+    isManageMode = Boolean(enabled);
+    if (!isManageMode) {
+      librarySelected.clear();
+    }
+    const btn = $('libraryManageToggle');
+    if (btn) {
+      btn.textContent = isManageMode ? '退出管理' : '批量管理';
+      btn.classList.toggle('active', isManageMode);
+    }
+    const grid = $('libraryGrid');
+    if (grid) {
+      grid.classList.toggle('manage-mode', isManageMode);
+    }
+    updateLibraryBatchBar();
+    renderLibrary();
+  }
+
+  function toggleCardSelection(assetId, card) {
+    if (librarySelected.has(assetId)) {
+      librarySelected.delete(assetId);
+      card.classList.remove('selected');
+      const chk = card.querySelector('.library-asset-check');
+      if (chk) chk.textContent = '';
+    } else {
+      librarySelected.add(assetId);
+      card.classList.add('selected');
+      const chk = card.querySelector('.library-asset-check');
+      if (chk) chk.textContent = '✓';
+    }
+    updateLibraryBatchBar();
+  }
+
+  function updateLibraryBatchBar() {
+    const bar = $('libraryBatchBar');
+    if (bar) bar.classList.toggle('hidden', !isManageMode);
+    const count = librarySelected.size;
+    const countEl = $('libraryBatchCount');
+    if (countEl) countEl.textContent = `已选 ${count} 项`;
+    const delBtn = $('libraryBatchDelete');
+    if (delBtn) delBtn.disabled = count === 0;
+    const selectAll = $('librarySelectAll');
+    if (selectAll) {
+      const visible = document.querySelectorAll('#libraryGrid .library-asset');
+      if (!visible.length) {
+        selectAll.checked = false;
+        selectAll.indeterminate = false;
+      } else {
+        const allChecked = [...visible].every(card => librarySelected.has(card.dataset.assetId));
+        const someChecked = [...visible].some(card => librarySelected.has(card.dataset.assetId));
+        selectAll.checked = allChecked;
+        selectAll.indeterminate = someChecked && !allChecked;
+      }
+    }
+  }
+
+  function expandWithDuplicates(ids) {
+    const all = new Set();
+    for (const id of ids) {
+      all.add(id);
+      const asset = assets.find(item => item.id === id);
+      for (const twin of asset?.duplicates || []) all.add(twin);
+    }
+    return Array.from(all);
+  }
+
+  async function deleteSingleAsset(assetId) {
+    libraryError('');
+    try {
+      const res = await api('assets/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: expandWithDuplicates([assetId]) })
+      });
+      for (const id of res.deleted || []) librarySelected.delete(id);
+      await loadLibrary();
+      if (res.errors?.length) libraryError(res.errors.map(item => item.error).join('；'));
+    } catch (err) {
+      libraryError('删除失败：' + err.message);
+    }
+  }
+
+  async function deleteBatchAssets() {
+    if (!librarySelected.size) return;
+    if (!confirm(`确定删除选中的 ${librarySelected.size} 项素材及其重复副本吗？本机文件将被删除。`)) return;
+    libraryError('');
+    $('libraryFeedback').textContent = '正在删除素材…';
+    try {
+      const res = await api('assets/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: expandWithDuplicates(librarySelected) })
+      });
+      for (const id of res.deleted || []) librarySelected.delete(id);
+      if (!res.errors?.length) setLibraryManageMode(false);
+      await loadLibrary();
+      if (res.errors?.length) {
+        libraryError(`已删除 ${res.count || 0} 项，${res.errors.length} 项未删除：` + res.errors.map(item => item.error).join('；'));
+        return;
+      }
+      $('libraryFeedback').textContent = `成功删除 ${res.count || 0} 项素材。`;
+      setTimeout(() => {
+        if ($('libraryFeedback')?.textContent.startsWith('成功删除')) {
+          renderLibrary();
+        }
+      }, 3000);
+    } catch (err) {
+      libraryError('批量删除失败：' + err.message);
+    }
+  }
+
   function renderLibrary() {
     $('libraryGrid').querySelectorAll('video, audio').forEach(media => media.pause());
     $('libraryGrid').replaceChildren();
+    $('libraryGrid').classList.toggle('manage-mode', isManageMode);
     const search = $('librarySearch').value.trim().toLocaleLowerCase();
-    const app = $('libraryAppFilter').value, purpose = $('libraryPurposeFilter').value;
-    const filtered = assets.filter(asset => (!kind || asset.kind === kind) && (!app || asset.app_id === app) && (!purpose || asset.purpose === purpose) && asset.name.toLocaleLowerCase().includes(search));
-    for (const button of document.querySelectorAll('[data-kind]')) button.setAttribute('aria-pressed', String(button.dataset.kind === kind));
-    $('libraryFeedback').textContent = importing ? '正在导入素材…' : `${filtered.length} 项素材${kind ? ' · ' + kinds[kind] : ''}`;
+    const filtered = assets.filter(asset => matchesTags(asset) && asset.name.toLocaleLowerCase().includes(search));
+    syncLibraryTags();
+    $('libraryFeedback').textContent = importing ? '正在导入素材…' : `${filtered.length} 项素材`;
     updateImportTarget();
     if (!filtered.length) {
       const empty = document.createElement('div'); empty.className = 'library-empty';
-      const title = document.createElement('h3'); title.textContent = search ? '没有找到匹配的素材' : '素材会在这里汇集';
-      const hint = document.createElement('p'); hint.textContent = search ? '试试其他名称，或切换文件夹。' : '导入图片、视频或音频；H3 生成的视频也会自动出现在这里。';
-      empty.append(title,hint); $('libraryGrid').append(empty);
+      const icon = document.createElement('div'); icon.className = 'library-empty-icon';
+      icon.innerHTML = '<svg width="38" height="38" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>';
+      const title = document.createElement('h3'); title.textContent = search ? '没有找到匹配的素材' : '素材库暂无内容';
+      const hint = document.createElement('p'); hint.textContent = search ? '请尝试更换关键词，或切换上方应用与用途筛选。' : '导入图片、音频或视频；H3 及 Qwen-Image 生成的素材也会自动汇集在此。';
+      empty.append(icon, title, hint); $('libraryGrid').append(empty);
     }
     for (const asset of filtered) {
-      const card = document.createElement('article'); card.className = 'library-asset';
-      const preview = document.createElement('button'); preview.type = 'button'; preview.className = 'library-preview'; preview.setAttribute('aria-label','预览 ' + asset.name);
+      const isSelected = librarySelected.has(asset.id);
+      const card = document.createElement('article'); card.className = 'library-asset' + (isSelected ? ' selected' : '');
+      card.dataset.assetId = asset.id;
+      const preview = document.createElement('button'); preview.type = 'button'; preview.className = 'library-preview'; preview.setAttribute('aria-label', (isManageMode ? '选择 ' : '预览 ') + asset.name);
+
+      if (isManageMode) {
+        const check = document.createElement('span');
+        check.className = 'library-asset-check';
+        check.textContent = isSelected ? '✓' : '';
+        preview.append(check);
+
+        card.onclick = (e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          toggleCardSelection(asset.id, card);
+        };
+        preview.onclick = (e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          toggleCardSelection(asset.id, card);
+        };
+      } else {
+        preview.onclick = () => openPreview(asset);
+      }
+
       if (asset.kind === 'images') {
         const img = document.createElement('img'); img.alt = asset.name; img.loading = 'lazy'; preview.append(img);
-        // Start fetching only once the card has been inserted.
         queueMicrotask(() => thumbnail(asset,img));
       } else {
         const icon = document.createElement('span'); icon.className = 'library-media-icon'; icon.textContent = asset.kind === 'videos' ? '▷' : '♫'; preview.append(icon);
@@ -473,24 +646,36 @@
         }
       }
       const badge = document.createElement('span'); badge.className = 'library-kind'; badge.textContent = kinds[asset.kind]; preview.append(badge);
-      preview.onclick = () => openPreview(asset);
+
       const copy = document.createElement('div'); copy.className = 'library-asset-copy';
       const title = document.createElement('h3'); title.textContent = asset.name; title.title = asset.name;
-      const location = document.createElement('p'); location.className = 'library-scope'; location.textContent = scopeName(asset);
+      const location = document.createElement('p'); location.className = 'library-scope'; location.textContent = isGenerated(asset) ? '生成 · ' + appName(asset) : '导入';
       const meta = document.createElement('p'); meta.textContent = `${sizeLabel(asset.size)} · ${asset.local ? '本机素材' : asset.recoverable ? 'Drive 副本' : '本机文件缺失'}`;
       const actions = document.createElement('div'); actions.className = 'library-asset-actions';
-      const view = document.createElement('button'); view.type = 'button'; view.textContent = '预览'; view.onclick = () => openPreview(asset); actions.append(view);
+      const view = document.createElement('button'); view.type = 'button'; view.textContent = '预览'; view.onclick = (e) => { e.stopPropagation(); openPreview(asset); }; actions.append(view);
       if (asset.kind === 'images') {
         if (activeApp === 'qwen_image') {
-          const useQi = document.createElement('button'); useQi.type = 'button'; useQi.textContent = '用于 Qwen-Image'; useQi.onclick = () => useImageForQi(asset); actions.append(useQi);
-          const use = document.createElement('button'); use.type = 'button'; use.textContent = '用于 H3'; use.onclick = () => useImage(asset); actions.append(use);
+          const useQi = document.createElement('button'); useQi.type = 'button'; useQi.textContent = '用于 Qwen-Image'; useQi.onclick = (e) => { e.stopPropagation(); useImageForQi(asset); }; actions.append(useQi);
+          const use = document.createElement('button'); use.type = 'button'; use.textContent = '用于 H3'; use.onclick = (e) => { e.stopPropagation(); useImage(asset); }; actions.append(use);
         } else {
-          const use = document.createElement('button'); use.type = 'button'; use.textContent = '用于 H3'; use.onclick = () => useImage(asset); actions.append(use);
-          const useQi = document.createElement('button'); useQi.type = 'button'; useQi.textContent = '用于 Qwen-Image'; useQi.onclick = () => useImageForQi(asset); actions.append(useQi);
+          const use = document.createElement('button'); use.type = 'button'; use.textContent = '用于 H3'; use.onclick = (e) => { e.stopPropagation(); useImage(asset); }; actions.append(use);
+          const useQi = document.createElement('button'); useQi.type = 'button'; useQi.textContent = '用于 Qwen-Image'; useQi.onclick = (e) => { e.stopPropagation(); useImageForQi(asset); }; actions.append(useQi);
         }
       }
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'library-action-delete';
+      del.textContent = '删除';
+      del.onclick = (e) => {
+        e.stopPropagation();
+        if (confirm(`确定从素材库删除“${asset.name}”及其重复副本吗？本机文件将被删除。`)) {
+          deleteSingleAsset(asset.id);
+        }
+      };
+      actions.append(del);
       copy.append(title,location,meta,actions); card.append(preview,copy); $('libraryGrid').append(card);
     }
+    updateLibraryBatchBar();
   }
 
   async function loadLibrary() {
@@ -500,6 +685,7 @@
       const data = await api('assets');
       if (request !== libraryRequest) return;
       clearThumbnails(); assets = data.assets; scopes = data.scopes; updateScopeFilters();
+      for (const id of librarySelected) if (!assets.some(asset => asset.id === id)) librarySelected.delete(id);
       $('libraryPath').textContent = data.root;
       $('settingsLibraryPath').textContent = data.root;
       renderLibrary();
@@ -565,6 +751,14 @@
       media.src = url; $('assetViewerContent').replaceChildren(media);
       const download = document.createElement('button'); download.className = 'secondary'; download.type = 'button'; download.textContent = '下载';
       download.onclick = () => downloadAsset(asset); $('assetViewerActions').append(download);
+      const del = document.createElement('button'); del.className = 'secondary library-viewer-delete'; del.type = 'button'; del.textContent = '删除素材';
+      del.onclick = async () => {
+        if (confirm(`确定从素材库删除“${asset.name}”及其重复副本吗？本机文件将被删除。`)) {
+          $('assetViewer').close();
+          await deleteSingleAsset(asset.id);
+        }
+      };
+      $('assetViewerActions').append(del);
       if (asset.kind === 'images') {
         if (activeApp === 'qwen_image') {
           const useQi = document.createElement('button'); useQi.className = 'secondary'; useQi.type = 'button'; useQi.textContent = '用于 Qwen-Image 参考图'; useQi.onclick = () => useImageForQi(asset); $('assetViewerActions').append(useQi);
@@ -586,13 +780,12 @@
   }
 
   async function importFiles(files) {
-    const destination = importDestination();
-    if (importing || !destination) return;
+    if (importing) return;
     importing = true; $('libraryFiles').disabled = true; libraryError('');
     let failure = '';
     for (const file of files) {
       try {
-        const form = new FormData(); form.append('file',file); form.append('app_id',destination.app_id); form.append('purpose',destination.purpose);
+        const form = new FormData(); form.append('file',file); form.append('app_id','shared'); form.append('purpose','imports');
         $('libraryFeedback').textContent = '正在导入 ' + file.name;
         await api('assets', {method:'POST', body:form});
       } catch (error) { failure += `${file.name}：${error.message}；`; }
@@ -995,20 +1188,39 @@
   });
   $('assetPickerPurposeFilter')?.addEventListener('change', renderPickerGrid);
   $('libraryRefresh').onclick = loadLibrary;
+  $('libraryManageToggle')?.addEventListener('click', () => {
+    setLibraryManageMode(!isManageMode);
+  });
+  $('librarySelectAll')?.addEventListener('change', () => {
+    const checked = $('librarySelectAll').checked;
+    document.querySelectorAll('#libraryGrid .library-asset').forEach(card => {
+      const id = card.dataset.assetId;
+      if (!id) return;
+      if (checked) {
+        librarySelected.add(id);
+        card.classList.add('selected');
+        const chk = card.querySelector('.library-asset-check');
+        if (chk) chk.textContent = '✓';
+      } else {
+        librarySelected.delete(id);
+        card.classList.remove('selected');
+        const chk = card.querySelector('.library-asset-check');
+        if (chk) chk.textContent = '';
+      }
+    });
+    updateLibraryBatchBar();
+  });
+  $('libraryBatchDelete')?.addEventListener('click', deleteBatchAssets);
+  $('libraryBatchCancel')?.addEventListener('click', () => {
+    setLibraryManageMode(false);
+  });
   $('librarySearch').oninput = renderLibrary;
   $('libraryFiles').onchange = () => importFiles([...$('libraryFiles').files]);
-  $('libraryAppFilter').onchange = () => {
-    try { localStorage.setItem('lstudio-library-app', $('libraryAppFilter').value); } catch (_) {}
-    $('libraryPurposeFilter').value = '';
-    updateScopeFilters();
+  $('libraryTagClear')?.addEventListener('click', () => {
+    for (const set of Object.values(libraryTags)) set.clear();
+    try { localStorage.setItem('lstudio-library-kind', '[]'); } catch (_) {}
     renderLibrary();
-  };
-  $('libraryPurposeFilter').onchange = renderLibrary;
-  for (const button of document.querySelectorAll('[data-kind]')) button.onclick = () => {
-    kind = button.dataset.kind;
-    try { localStorage.setItem('lstudio-library-kind', kind); } catch (_) {}
-    renderLibrary();
-  };
+  });
   $('closeAssetViewer').onclick = () => $('assetViewer').close();
   $('assetViewer').addEventListener('close', releasePreview);
   for (const [index,id] of ['toolPageTab','manageCharacters'].entries()) if ($(id)) $(id).onkeydown = event => {

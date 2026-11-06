@@ -1,4 +1,5 @@
 """Local media organized by application, purpose and media kind."""
+import hashlib
 import json
 import mimetypes
 from pathlib import Path
@@ -16,6 +17,13 @@ class AssetLibrary:
     def __init__(self, root):
         self.root = Path(root)
         self.lock = threading.RLock()
+
+    @staticmethod
+    def digest(data):
+        if isinstance(data, (bytes, bytearray, memoryview)):
+            return hashlib.sha256(data).hexdigest()
+        with Path(data).open('rb') as stream:
+            return hashlib.file_digest(stream, 'sha256').hexdigest()
 
     @staticmethod
     def validate_segment(value):
@@ -74,18 +82,60 @@ class AssetLibrary:
         except FileNotFoundError:
             return False
 
+    def find_in_folder(self, content_hash, kind, app_id, purpose):
+        with self.lock:
+            try:
+                target_folder = self.folder(kind, app_id, purpose)
+            except ValueError:
+                return None
+            if not target_folder.is_dir():
+                return None
+            for path in target_folder.iterdir():
+                if not path.is_file() or path.is_symlink() or not ASSET_ID.fullmatch(path.name) or self.kind(path.name) != kind:
+                    continue
+                meta_file = path.with_suffix(path.suffix + '.json')
+                meta = None
+                if meta_file.is_file():
+                    try:
+                        meta = json.loads(meta_file.read_text(encoding='utf-8'))
+                        stat = path.stat()
+                        if (meta.get('size') == stat.st_size and meta.get('mtime_ns') == stat.st_mtime_ns
+                                and meta.get('sha256') == content_hash):
+                            return path.name
+                    except Exception:
+                        pass
+                try:
+                    with path.open('rb') as f:
+                        file_hash = hashlib.file_digest(f, 'sha256').hexdigest()
+                    if file_hash == content_hash:
+                        try:
+                            meta = meta if isinstance(meta, dict) else {}
+                            meta['sha256'] = content_hash
+                            self._write_metadata(path, meta)
+                        except Exception:
+                            pass
+                        return path.name
+                except Exception:
+                    pass
+            return None
+
     def store(self, asset_id, data, name=None, metadata=None, *, app_id='shared', purpose='imports'):
         with self.lock:
-            if self.exists(asset_id):
-                raise ValueError('素材编号已存在')
             target = self.target(asset_id, app_id, purpose)
+            if self.exists(asset_id):
+                existing = self.resolve(asset_id)
+                if existing.resolve() != target.resolve() or self.digest(existing) != self.digest(data):
+                    raise ValueError('素材编号已存在')
+                return existing
             target.parent.mkdir(parents=True, exist_ok=True)
             temporary = target.with_suffix('.' + uuid.uuid4().hex + '.partial')
             try:
                 temporary.write_bytes(data)
                 temporary.replace(target)
-                if name or metadata:
-                    self._write_metadata(target, {'name': name or asset_id, **(metadata or {})})
+                meta = {'name': name or asset_id, **(metadata or {})}
+                if 'sha256' not in meta:
+                    meta['sha256'] = self.digest(data)
+                self._write_metadata(target, meta)
             finally:
                 temporary.unlink(missing_ok=True)
             return target
@@ -100,6 +150,61 @@ class AssetLibrary:
             temporary.replace(target)
         finally:
             temporary.unlink(missing_ok=True)
+
+    def delete(self, asset_id):
+        with self.lock:
+            try:
+                path = self.resolve(asset_id)
+                meta = path.with_suffix(path.suffix + '.json')
+                path.unlink(missing_ok=True)
+                meta.unlink(missing_ok=True)
+                return True
+            except (FileNotFoundError, ValueError):
+                return False
+
+    def deduplicate(self, kind=None, *, protected_ids=()):
+        with self.lock:
+            removed_count = 0
+            freed_bytes = 0
+            for folder, application, usage, media_kind in self._folders(kind):
+                if usage == 'outputs':
+                    continue
+                by_hash = {}
+                paths = [p for p in folder.iterdir() if p.is_file() and not p.is_symlink() and ASSET_ID.fullmatch(p.name) and self.kind(p.name) == media_kind]
+                paths.sort(key=lambda p: p.stat().st_mtime)
+                for path in paths:
+                    meta_file = path.with_suffix(path.suffix + '.json')
+                    meta = {}
+                    if meta_file.is_file():
+                        try:
+                            meta = json.loads(meta_file.read_text(encoding='utf-8'))
+                        except (OSError, ValueError):
+                            pass
+                    # Verify actual bytes before deleting; cached hashes may be stale.
+                    try:
+                        content_hash = self.digest(path)
+                        meta = meta if isinstance(meta, dict) else {}
+                        meta['sha256'] = content_hash
+                        self._write_metadata(path, meta)
+                    except OSError:
+                        continue
+                    by_hash.setdefault(content_hash, []).append(path)
+
+                for digest, files in by_hash.items():
+                    if len(files) > 1:
+                        # Keep oldest file, delete redundant duplicates
+                        for dup in files[1:]:
+                            if dup.name in protected_ids:
+                                continue
+                            try:
+                                size = dup.stat().st_size
+                                dup.unlink(missing_ok=True)
+                                freed_bytes += size
+                                removed_count += 1
+                                dup.with_suffix(dup.suffix + '.json').unlink(missing_ok=True)
+                            except OSError:
+                                pass
+            return {'removed': removed_count, 'freed_bytes': freed_bytes}
 
     def list(self, kind=None, jobs=(), *, app_id=None, purpose=None):
         by_file = {job.get('file') or (job.get('id', '') + '.mp4'): job for job in jobs
@@ -117,6 +222,8 @@ class AssetLibrary:
                     metadata = json.loads(path.with_suffix(path.suffix + '.json').read_text(encoding='utf-8'))
                 except (OSError, ValueError):
                     metadata = {}
+                if not isinstance(metadata, dict):
+                    metadata = {}
                 job = by_file.get(path.name, {})
                 job_config = job.get('config') or {}
                 items.append({'id': path.name, 'kind': media_kind,
@@ -125,6 +232,8 @@ class AssetLibrary:
                               'name': job_config.get('title') or metadata.get('name') or path.name,
                               'size': stat.st_size, 'created': job.get('created', stat.st_mtime),
                               'job_id': job.get('id'), 'local': True,
+                              '_sha256': metadata.get('sha256') if metadata.get('size') == stat.st_size
+                                  and metadata.get('mtime_ns') == stat.st_mtime_ns else None,
                               'url': '/api/assets/' + path.name + '/file'})
         for name, job in by_file.items():
             job_config = job.get('config') or {}
@@ -137,7 +246,19 @@ class AssetLibrary:
                           'size': (job.get('drive') or {}).get('size', 0), 'created': job.get('created', 0),
                           'job_id': job.get('id'), 'local': False, 'recoverable': bool(job.get('drive')),
                           'url': '/video/' + name})
-        return sorted(items, key=lambda item: item['created'], reverse=True)
+        items.sort(key=lambda item: item['created'], reverse=True)
+        # 非生成内容（导入/角色/参考）按内容合并展示，重复副本记录在 duplicates 中，删除时一并清理
+        merged, first_by_hash = [], {}
+        for item in items:
+            digest = item.pop('_sha256', None)
+            if digest and item['purpose'] != 'outputs':
+                key = (item['kind'], digest)
+                if key in first_by_hash:
+                    first_by_hash[key].setdefault('duplicates', []).append(item['id'])
+                    continue
+                first_by_hash[key] = item
+            merged.append(item)
+        return merged
 
     def media_type(self, asset_id):
         self.kind(asset_id)

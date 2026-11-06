@@ -222,7 +222,14 @@ function updateQiGpuDisplay() {
           if (ref.image_id && !img.dataset.retried) {
             img.dataset.retried = '1';
             fetch('/api/images/' + ref.image_id, { headers: { 'X-LStudio-Key': getApiKey() } })
-              .then(res => res.ok ? res.blob() : null)
+              .then(res => {
+                if (res.status === 404) {
+                  references = references.filter(r => r !== ref);
+                  renderReferences();
+                  return null;
+                }
+                return res.ok ? res.blob() : null;
+              })
               .then(blob => {
                 if (blob && references.includes(ref)) {
                   const blobUrl = URL.createObjectURL(blob);
@@ -919,7 +926,14 @@ function updateQiGpuDisplay() {
 
         references.forEach(ref => {
           fetch('/api/images/' + ref.image_id, { headers: { 'X-LStudio-Key': getApiKey() } })
-            .then(res => res.ok ? res.blob() : null)
+            .then(res => {
+              if (res.status === 404) {
+                references = references.filter(r => r !== ref);
+                renderReferences();
+                return null;
+              }
+              return res.ok ? res.blob() : null;
+            })
             .then(blob => {
               if (blob && references.includes(ref)) {
                 const blobUrl = URL.createObjectURL(blob);

@@ -1534,18 +1534,21 @@ async def import_asset(file: UploadFile, app_id: Annotated[str, Form()] = 'share
     if extension not in ('mp4', 'wav', 'mp3', 'm4a', 'ogg', 'flac', 'aac'):
         raise HTTPException(400, '支持 PNG、JPEG、WebP 图片，MP4 视频和常见音频格式')
     library = asset_library
-    asset_id = uuid.uuid4().hex + '.' + extension
-    validate_asset_scope(app_id, purpose, library.kind(asset_id))
-    target = library.target(asset_id, app_id, purpose)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix('.partial')
+    kind = 'videos' if extension == 'mp4' else 'audios'
+    validate_asset_scope(app_id, purpose, kind)
+
+    target_dir = library.folder(kind, app_id, purpose)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    temporary = target_dir / ('.' + uuid.uuid4().hex + '.partial')
     size = 0
+    hasher = hashlib.sha256()
     try:
         with temporary.open('xb') as output:
             while chunk := await file.read(1024 ** 2):
                 size += len(chunk)
                 if size > 512 * 1024 ** 2:
                     raise HTTPException(400, '单项素材不能超过 512MB')
+                hasher.update(chunk)
                 output.write(chunk)
         import av
         try:
@@ -1557,8 +1560,19 @@ async def import_asset(file: UploadFile, app_id: Annotated[str, Form()] = 'share
                 duration = float(container.duration / av.time_base) if container.duration else 0
         except Exception:
             raise HTTPException(400, '素材无法解码，请使用有效的视频或音频文件') from None
-        temporary.replace(target)
-        library._write_metadata(target, {'name': Path(file.filename).name[:120], 'duration': duration})
+
+        content_hash = hasher.hexdigest()
+        with library.lock:
+            existing_id = library.find_in_folder(content_hash, kind, app_id, purpose)
+            if existing_id:
+                return {'id': existing_id, 'kind': kind, 'app_id': app_id, 'purpose': purpose}
+            scoped_hash = hashlib.sha256(f"{app_id}:{purpose}:{content_hash}".encode()).hexdigest()[:32]
+            asset_id = scoped_hash + '.' + extension
+            target = library.target(asset_id, app_id, purpose)
+            if target.exists():
+                raise HTTPException(409, '素材编号已存在且内容不一致，请检查素材文件')
+            temporary.replace(target)
+            library._write_metadata(target, {'name': Path(file.filename or asset_id).name[:120], 'duration': duration, 'sha256': content_hash})
         return {'id': asset_id, 'kind': library.kind(asset_id), 'app_id': app_id, 'purpose': purpose}
     finally:
         temporary.unlink(missing_ok=True)
@@ -1577,6 +1591,78 @@ def asset_file(asset_id: str, request: Request, download: bool = False):
     if not path.is_file():
         raise HTTPException(404, '素材不存在')
     return FileResponse(path, media_type=library.media_type(asset_id), filename=asset_id if download else None)
+
+
+def delete_asset_item(asset_id: str):
+    try:
+        kind = asset_library.kind(asset_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    with controller.lock, asset_library.lock:
+        related = []
+        for job in controller.jobs.values():
+            config = job.get('config') or {}
+            inputs = {r['image_id'] for r in config.get('references', [])}
+            inputs.update(a['audio_id'] for a in config.get('audio_references', []))
+            pending = job.get('status') in ('queued', 'running', 'cancelling') or job['id'] == controller.active
+            if pending and asset_id in inputs:
+                raise HTTPException(409, '素材正被等待或执行中的任务使用，请先取消任务')
+            if job.get('file') == asset_id or job.get('drive') and job['id'] + '.mp4' == asset_id:
+                if not controller.history_clearable(job):
+                    raise HTTPException(409, '作品正在处理或结果待取回，请完成处理后删除')
+                related.append(job)
+        deleted = asset_library.delete(asset_id)
+        if kind == 'videos':
+            local_video = controller.history_recycle.video(asset_id)
+            if local_video.is_file():
+                local_video.unlink()
+                deleted = True
+        for job in related:
+            deleted = deleted or not job.get('history_hidden')
+            controller.clear_history(job['id'])
+        return deleted
+
+
+class AssetBatchDeleteRequest(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=10000)
+
+
+@app.post('/api/assets/delete')
+def delete_assets_batch(payload: AssetBatchDeleteRequest):
+    deleted, errors = [], []
+    for asset_id in dict.fromkeys(payload.ids):
+        try:
+            if delete_asset_item(asset_id):
+                deleted.append(asset_id)
+            else:
+                errors.append({'id': asset_id, 'error': '素材不存在'})
+        except HTTPException as exc:
+            errors.append({'id': asset_id, 'error': exc.detail})
+        except Exception as exc:
+            errors.append({'id': asset_id, 'error': safe_error(exc)})
+    return {'ok': not errors, 'deleted': deleted, 'count': len(deleted), 'errors': errors}
+
+
+@app.post('/api/assets/deduplicate')
+def deduplicate_assets():
+    with controller.lock:
+        protected = set()
+        for job in controller.jobs.values():
+            config = job.get('config') or {}
+            protected.update(r['image_id'] for r in config.get('references', []))
+            protected.update(a['audio_id'] for a in config.get('audio_references', []))
+        for profile in character_library.list(include_deleted=True):
+            protected.update(profile.image_ids)
+            protected.update(a.audio_id for a in profile.audios)
+        res = asset_library.deduplicate(protected_ids=protected)
+    return {'ok': True, **res}
+
+
+@app.delete('/api/assets/{asset_id}')
+def delete_asset_single(asset_id: str):
+    if not delete_asset_item(asset_id):
+        raise HTTPException(404, '素材不存在')
+    return {'ok': True, 'id': asset_id}
 
 
 @app.delete('/api/history')
@@ -1876,9 +1962,19 @@ async def save_image(file, app_id, purpose):
             image.verify()
     except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
         raise HTTPException(400, '图片无法读取或尺寸过大，请使用有效的 PNG、JPEG、WebP 图片') from None
-    image_id = uuid.uuid4().hex + '.' + extension
-    asset_library.store(image_id, data, name=Path(file.filename or image_id).name[:120], app_id=app_id, purpose=purpose)
-    return {'image_id': image_id}
+
+    content_hash = hashlib.sha256(data).hexdigest()
+    with asset_library.lock:
+        existing_id = asset_library.find_in_folder(content_hash, 'images', app_id, purpose)
+        if existing_id:
+            return {'image_id': existing_id}
+        scoped_hash = hashlib.sha256(f"{app_id}:{purpose}:{content_hash}".encode()).hexdigest()[:32]
+        image_id = scoped_hash + '.' + extension
+        try:
+            asset_library.store(image_id, data, name=Path(file.filename or image_id).name[:120], metadata={'sha256': content_hash}, app_id=app_id, purpose=purpose)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+        return {'image_id': image_id}
 
 
 @app.get('/api/characters')
@@ -1943,8 +2039,10 @@ async def upload_audio(file: UploadFile):
         duration = inspect_audio(data)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from None
+
+    content_hash = hashlib.sha256(data).hexdigest()
     audio_id = uuid.uuid4().hex + '.' + extension
-    asset_library.store(audio_id, data, name=Path(file.filename or '声音样本').name[:120], metadata={'duration': duration}, app_id='h3', purpose='characters')
+    asset_library.store(audio_id, data, name=Path(file.filename or '声音样本').name[:120], metadata={'duration': duration, 'sha256': content_hash}, app_id='h3', purpose='characters')
     return AudioAsset(audio_id=audio_id, name=Path(file.filename or '声音样本').name[:120], duration=duration).model_dump()
 
 

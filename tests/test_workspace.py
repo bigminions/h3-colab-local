@@ -355,10 +355,203 @@ class UiOptimizationTests(unittest.TestCase):
         self.assertIn("activeApp", ws_js)
         self.assertIn("useImageForQi", ws_js)
         self.assertIn("lstudio-library-kind", ws_js)
-        self.assertIn("lstudio-library-app", ws_js)
+        self.assertIn("isGenerated", ws_js)
 
         qi_js = Path("apps/qwen_image/web/qwen-image.js").read_text(encoding="utf-8")
         self.assertIn("useImage", qi_js)
 
         chars_js = Path("apps/h3/web/characters.js").read_text(encoding="utf-8")
         self.assertNotIn("showPage('tool')", chars_js)
+
+
+class AssetManagementAndDeduplicationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(dir=app.PRIVATE)
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        patcher = patch.object(app, 'PRIVATE', self.root)
+        patcher.start(); self.addCleanup(patcher.stop)
+        self.library = AssetLibrary(self.root / 'materials')
+        patcher = patch.object(app, 'asset_library', self.library)
+        patcher.start(); self.addCleanup(patcher.stop)
+        self.control = app.Controller(self.root, self.root / 'materials' / 'h3' / 'outputs' / 'videos')
+        patcher = patch.object(app, 'controller', self.control)
+        patcher.start(); self.addCleanup(patcher.stop)
+        patcher = patch.object(app, 'character_library', CharacterLibrary(self.root, self.library))
+        patcher.start(); self.addCleanup(patcher.stop)
+
+    def test_image_deduplication_on_repeated_upload(self):
+        buf = io.BytesIO()
+        Image.new('RGB', (64, 64), 'green').save(buf, format='PNG')
+        data = buf.getvalue()
+
+        # Upload first time
+        res1 = asyncio.run(app.upload_image(UploadFile(filename='green.png', file=io.BytesIO(data)), purpose='references', app_id='h3'))
+        # Upload second time
+        res2 = asyncio.run(app.upload_image(UploadFile(filename='green_copy.png', file=io.BytesIO(data)), purpose='references', app_id='h3'))
+
+        self.assertEqual(res1['image_id'], res2['image_id'])
+        # Only 1 file should exist in h3 references
+        assets = self.library.list('images', app_id='h3', purpose='references')
+        self.assertEqual(len(assets), 1)
+
+    def test_single_and_batch_asset_deletion(self):
+        buf1 = io.BytesIO(); Image.new('RGB', (40, 40), 'red').save(buf1, format='PNG')
+        buf2 = io.BytesIO(); Image.new('RGB', (50, 50), 'blue').save(buf2, format='PNG')
+        res1 = asyncio.run(app.upload_image(UploadFile(filename='red.png', file=io.BytesIO(buf1.getvalue()))))
+        res2 = asyncio.run(app.upload_image(UploadFile(filename='blue.png', file=io.BytesIO(buf2.getvalue()))))
+
+        id1, id2 = res1['image_id'], res2['image_id']
+        self.assertTrue(self.library.exists(id1))
+        self.assertTrue(self.library.exists(id2))
+
+        # Single delete
+        del_res = app.delete_asset_single(id1)
+        self.assertTrue(del_res['ok'])
+        self.assertFalse(self.library.exists(id1))
+
+        # Deleting non-existent raises 404
+        with self.assertRaises(HTTPException):
+            app.delete_asset_single(id1)
+
+        # Batch delete
+        batch_res = app.delete_assets_batch(app.AssetBatchDeleteRequest(ids=[id2]))
+        self.assertEqual(batch_res['count'], 1)
+        self.assertFalse(self.library.exists(id2))
+
+    def test_character_omits_deleted_images_when_accessed(self):
+        buf = io.BytesIO(); Image.new('RGB', (40, 40), 'gold').save(buf, format='PNG')
+        res = asyncio.run(app.upload_image(UploadFile(filename='gold.png', file=io.BytesIO(buf.getvalue())), purpose='characters', app_id='h3'))
+        img_id = res['image_id']
+
+        private = self.root / '.private'
+        private.mkdir(exist_ok=True)
+        characters = CharacterLibrary(private, self.library)
+        profile = characters.save(CharacterProfile(name='测试角色', image_ids=[img_id], audios=[]))
+        self.assertEqual(characters.get(profile.id).image_ids, [img_id])
+
+        # Delete the asset
+        app.delete_asset_single(img_id)
+        self.assertFalse(self.library.exists(img_id))
+
+        # Retrieving or saving character profile sets/omits the missing asset to empty
+        retrieved = characters.get(profile.id)
+        self.assertEqual(retrieved.image_ids, [])
+        saved = characters.save(retrieved)
+        self.assertEqual(saved.image_ids, [])
+
+    def test_library_deduplicate_endpoint(self):
+        # Force create two duplicate files in same folder
+        buf = io.BytesIO(); Image.new('RGB', (60, 60), 'purple').save(buf, format='PNG')
+        data = buf.getvalue()
+        target_dir = self.library.folder('images', 'shared', 'imports')
+        target_dir.mkdir(parents=True, exist_ok=True)
+        p1 = target_dir / ('1'*32 + '.png')
+        p2 = target_dir / ('2'*32 + '.png')
+        p1.write_bytes(data)
+        p2.write_bytes(data)
+
+        items_before = self.library.list('images', app_id='shared', purpose='imports')
+        self.assertEqual(len(items_before), 2)
+
+        dedup_res = app.deduplicate_assets()
+        self.assertTrue(dedup_res['ok'])
+        self.assertEqual(dedup_res['removed'], 1)
+
+        items_after = self.library.list('images', app_id='shared', purpose='imports')
+        self.assertEqual(len(items_after), 1)
+
+    def test_ui_batch_and_deduplicate_elements_present(self):
+        studio_html = Path("studio.html").read_text(encoding="utf-8")
+        self.assertIn('id="libraryManageToggle"', studio_html)
+        self.assertIn('id="libraryTags"', studio_html)
+        self.assertNotIn('libraryDeduplicate', studio_html)
+        self.assertNotIn('libraryPurposeFilter', studio_html)
+        self.assertIn('id="libraryBatchBar"', studio_html)
+        self.assertIn('id="libraryBatchDelete"', studio_html)
+        self.assertIn('id="librarySelectAll"', studio_html)
+
+        ws_js = Path("static/workspace.js").read_text(encoding="utf-8")
+        self.assertIn("librarySelected", ws_js)
+        self.assertIn("isManageMode", ws_js)
+        self.assertIn("setLibraryManageMode", ws_js)
+        self.assertIn("toggleCardSelection", ws_js)
+        self.assertIn("deleteSingleAsset", ws_js)
+        self.assertIn("deleteBatchAssets", ws_js)
+        self.assertIn("updateLibraryBatchBar", ws_js)
+
+    def test_running_output_cannot_be_deleted_or_hidden(self):
+        job_id = 'a' * 32
+        asset_id = job_id + '.png'
+        self.library.store(asset_id, b'output', app_id='qwen_image_2_1', purpose='outputs')
+        job = dict(id=job_id, status='running', file=asset_id, config={})
+        self.control.jobs[job_id] = job
+        with self.assertRaises(HTTPException) as raised:
+            app.delete_asset_single(asset_id)
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertTrue(self.library.exists(asset_id))
+        self.assertFalse(job.get('history_hidden'))
+
+    def test_partial_batch_delete_reports_in_use_inputs_and_keeps_them(self):
+        used, unused = 'a' * 32 + '.png', 'b' * 32 + '.png'
+        self.library.store(used, b'reference')
+        self.library.store(unused, b'unused')
+        job_id = 'c' * 32
+        self.control.jobs[job_id] = dict(id=job_id, status='queued',
+            config={'references': [{'image_id': used}]})
+        result = app.delete_assets_batch(app.AssetBatchDeleteRequest(ids=[used, unused, unused]))
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['deleted'], [unused])
+        self.assertEqual([error['id'] for error in result['errors']], [used])
+        self.assertTrue(self.library.exists(used))
+        self.assertFalse(self.library.exists(unused))
+
+    def test_completed_image_deletion_hides_its_history(self):
+        job_id = 'a' * 32
+        asset_id = job_id + '.png'
+        self.library.store(asset_id, b'output', app_id='qwen_image_2_1', purpose='outputs')
+        self.control.jobs[job_id] = dict(id=job_id, status='done', file=asset_id, config={})
+        app.delete_asset_single(asset_id)
+        self.assertFalse(self.library.exists(asset_id))
+        self.assertTrue(self.control.jobs[job_id]['history_hidden'])
+        with self.assertRaises(HTTPException) as raised:
+            app.delete_asset_single(asset_id)
+        self.assertEqual(raised.exception.status_code, 404)
+
+    def test_deduplication_keeps_referenced_files_and_generated_outputs(self):
+        first, referenced = 'a' * 32 + '.png', 'b' * 32 + '.png'
+        self.library.store(first, b'same', app_id='h3', purpose='characters')
+        self.library.store(referenced, b'same', app_id='h3', purpose='characters')
+        app.character_library.save(CharacterProfile(name='测试角色', image_ids=[referenced]))
+        for asset_id in ['c' * 32 + '.png', 'd' * 32 + '.png']:
+            self.library.store(asset_id, b'same output', app_id='qwen_image_2_1', purpose='outputs')
+        result = app.deduplicate_assets()
+        self.assertEqual(result['removed'], 0)
+        self.assertTrue(all(self.library.exists(asset_id) for asset_id in
+            [first, referenced, 'c' * 32 + '.png', 'd' * 32 + '.png']))
+
+    def test_stale_hashes_cannot_merge_or_delete_different_files(self):
+        first, changed = 'a' * 32 + '.png', 'b' * 32 + '.png'
+        self.library.store(first, b'original')
+        path = self.library.store(changed, b'original')
+        path.write_bytes(b'changed content')
+        self.assertEqual(len(self.library.list()), 2)
+        result = app.deduplicate_assets()
+        self.assertEqual(result['removed'], 0)
+        self.assertEqual(path.read_bytes(), b'changed content')
+
+    def test_existing_asset_id_does_not_silently_discard_different_content(self):
+        asset_id = 'a' * 32 + '.png'
+        self.library.store(asset_id, b'original')
+        with self.assertRaises(ValueError):
+            self.library.store(asset_id, b'different')
+        self.assertEqual(self.library.resolve(asset_id).read_bytes(), b'original')
+
+    def test_missing_qwen_reference_is_rejected_before_start(self):
+        (self.root / 'google-token.dat').touch()
+        config = app.QwenImageJobConfig(prompt='test', references=[{'slot': 1, 'image_id': 'a' * 32 + '.png'}])
+        with patch.object(self.control, 'start') as start, self.assertRaises(HTTPException) as raised:
+            app.create_job(config)
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertEqual(len(config.references), 1)
+        start.assert_not_called()

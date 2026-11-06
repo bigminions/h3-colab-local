@@ -110,7 +110,9 @@ materials/
     └── outputs/images/     Qwen-Image 生成图片
 ```
 
-素材库可按应用、用途和类型筛选。导入前会显示保存位置；直接从应用创作区或 H3 角色管理上传的素材自动归入对应用途。从其他用途引用素材时保留其原有位置，跨应用复用无需复制文件。
+素材库可按媒体类型、导入/生成来源及生成应用组合筛选，支持搜索与批量管理。从素材库导入的文件保存到 `shared/imports/`；应用创作区或 H3 角色管理上传的素材自动归入对应用途。从其他用途引用素材时保留其原有位置，跨应用复用无需复制文件。
+
+同一用途重复上传相同内容会复用已有素材；列表将非生成素材的相同内容合并展示。删除时会处理合并的重复副本，并逐项显示失败原因；等待或执行中的任务所需素材不能删除。素材库删除会移除本机文件和对应作品展示记录，云端备份保留。手动去重接口保留角色、任务引用的文件及生成作品。
 
 素材库支持 PNG、JPEG、WebP 图片，MP4 视频，以及 WAV、MP3、M4A、OGG、FLAC、AAC 音频。图片最大 20MB；单个视频或音频最大 512MB。通用音频导入不受 H3 声音时长限制，引用到 H3 时会按应用规则校验。
 
@@ -164,6 +166,9 @@ Invoke-RestMethod -Method Put -Uri http://127.0.0.1:7865/api/drive-cache -Header
 | `GET /api/assets` | 素材列表，支持 `app_id`、`purpose`、`kind` 筛选 |
 | `POST /api/assets` | 导入素材，multipart 字段为 `file`、`app_id`、`purpose`，默认 `shared/imports` |
 | `GET /api/assets/{id}/file` | 读取素材；加 `?download=true` 下载 |
+| `DELETE /api/assets/{id}` | 删除本机素材及对应作品展示记录 |
+| `POST /api/assets/delete` | 批量删除，请求体为 `{"ids": [...]}`，返回成功项及逐项错误 |
+| `POST /api/assets/deduplicate` | 清理同一用途内未被引用的重复素材，保留生成作品 |
 | `POST /api/images` | 上传应用图片，multipart 字段为 `file`、`app_id`、`purpose`，默认 `h3/references`，返回 `image_id` |
 | `POST /api/jobs` | 提交生成任务，通过 `app_id` 选择应用；`?placement=front` 插入等待队首，默认 `back` |
 | `GET /api/jobs/{id}` | 查询任务 |

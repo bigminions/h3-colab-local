@@ -26,7 +26,7 @@ class CharacterProfile(BaseModel):
     name: str = Field(pattern=r'^[A-Za-z0-9_\u4e00-\u9fff-]{1,30}$')
     description: str = Field(default='', max_length=500)
     voice: str = Field(default='', max_length=300)
-    image_ids: list[str] = Field(min_length=1, max_length=9)
+    image_ids: list[str] = Field(default_factory=list, max_length=9)
     audios: list[AudioAsset] = Field(default_factory=list, max_length=3)
     deleted: bool = False
 
@@ -76,7 +76,13 @@ class CharacterLibrary:
         with self.lock:
             if not self.path.exists():
                 return []
-            profiles = [CharacterProfile(**item) for item in json.loads(self.path.read_text(encoding='utf-8'))]
+            profiles = []
+            for item in json.loads(self.path.read_text(encoding='utf-8')):
+                p = CharacterProfile(**item)
+                if getattr(self, 'assets', None):
+                    p.image_ids = [img_id for img_id in p.image_ids if self.assets.exists(img_id)]
+                    p.audios = [a for a in p.audios if self.assets.exists(a.audio_id)]
+                profiles.append(p)
             return profiles if include_deleted else [p for p in profiles if not p.deleted]
 
     def get(self, profile_id, include_deleted=False):

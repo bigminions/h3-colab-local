@@ -344,10 +344,18 @@ async function restoreReferences(saved) {
   await Promise.all(references.map(async ref => {
     try {
       const response = await fetch('/api/images/' + ref.image_id, {headers:{'X-LStudio-Key':KEY}});
-      if (!response.ok) throw Error(`图片${ref.slot}已丢失，请替换或移除`);
+      if (response.status === 404) {
+        references = references.filter(r => r !== ref);
+        renderReferences();
+        saveDraft();
+        return;
+      }
+      if (!response.ok) throw Error(`图片${ref.slot}暂时无法读取，请稍后重试`);
       const blob = await response.blob();
       if (references.includes(ref)) ref.url = URL.createObjectURL(blob);
-    } catch (e) { ref.error = e.message; }
+    } catch (e) {
+      ref.error = e.message;
+    }
     finally { ref.pending = false; if (references.includes(ref)) renderReferences(); }
   }));
 }
