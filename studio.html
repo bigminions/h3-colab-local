@@ -9,7 +9,7 @@
     window.$ = id => document.getElementById(id);
     (() => {
       try {
-        const HASH_MAP = { '#h3': 'tool', '#tool': 'tool', '#qwen_image': 'qwen_image', '#qi': 'qwen_image', '#library': 'library', '#compute': 'compute', '#settings': 'connections', '#connections': 'connections' };
+        const HASH_MAP = { '#h3': 'tool', '#tool': 'tool', '#qwen_image': 'qwen_image', '#qi': 'qwen_image', '#gemma': 'gemma', '#library': 'library', '#compute': 'compute', '#settings': 'connections', '#connections': 'connections' };
         const target = HASH_MAP[window.location.hash] || localStorage.getItem('lstudio-active-page') || localStorage.getItem('lstudio-active-app');
         if (target && target !== 'tool') {
           document.documentElement.dataset.initialPage = target;
@@ -47,6 +47,10 @@
         <button id="qwenImageAppTab" class="workspace-nav" type="button" title="Qwen-Image-2.1">
           <span class="nav-icon app-icon" aria-hidden="true" style="background:linear-gradient(135deg,#7c3aed,#4f46e5);color:#fff;font-weight:700;">QI</span>
           <span class="sidebar-label nav-copy"><strong>Qwen-Image-2.1</strong><small>文生图与图生图 · 量化版</small></span>
+        </button>
+        <button id="gemmaAppTab" class="workspace-nav" type="button" title="大模型对话">
+          <span class="nav-icon app-icon" aria-hidden="true" style="background:linear-gradient(135deg,#0284c7,#2563eb);color:#fff;font-weight:700;font-size:11px;">LLM</span>
+          <span class="sidebar-label nav-copy"><strong>大模型对话</strong><small>多模型文本聊天</small></span>
         </button>
       </div>
       <div class="sidebar-divider"></div>

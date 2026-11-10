@@ -10,12 +10,34 @@ import time
 import uuid
 import base64
 
+from runtime_recovery import RuntimeBusy
+
+
 class ColabProvider:
     def __init__(self, controller, services):
         self.services = services
         self.controller = controller
         self.application_id = 'h3'
         self.assignment_hash = uuid.uuid4()
+        self._gemma_idle = None
+
+    def _gemma_idle_confirmed(self, session):
+        confirmed = self._gemma_idle
+        return bool(confirmed and session is confirmed[0]
+                    and session.get('kernel_id') == confirmed[1]
+                    and session.get('session_id') == confirmed[2])
+
+    def can_reuse_gemma(self, job):
+        session = self.controller.session or {}
+        config = job.get('config', {})
+        return bool(self._gemma_idle_confirmed(session)
+                    and session.get('app_id') == config.get('app_id') == 'gemma_chat'
+                    and session.get('gemma_variant') == config.get('variant')
+                    and session.get('accelerator') == config.get('gpu')
+                    and (not config.get('endpoint') or session.get('endpoint') == config['endpoint'])
+                    and config.get('operation') == 'reply'
+                    and not job.get('execution_started') and not job.get('reconnect_attempts')
+                    and not job.get('recover_existing'))
 
     @staticmethod
     def resolve_shape(services, gpu):
@@ -39,11 +61,25 @@ class ColabProvider:
         client = self.client()
         accelerator = self.resolve_accelerator(config.gpu)
         shape = self.resolve_shape(self.services, config.gpu)
-        found = client._get_assignment(uuid.UUID(job['assignment_hash']),variant=self.services.Variant.GPU,
-            accelerator=accelerator,shape=shape)
-        endpoint = getattr(found,'endpoint',None)
+        found = None
+        try:
+            found = client._get_assignment(uuid.UUID(job['assignment_hash']), variant=self.services.Variant.GPU,
+                                           accelerator=accelerator, shape=shape)
+        except Exception as exc:
+            resp = getattr(exc, 'response', None)
+            if resp is not None and getattr(resp, 'status_code', None) in (400, 404):
+                found = None
+            else:
+                try:
+                    if not client.list_assignments():
+                        found = None
+                    else:
+                        raise
+                except Exception:
+                    raise exc
+        endpoint = getattr(found, 'endpoint', None)
         if endpoint:
-            self._unassign_confirmed(client,endpoint)
+            self._unassign_confirmed(client, endpoint)
         job['assignment_pending'] = False
 
     def _proxy_request(self, method, path, **kwargs):
@@ -70,9 +106,13 @@ class ColabProvider:
             raise RuntimeError('消费者状态记录无效')
         return record
 
-    def consumer_status(self):
+    def observe_consumer(self):
+        return self.consumer_status(passive=True)
+
+    def consumer_status(self, *, passive=False):
         """Observe through Jupyter HTTP, never enqueue code behind a busy cell."""
-        if not self.controller.session:
+        session = self.controller.session
+        if not session:
             return {'state': 'disconnected'}
         response = self._proxy_request('GET', '/api/kernels')
         response.raise_for_status()
@@ -80,6 +120,10 @@ class ColabProvider:
         if not isinstance(kernels, list):
             raise RuntimeError('无法确认远端内核状态')
         busy = any(k.get('execution_state') != 'idle' for k in kernels)
+        if passive and self._gemma_idle_confirmed(session):
+            if not busy and any(k.get('id') == session['kernel_id'] for k in kernels):
+                return {'state': 'idle'}
+            self._gemma_idle = None
         record = self._consumer_record()
         heartbeat = record.get('heartbeat')
         fresh = isinstance(heartbeat, (int, float)) and abs(time.time() - heartbeat) < 30
@@ -88,6 +132,9 @@ class ColabProvider:
         if busy:
             return {**detail, 'state': 'cancelling' if fresh and record.get('state') == 'cancelling' else
                     'busy' if fresh else 'unknown', 'fresh': fresh}
+        # Avoid submitting a probe cell during the dispatch of a local Gemma task.
+        if passive and session.get('app_id') == 'gemma_chat' and self.controller.active:
+            return {**detail, 'state': 'connecting', 'fresh': fresh}
         # A finished notebook cell alone does not prove the ComfyUI subprocess is idle.
         idle = self.check_idle()
         return {**detail, 'state': 'idle' if idle else 'busy', 'fresh': fresh}
@@ -174,7 +221,6 @@ class ColabProvider:
         return result
 
     def connect(self, config):
-        client = self.client()
         previous = self.controller.session
         if previous:
             if config.endpoint and config.endpoint != previous['endpoint']:
@@ -190,7 +236,11 @@ class ColabProvider:
                 prev_name = prev_app_obj.spec.name if prev_app_obj else prev_app
                 new_name = new_app_obj.spec.name if new_app_obj else new_app
                 raise RuntimeError(f'请先释放 {prev_name} 的显卡运行时，再切换到 {new_name}。')
+            active = self.controller.jobs.get(getattr(self.controller, 'active', None), {})
+            if self.can_reuse_gemma(active):
+                return self.services.SessionState(**previous)
             return self.connection_step('检查已有 Colab 运行时', self.refresh)
+        client = self.client()
         accelerator = self.resolve_accelerator(config.gpu)
         shape = self.resolve_shape(self.services, config.gpu)
         assignments = self.connection_step('查询 Colab 运行时列表（含授权检查）', client.list_assignments)
@@ -239,25 +289,39 @@ class ColabProvider:
         return self.services.SessionState(**self.controller.session)
 
     def execute(self, job):
-        s = self.refresh()
+        self.application_id = job['config'].get('app_id', 'h3')
+        application = self.services.applications.get(self.application_id)
+        text_job = application.spec.output_kind == 'text'
+        step = self.connection_step if text_job else lambda phase, operation: operation()
+        session = self.controller.session
+        warm_gemma = self.can_reuse_gemma(job)
+        if text_job:
+            self._gemma_idle = None
+        # connect() has just verified this runtime for a new Gemma task.
+        # Retries still refresh the proxy credentials before reconnecting.
+        if (text_job and session and session.get('app_id') == self.application_id
+                and session['endpoint'] == job.get('endpoint')
+                and not job.get('execution_started') and not job.get('reconnect_attempts')):
+            s = self.services.SessionState(**session)
+        else:
+            s = step('刷新 Colab 运行时连接', self.refresh)
         runtime = self.services.ColabRuntime(s.url, s.token, kernel_id=s.kernel_id, session_id=s.session_id)
         def remember(field, value):
             self.controller.session[field] = value
             self.controller.save_session()
         runtime.on_kernel_started = lambda value: remember('kernel_id', value)
         runtime.on_session_started = lambda value: remember('session_id', value)
-        self.application_id = job['config'].get('app_id', 'h3')
         if self.controller.session:
             self.controller.session['app_id'] = self.application_id
             self.controller.save_session()
-        application = self.services.applications.get(self.application_id)
         source = application.source(self.services.BASE, job['config'])
         job.setdefault('consumer_run_id', uuid.uuid4().hex)
         self.controller.save_jobs()
         control_source = (self.services.BASE / 'remote_consumer.py').read_text(encoding='utf-8')
         source += '\n' + control_source + '\n_lstudio_app_run = run\n'
         source += 'def run(config):\n    config["_consumer_run_id"] = ' + repr(job['consumer_run_id']) + '\n    return consumer_run(_lstudio_app_run, config)\n'
-        if self.services.drive_cache.enabled:
+        use_drive_cache = self.services.drive_cache.enabled and getattr(application, 'uses_drive_cache', True)
+        if use_drive_cache:
             import base64
             cache_source = (self.services.BASE / 'drive_cache_remote.py').read_bytes()
             source += '\nimport types, base64\n_drive_module = types.ModuleType("drive_cache_remote")\n'
@@ -274,9 +338,12 @@ class ColabProvider:
         for name in application.input_assets(job['config']):
             asset = self.services.asset_library.resolve(name)
             self.services.TimedContents(s).upload(str(asset), 'content/' + asset.name)
-        code = application.invocation(source, job)
+        code = application.invocation(source, {**job, 'reuse_model': True} if warm_gemma else job)
         lines_seen = set()
+        submitted_at = None
+
         def output_hook(output):
+            nonlocal submitted_at
             self.controller.check_cancelled(job)
             for line in str(output.get('text', '')).splitlines():
                 if line.startswith(application.event_prefix) and line not in lines_seen:
@@ -285,6 +352,27 @@ class ColabProvider:
                     except ValueError:
                         continue
                     lines_seen.add(line)
+                    if submitted_at is not None:
+                        elapsed = time.monotonic() - submitted_at
+                        submitted_at = None
+                        self.controller.event(job, 'connect', f'已收到 Colab 内核首条任务日志，用时 {elapsed:.1f} 秒')
+                    if payload['stage'] in ('draft', 'debug') and application.spec.output_kind == 'text':
+                        with self.controller.lock:
+                            draft = payload.get('draft', '')
+                            # Drafts are cumulative so reconnects cannot duplicate text.
+                            if len(draft) > len(self.controller.text_draft):
+                                self.controller.text_draft = draft
+                            debug = self.controller.text_debug
+                            if debug.get('job_id') != job['id']:
+                                debug = {'job_id': job['id']}
+                            if 'gpu' in payload:
+                                debug.update(gpu=payload['gpu'], sampled_at=self.controller.now(), endpoint=s.endpoint)
+                            if 'lines' in payload:
+                                debug['lines'] = [self.services.safe_error(RuntimeError(line)) for line in payload['lines']]
+                            if 'metrics' in payload:
+                                debug['metrics'] = payload['metrics']
+                            self.controller.text_debug = debug
+                        continue
                     if payload.get('gpu_info'):
                         job['gpu_info'] = payload['gpu_info']
                     if payload.get('prompt_id'):
@@ -308,31 +396,59 @@ class ColabProvider:
                     if payload['stage'] == 'failure':
                         job['safe_release'] = payload.get('safe_release', False)
                     self.controller.event(job, payload['stage'], payload['message'])
-        try:
-            self.services.enable_cancellation(runtime, lambda: self.controller.check_cancelled(job))
-            if s.kernel_id and s.session_id:
+        def connect_kernel():
+            try:
+                self.services.enable_cancellation(runtime, lambda: self.controller.check_cancelled(job))
+            except Exception as exc:
+                response = getattr(exc, 'response', None)
+                if not warm_gemma or getattr(response, 'status_code', None) not in (401, 403, 404):
+                    raise
                 import requests
-                response = requests.get(s.url.rstrip('/') + '/api/kernels',
-                    params={'authuser':'0','colab-runtime-proxy-token':s.token},
-                    headers={'X-Colab-Client-Agent':'colab-cli','X-Colab-Runtime-Proxy-Token':s.token},
-                    timeout=(10,20))
-                response.raise_for_status()
-                kernels = response.json()
-                if not isinstance(kernels, list):
-                    raise RuntimeError('无法确认原内核状态，运行时保留')
+                raise requests.ConnectionError('Colab 代理连接信息需要刷新', response=response) from exc
+
+        def read_kernel_states():
+            import requests
+            response = requests.get(s.url.rstrip('/') + '/api/kernels',
+                params={'authuser':'0','colab-runtime-proxy-token':s.token},
+                headers={'X-Colab-Client-Agent':'colab-cli','X-Colab-Runtime-Proxy-Token':s.token},
+                timeout=(10,20))
+            response.raise_for_status()
+            kernels = response.json()
+            if not isinstance(kernels, list):
+                raise RuntimeError('无法确认原内核状态，运行时保留')
+            return kernels
+
+        completed = False
+        try:
+            step('连接 Jupyter 内核和 WebSocket', connect_kernel)
+            if warm_gemma:
+                # The connection already fetches the kernel model before opening the socket.
+                client = runtime.kernel_client
+                if client.id and client.id != s.kernel_id:
+                    remember('kernel_id', client.id)
+                if client.id != s.kernel_id or client.execution_state != 'idle':
+                    raise RuntimeBusy('Jupyter 内核状态有变化，等待重新确认')
+            elif s.kernel_id and s.session_id:
+                kernels = step('核对 Jupyter 内核执行状态', read_kernel_states)
                 if any(k.get('id') == s.kernel_id and k.get('execution_state') == 'busy' for k in kernels):
+                    if text_job and not job.get('execution_started'):
+                        raise RuntimeBusy('Jupyter 内核仍在执行，等待重新确认')
                     self.controller.event(job, 'recover', '远端原任务仍在执行，已重新连接进度；不重复提交')
                     observed = self.services.observe_execution(runtime, s.session_id, output_hook)
                     errors = [o for o in observed if o.get('output_type') == 'error']
                     if errors:
                         raise RuntimeError(errors[-1].get('evalue','远端原任务执行失败'))
                     if job.get('remote_result'):
+                        completed = True
                         return
                     self.controller.event(job, 'recover', '原内核已空闲，检查并恢复本任务已生成的结果')
             job['execution_started'] = True
             self.controller.save_jobs()
-            outputs = runtime.execute_code(code, allow_stdin=self.services.drive_cache.enabled,
-                stdin_hook=self.services.drive_cache.runtime_stdin_hook(runtime) if self.services.drive_cache.enabled and self.services.drive_cache.backend == 'api' else None,
+            if text_job:
+                self.controller.event(job, 'connect', '正在向 Colab 内核提交 Gemma 任务')
+                submitted_at = time.monotonic()
+            outputs = runtime.execute_code(code, allow_stdin=use_drive_cache,
+                stdin_hook=self.services.drive_cache.runtime_stdin_hook(runtime) if use_drive_cache and self.services.drive_cache.backend == 'api' else None,
                 output_hook=output_hook, timeout=4500)
             for output in outputs:
                 output_hook(output)
@@ -341,8 +457,13 @@ class ColabProvider:
                 raise RuntimeError(errors[-1].get('evalue', 'Colab 执行失败'))
             if not job.get('remote_result'):
                 raise RuntimeError('远程执行结束，但未收到应用结果；运行时保留以便检查。')
+            completed = True
         finally:
             runtime.stop()
+            if (text_job and completed and session is self.controller.session
+                    and runtime.kernel_id and runtime.kernel_id == session.get('kernel_id')
+                    and runtime.session_id and runtime.session_id == session.get('session_id')):
+                self._gemma_idle = (session, session['kernel_id'], session['session_id'])
 
     def download(self, result, target):
         path = PurePosixPath(result['path'])
@@ -482,14 +603,23 @@ print('H3_DRIVE_UPLOAD ' + json.dumps(value))
                 self.controller.save_session()
         runtime.on_kernel_started = lambda value: remember('kernel_id', value)
         runtime.on_session_started = lambda value: remember('session_id', value)
-        application = self.services.applications.get(self.application_id)
+        app_id = 'h3'
+        if managed:
+            app_id = (self.controller.session or {}).get('app_id') or self.application_id
+        application = self.services.applications.get(app_id)
         code = application.idle_probe
         try:
             outputs = runtime.execute_code(code, timeout=20)
             for output in outputs:
                 for line in str(output.get('text', '')).splitlines():
                     if line.startswith(application.idle_marker):
-                        return json.loads(line[len(application.idle_marker):])['idle'] is True
+                        result = json.loads(line[len(application.idle_marker):])
+                        if managed and result.get('gpu') and application.spec.output_kind == 'text':
+                            with self.controller.lock:
+                                if endpoint == (self.controller.session or {}).get('endpoint'):
+                                    self.controller.text_debug.update(gpu=result['gpu'], sampled_at=self.controller.now(),
+                                                                      endpoint=endpoint)
+                        return result['idle'] is True
             raise RuntimeError('无法确认 Colab 生成队列，保留显卡，请稍后检查。')
         finally:
             runtime.stop()

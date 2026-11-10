@@ -8,7 +8,11 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
 
+import requests
+
 import app
+from apps.gemma_chat import remote_gemma
+from apps.gemma_chat.application import GemmaJobConfig
 from runtime_recovery import observe_execution, enable_cancellation, TaskCancelled, CancellableWait, cancellable_receive
 from jupyter_kernel_client.wsclient import KernelWebSocketClient
 from tests.test_app import FakeTransport
@@ -166,6 +170,148 @@ class RecoveryTests(unittest.TestCase):
                 runtime.return_value.stop.assert_called_once()
             self.assertEqual(job['remote_result'],result)
             self.assertTrue(any(e['stage']=='recover' for e in job['events']))
+
+    def test_gemma_uses_confirmed_session_and_times_kernel_steps(self):
+        for retry in (False, True):
+            with self.subTest(retry=retry), tempfile.TemporaryDirectory() as temp:
+                control = app.Controller(Path(temp), Path(temp))
+                control.session = dict(endpoint='owned', url='https://example.invalid', token='test-only',
+                                       name='test', app_id='gemma_chat', kernel_id='kernel', session_id='session')
+                job = dict(id='test', endpoint='owned', status='running', events=[],
+                           config=GemmaJobConfig(operation='reply').model_dump(), reconnect_attempts=int(retry))
+                control.jobs[job['id']] = job
+                control.active = job['id']
+                transport = app.ColabProvider(control, app.runtime_services)
+                response = MagicMock()
+                response.json.return_value = [{'id': 'kernel', 'execution_state': 'idle'}]
+                output = {'text': 'GEMMA_EVENT ' + json.dumps({
+                    'stage': 'result', 'message': '回复完成', 'result': {'text': 'test'},
+                })}
+
+                with patch.object(transport, 'refresh', return_value=app.SessionState(**control.session)) as refresh, \
+                        patch('app.ColabRuntime') as runtime, patch('app.enable_cancellation'), \
+                        patch('requests.get', return_value=response):
+                    runtime.return_value.execute_code.return_value = [output]
+                    transport.execute(job)
+                    self.assertEqual(refresh.call_count, int(retry))
+                    runtime.return_value.execute_code.assert_called_once()
+
+                messages = [event['message'] for event in job['events']]
+                self.assertIn('连接 Jupyter 内核和 WebSocket', messages)
+                self.assertIn('核对 Jupyter 内核执行状态', messages)
+                self.assertIn('正在向 Colab 内核提交 Gemma 任务', messages)
+                self.assertTrue(any(message.startswith('已收到 Colab 内核首条任务日志，用时 ') for message in messages))
+                self.assertEqual(job['remote_result'], {'text': 'test'})
+
+    def test_gemma_warm_reply_skips_full_probe_and_defers_if_kernel_changed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            control = app.Controller(Path(temp), Path(temp))
+            control.session = dict(endpoint='owned', url='https://example.invalid', token='test-only',
+                                   name='test', app_id='gemma_chat', accelerator='A100',
+                                   kernel_id='kernel', session_id='session')
+            transport = control.transport
+
+            def enqueue(job_id, operation):
+                job = dict(id=job_id, status='queued', events=[], queue_front=True,
+                           config=GemmaJobConfig(operation=operation, gpu='A100').model_dump())
+                control.jobs[job_id] = job
+                return job
+
+            def output(result):
+                return [{'text': 'GEMMA_EVENT ' + json.dumps({
+                    'stage': 'result', 'message': 'done', 'result': result,
+                })}]
+
+            opening = enqueue('open', 'open')
+            response = MagicMock()
+            response.json.return_value = [{'id': 'kernel', 'execution_state': 'idle'}]
+            with patch.object(control, 'refresh_consumer', return_value={'state': 'idle'}) as full_probe, \
+                    patch.object(transport, 'refresh', return_value=app.SessionState(**control.session)) as refresh, \
+                    patch('app.ColabRuntime') as runtime_type, patch('app.enable_cancellation') as connect, \
+                    patch('app.observe_execution') as observe, patch('requests.get', return_value=response) as kernels:
+                runtime = runtime_type.return_value
+                runtime.kernel_id, runtime.session_id = 'kernel', 'session'
+                runtime.kernel_client.id = 'kernel'
+                runtime.kernel_client.execution_state = 'idle'
+                runtime.execute_code.return_value = output({'ready': True})
+                # "open" now holds the GPU as a chat session; end it right after it is ready.
+                with patch.object(control, '_chat_end_reason', return_value='shutdown'):
+                    control._run_queue()
+                self.assertEqual(opening['status'], 'done')
+                self.assertEqual(opening['chat_session'], 'ended')
+                full_probe.assert_called_once()
+                refresh.assert_called_once()
+                full_probe.reset_mock()
+                refresh.reset_mock()
+                kernels.reset_mock()
+                runtime.execute_code.reset_mock()
+
+                reply = enqueue('reply', 'reply')
+                runtime.execute_code.return_value = output({'text': 'test'})
+                control._run_queue()
+                self.assertEqual(reply['status'], 'done')
+                self.assertEqual(reply['remote_result'], {'text': 'test'})
+                full_probe.assert_not_called()
+                refresh.assert_not_called()
+                kernels.assert_not_called()
+                runtime.execute_code.assert_called_once()
+                self.assertIn('"reuse_model": true', runtime.execute_code.call_args.args[0])
+
+                reconnected = enqueue('reconnected', 'reply')
+                expired = MagicMock(status_code=403)
+                connect.side_effect = [requests.HTTPError(response=expired), None]
+                runtime.execute_code.reset_mock()
+                with patch.object(control.cancel_wakeup, 'wait'):
+                    control._run_queue()
+                self.assertEqual(reconnected['status'], 'done')
+                self.assertEqual(reconnected['reconnect_attempts'], 1)
+                refresh.assert_called_once()
+                runtime.execute_code.assert_called_once()
+                self.assertNotIn('"reuse_model": true', runtime.execute_code.call_args.args[0])
+                connect.side_effect = None
+
+                deferred = enqueue('deferred', 'reply')
+                runtime.execute_code.reset_mock()
+                connect.reset_mock()
+                runtime.kernel_client.execution_state = 'busy'
+                control._run_queue()
+                self.assertEqual(deferred['status'], 'queued')
+                self.assertTrue(deferred['queue_front'])
+                self.assertFalse(deferred.get('execution_started'))
+                self.assertFalse(transport.can_reuse_gemma(deferred))
+                observe.assert_not_called()
+                connect.assert_called_once()
+                runtime.execute_code.assert_not_called()
+
+                full_probe.return_value = {'state': 'busy'}
+                control._run_queue()
+                full_probe.assert_called_once()
+                self.assertEqual(deferred['status'], 'queued')
+
+    def test_gemma_warm_model_checks_only_after_connection_failure(self):
+        for disconnected in (False, True):
+            with self.subTest(disconnected=disconnected):
+                template = MagicMock()
+                template.json.return_value = {'prompt': 'input'}
+                tokens = MagicMock()
+                tokens.json.return_value = {'tokens': [1]}
+                completion = MagicMock()
+                completion.__enter__.return_value.iter_lines.return_value = [
+                    b'data: {"choices":[{"delta":{"content":"reply"}}]}', b'data: [DONE]',
+                ]
+                responses = [template, tokens, completion]
+                paths = ['/apply-template', '/tokenize', '/v1/chat/completions']
+                if disconnected:
+                    responses.insert(0, requests.ConnectionError())
+                    paths.insert(0, '/apply-template')
+                with patch.object(remote_gemma, 'ensure_model', return_value='lstudio-gemma-native') as ensure, \
+                        patch.object(remote_gemma, 'event'), patch('requests.post', side_effect=responses) as post:
+                    messages = [{'role': 'user', 'content': 'input'}]
+                    result = remote_gemma.stream_reply('native', messages, reuse_model=True)
+                self.assertEqual(result['text'], 'reply')
+                self.assertEqual(ensure.call_count, int(disconnected))
+                self.assertEqual([call.args[0] for call in post.call_args_list],
+                                 [remote_gemma.SERVER + path for path in paths])
 
     def test_resume_label_does_not_claim_a_video_exists(self):
         with tempfile.TemporaryDirectory() as temp:

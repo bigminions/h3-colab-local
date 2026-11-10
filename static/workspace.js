@@ -7,6 +7,7 @@
     '#tool': 'tool',
     '#qwen_image': 'qwen_image',
     '#qi': 'qwen_image',
+    '#gemma': 'gemma',
     '#library': 'library',
     '#compute': 'compute',
     '#settings': 'connections',
@@ -16,7 +17,7 @@
   let activeApp = 'tool';
   try {
     const savedApp = localStorage.getItem('lstudio-active-app');
-    if (savedApp === 'tool' || savedApp === 'qwen_image') activeApp = savedApp;
+    if (['tool', 'qwen_image', 'gemma'].includes(savedApp)) activeApp = savedApp;
   } catch (_) {}
 
   const libraryTags = {kind: new Set(), source: new Set(), app: new Set()};
@@ -30,8 +31,8 @@
   let isManageMode = false;
   let libraryRequest = 0, librarySignature = '', previewRequest = 0, previewURL = null;
   const thumbnails = new Map();
-  const panels = {tool:'toolPage', characters:'characterPage', qwen_image:'qwenImagePage', library:'libraryPage', compute:'computePage', connections:'connectionPage'};
-  const labels = {tool:['应用','H3 视频'], characters:['应用','H3 视频'], qwen_image:['应用','Qwen-Image-2.1'], library:['工作区','素材库'], compute:['工作区','算力'], connections:['工作区','设置']};
+  const panels = {tool:'toolPage', characters:'characterPage', qwen_image:'qwenImagePage', gemma:'gemmaPage', library:'libraryPage', compute:'computePage', connections:'connectionPage'};
+  const labels = {tool:['应用','H3 视频'], characters:['应用','H3 视频'], qwen_image:['应用','Qwen-Image-2.1'], gemma:['应用','大模型对话'], library:['工作区','素材库'], compute:['工作区','算力'], connections:['工作区','设置']};
   const kinds = {images:'图片', videos:'视频', audios:'音频'};
 
 
@@ -253,11 +254,8 @@
   }
 
   function updateComputeAppInfo() {
-    const isQI = activeApp === 'qwen_image';
-    const appName = isQI ? 'Qwen-Image-2.1' : 'H3 视频';
-    const appGpuVal = isQI
-      ? ($('qiGpu')?.value || localStorage.getItem('lstudio-qi-gpu') || 'T4')
-      : ($('h3Gpu')?.value || localStorage.getItem('lstudio-h3-gpu') || 'G4');
+    const appName = labels[activeApp][1];
+    const appGpuVal = $(appGpuIds[activeApp])?.value;
     const nameEl = $('computeCurrentAppName');
     if (nameEl) nameEl.textContent = appName;
     const gpuSelect = $('gpu');
@@ -279,14 +277,11 @@
     page = next;
     const isH3 = next === 'tool';
     const isQwenImage = next === 'qwen_image';
-    const appVisible = isH3 || isQwenImage;
-    if (isH3) {
-      h3Page = 'tool';
-      activeApp = 'tool';
-      try { localStorage.setItem('lstudio-active-app', 'tool'); } catch (_) {}
-    } else if (isQwenImage) {
-      activeApp = 'qwen_image';
-      try { localStorage.setItem('lstudio-active-app', 'qwen_image'); } catch (_) {}
+    const isGemma = next === 'gemma';
+    if (isH3 || isQwenImage || isGemma) {
+      if (isH3) h3Page = 'tool';
+      activeApp = next;
+      try { localStorage.setItem('lstudio-active-app', next); } catch (_) {}
     }
     try { localStorage.setItem('lstudio-active-page', next); } catch (_) {}
     try {
@@ -326,7 +321,7 @@
     }
     if ($('workspaceSection')) $('workspaceSection').textContent = labels[next][0];
     if ($('workspaceTitle')) $('workspaceTitle').textContent = labels[next][1];
-    for (const [id, selected] of [['h3AppTab',isH3],['qwenImageAppTab',isQwenImage],['libraryPageTab',next === 'library'],['computePageTab',next === 'compute'],['connectionPageTab',next === 'connections']]) {
+    for (const [id, selected] of [['h3AppTab',isH3],['qwenImageAppTab',isQwenImage],['gemmaAppTab',isGemma],['libraryPageTab',next === 'library'],['computePageTab',next === 'compute'],['connectionPageTab',next === 'connections']]) {
       const el = $(id);
       if (el) {
         el.classList.toggle('active', selected);
@@ -341,21 +336,8 @@
         el.tabIndex = next === name ? 0 : -1;
       }
     }
-    if (next === 'tool' || next === 'characters') {
-      const h3Val = $('h3Gpu')?.value || localStorage.getItem('lstudio-h3-gpu') || 'G4';
-      if ($('gpu') && [...$('gpu').options].some(o => o.value === h3Val)) {
-        $('gpu').value = h3Val;
-      }
-      updateBalance();
-    } else if (next === 'qwen_image') {
-      const qiVal = $('qiGpu')?.value || localStorage.getItem('lstudio-qi-gpu') || 'T4';
-      if ($('gpu') && [...$('gpu').options].some(o => o.value === qiVal)) {
-        $('gpu').value = qiVal;
-      }
-      updateBalance();
-    } else if (next === 'compute') {
-      updateComputeAppInfo();
-    }
+    if (isH3 || isQwenImage || isGemma || next === 'compute') updateComputeAppInfo();
+    if (isGemma) window.GemmaChat?.refresh();
     if (next === 'library') loadLibrary();
   }
 
@@ -822,7 +804,7 @@
   let lastDiscoveredRuntimes = [];
 
   function buildGpuOptions(allRuntimes) {
-    if (allRuntimes && allRuntimes.length) lastDiscoveredRuntimes = allRuntimes;
+    if (Array.isArray(allRuntimes)) lastDiscoveredRuntimes = allRuntimes;
     const onlineCounts = {};
     for (const r of (lastDiscoveredRuntimes || [])) {
       if (r.gpu) onlineCounts[r.gpu] = (onlineCounts[r.gpu] || 0) + 1;
@@ -839,11 +821,14 @@
     });
   }
 
+  const appGpuIds = {tool: 'h3Gpu', qwen_image: 'qiGpu', gemma: 'gemmaGpu'};
+
   function syncGpuSelects(allRuntimes) {
-    if (allRuntimes && allRuntimes.length) lastDiscoveredRuntimes = allRuntimes;
     const targets = [
       { id: 'h3Gpu', cardId: 'h3GpuCard', menuId: 'h3GpuMenu', defaultGpu: 'G4', storageKey: 'lstudio-h3-gpu' },
       { id: 'qiGpu', cardId: 'qiGpuCard', menuId: 'qiGpuMenu', defaultGpu: 'T4', storageKey: 'lstudio-qi-gpu' },
+      { id: 'gemmaGpu', cardId: 'gemmaGpuCard', menuId: 'gemmaGpuMenu', defaultGpu: 'L4',
+        storageKey: 'lstudio-gemma-gpu', gpuOrder: ['L4', 'A100', 'H100', 'G4', 'T4'] },
       { id: 'gpu', defaultGpu: 'G4', storageKey: 'lstudio-compute-gpu' }
     ];
 
@@ -861,30 +846,58 @@
         H100: '旗舰算力 (80GB)',
         L4: '显存受限 · 适合短视频',
         T4: '显存不足 · 不推荐视频'
+      },
+      gemmaGpu: {
+        L4: '推荐 · 日常聊天 (24GB)',
+        A100: '高显存 · 余量充足 (80GB)',
+        H100: '高显存 · 性能优先 (80GB)',
+        G4: '高显存 · 性能优先 (96GB)',
+        T4: '备选 · CPU 分担 (16GB)'
       }
     };
 
-    function updateGpuCardDisplay(selectId, displayId, statusId, defaultDesc) {
-      const select = $(selectId), display = $(displayId), status = $(statusId);
+    function getGpuHint(targetId, val) {
+      if (targetId === 'gemmaGpu') {
+        const variant = document.querySelector('input[name="gemmaVariant"]:checked')?.value || 'native';
+        if (variant === 'gpt_oss_120b') {
+          return {
+            A100: '推荐 · 80GB 显存 (120B 必备)',
+            H100: '旗舰算力 · 80GB 显存',
+            G4: '超大显存 (96GB) · 可运行',
+            L4: '❌ 显存不足 (需 80GB，不可运行)',
+            T4: '❌ 显存不足 (需 80GB，不可运行)'
+          }[val] || '80G 显卡配置';
+        }
+        return GPU_STATUS_HINTS.gemmaGpu[val] || '按需启动';
+      }
+      return GPU_STATUS_HINTS[targetId]?.[val] || '按需启动';
+    }
+
+    function updateGpuCardDisplay(target) {
+      const select = $(target.id), display = $(target.id + 'Display'), status = $(target.id + 'Status');
       if (!select || !display) return;
       const opt = select.selectedOptions?.[0];
       const text = (opt ? opt.textContent : select.value) || '';
       const val = select.value;
+      const is120b = target.id === 'gemmaGpu' && (document.querySelector('input[name="gemmaVariant"]:checked')?.value === 'gpt_oss_120b');
+      const defGpu = is120b ? 'A100' : target.defaultGpu;
+      const isInsufficient = is120b && (val === 'L4' || val === 'T4');
       if (text.includes('(🟢')) {
         const parts = text.split('(🟢');
         display.textContent = parts[0].trim();
         if (status) {
-          status.textContent = '🟢 ' + parts[1].replace(')', '').trim();
-          status.classList.remove('status-idle');
+          const recommended = target.id === 'gemmaGpu' && val === defGpu;
+          status.textContent = (recommended ? '推荐 · ' : '🟢 ') + parts[1].replace(')', '').trim();
+          status.classList.remove('status-idle', 'status-error');
           status.classList.add('status-online');
         }
       } else {
         display.textContent = text.trim();
         if (status) {
-          const appHints = GPU_STATUS_HINTS[selectId] || {};
-          status.textContent = appHints[val] || defaultDesc || '按需启动';
+          status.textContent = getGpuHint(target.id, val) || '按需启动';
           status.classList.remove('status-online');
-          status.classList.add('status-idle');
+          status.classList.toggle('status-error', isInsufficient);
+          status.classList.toggle('status-idle', !isInsufficient);
         }
       }
     }
@@ -912,6 +925,7 @@
 
       const currentVal = select.value;
       const hints = GPU_STATUS_HINTS[target.id] || {};
+      const focusedValue = menu.contains(document.activeElement) ? document.activeElement.dataset.val : null;
       menu.replaceChildren();
 
       for (const opt of select.options) {
@@ -924,19 +938,21 @@
           baseName = parts[0].trim();
           onlineCount = parseInt(parts[1].replace(/\D/g, ''), 10) || 1;
         }
-        const hint = hints[val] || '';
+        const hint = getGpuHint(target.id, val);
         const isSelected = val === currentVal;
 
-        const item = document.createElement('div');
+        const item = document.createElement('button');
+        item.type = 'button';
+        item.tabIndex = -1;
         item.className = 'gpu-menu-item' + (isSelected ? ' selected' : '');
         item.setAttribute('role', 'option');
         item.setAttribute('aria-selected', isSelected ? 'true' : 'false');
         item.dataset.val = val;
 
-        const info = document.createElement('div');
+        const info = document.createElement('span');
         info.className = 'gpu-menu-item-info';
 
-        const header = document.createElement('div');
+        const header = document.createElement('span');
         header.className = 'gpu-menu-item-header';
 
         const nameSpan = document.createElement('strong');
@@ -953,7 +969,7 @@
         info.appendChild(header);
 
         if (hint) {
-          const descSpan = document.createElement('div');
+          const descSpan = document.createElement('span');
           descSpan.className = 'gpu-menu-item-desc';
           descSpan.textContent = hint;
           info.appendChild(descSpan);
@@ -978,10 +994,11 @@
         });
 
         menu.appendChild(item);
+        if (val === focusedValue) item.focus();
       }
     }
 
-    function toggleGpuMenu(target) {
+    function toggleGpuMenu(target, keyboard = false) {
       if (!target.menuId || !target.cardId) return;
       const menu = $(target.menuId);
       const card = $(target.cardId);
@@ -992,6 +1009,7 @@
         renderGpuMenu(target);
         menu.classList.remove('hidden');
         card.setAttribute('aria-expanded', 'true');
+        if (keyboard) menu.querySelector('[aria-selected="true"]')?.focus();
       }
     }
 
@@ -1000,19 +1018,22 @@
       if (!select) continue;
       let saved = null;
       try { saved = localStorage.getItem(target.storageKey); } catch (_) {}
-      const chosen = select.value || saved || target.defaultGpu;
-      const options = buildGpuOptions(allRuntimes);
+      const chosen = (target.id === 'gemmaGpu' && !select.dataset.syncBound ? saved : select.value) || saved || target.defaultGpu;
+      let options = buildGpuOptions(allRuntimes);
+      if (target.gpuOrder) {
+        const byValue = new Map(options.map(option => [option.value, option]));
+        options = target.gpuOrder.map(value => byValue.get(value)).filter(Boolean);
+      }
       select.replaceChildren(...options);
       if ([...select.options].some(o => o.value === chosen)) {
         select.value = chosen;
       } else {
         select.value = target.defaultGpu;
       }
-      if (target.id === 'h3Gpu') updateGpuCardDisplay('h3Gpu', 'h3GpuDisplay', 'h3GpuStatus');
-      if (target.id === 'qiGpu') updateGpuCardDisplay('qiGpu', 'qiGpuDisplay', 'qiGpuStatus');
-
       if (target.cardId && target.menuId) {
+        updateGpuCardDisplay(target);
         const card = $(target.cardId);
+        const menu = $(target.menuId);
         if (card && !card.dataset.gpuCardBound) {
           card.dataset.gpuCardBound = 'true';
           card.setAttribute('tabindex', '0');
@@ -1024,12 +1045,36 @@
             toggleGpuMenu(target);
           });
           card.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
+            if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown') {
               e.preventDefault();
-              toggleGpuMenu(target);
+              if (e.key === 'ArrowDown' && card.getAttribute('aria-expanded') === 'true') {
+                menu?.querySelector('[aria-selected="true"]')?.focus();
+              } else {
+                toggleGpuMenu(target, true);
+              }
             } else if (e.key === 'Escape') {
               closeGpuMenu(target);
             }
+          });
+          menu?.addEventListener('keydown', e => {
+            if (e.key === 'Escape') {
+              closeGpuMenu(target);
+              card.focus();
+              return;
+            }
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              e.target.closest('.gpu-menu-item')?.click();
+              return;
+            }
+            if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return;
+            e.preventDefault();
+            const items = Array.from(menu.children);
+            const index = items.indexOf(document.activeElement);
+            const step = e.key === 'ArrowDown' ? 1 : -1;
+            const next = e.key === 'Home' ? 0 : e.key === 'End' ? items.length - 1 :
+              (index + step + items.length) % items.length;
+            items[next]?.focus();
           });
         }
         renderGpuMenu(target);
@@ -1039,10 +1084,11 @@
         select.dataset.syncBound = 'true';
         select.addEventListener('change', () => {
           try { localStorage.setItem(target.storageKey, select.value); } catch (_) {}
-          if (target.id === 'h3Gpu') updateGpuCardDisplay('h3Gpu', 'h3GpuDisplay', 'h3GpuStatus');
-          if (target.id === 'qiGpu') updateGpuCardDisplay('qiGpu', 'qiGpuDisplay', 'qiGpuStatus');
-          if (target.cardId && target.menuId) renderGpuMenu(target);
-          if (target.id === 'h3Gpu' || target.id === 'qiGpu') {
+          if (target.cardId && target.menuId) {
+            updateGpuCardDisplay(target);
+            renderGpuMenu(target);
+          }
+          if (target.id === appGpuIds[activeApp]) {
             const computeGpu = $('gpu');
             if (computeGpu && [...computeGpu.options].some(o => o.value === select.value)) {
               computeGpu.value = select.value;
@@ -1050,16 +1096,15 @@
             }
           }
           if (target.id === 'gpu') {
-            const isQI = activeApp === 'qwen_image';
-            const targetSelect = $(isQI ? 'qiGpu' : 'h3Gpu');
-            const targetStorage = isQI ? 'lstudio-qi-gpu' : 'lstudio-h3-gpu';
-            try { localStorage.setItem(targetStorage, select.value); } catch (_) {}
+            const tConfig = targets.find(t => t.id === appGpuIds[activeApp]);
+            const targetSelect = $(tConfig.id);
             if (targetSelect && [...targetSelect.options].some(o => o.value === select.value)) {
+              try { localStorage.setItem(tConfig.storageKey, select.value); } catch (_) {}
               targetSelect.value = select.value;
-              if (isQI) updateGpuCardDisplay('qiGpu', 'qiGpuDisplay', 'qiGpuStatus');
-              else updateGpuCardDisplay('h3Gpu', 'h3GpuDisplay', 'h3GpuStatus');
-              const tConfig = targets.find(t => t.id === (isQI ? 'qiGpu' : 'h3Gpu'));
-              if (tConfig) renderGpuMenu(tConfig);
+              if (tConfig.menuId) {
+                updateGpuCardDisplay(tConfig);
+                renderGpuMenu(tConfig);
+              }
             }
             updateBalance();
           }
@@ -1116,7 +1161,7 @@
       $('queuePlacementTitle').textContent = '加入任务队列';
       const current = status.jobs?.find(j => j.id === status.active || j.id === consumer.job_id);
       const currentApp = current?.app_id || consumer.app_id || status.occupying_app_id || waiting[0]?.app_id || targetAppId;
-      const name = currentApp === 'h3' ? 'H3 视频' : currentApp === 'qwen_image_2_1' ? 'Qwen-Image-2.1' : currentApp || '当前应用';
+      const name = ({h3: 'H3 视频', qwen_image_2_1: 'Qwen-Image-2.1', gemma_chat: '大模型对话'})[currentApp] || currentApp || '当前应用';
       const hasWaiting = waiting.length > 0;
       const processing = status.active || ['busy', 'connecting', 'switching', 'cancelling'].includes(consumer.state);
       $('queuePlacementSummary').textContent = `${name}${processing ? '正在处理' : status.managed_gpu ? '已保留环境' : '等待执行'} · 当前排队 ${waiting.length} 项`;
@@ -1158,6 +1203,7 @@
   };
   $('h3AppTab').onclick = () => show('tool');
   $('qwenImageAppTab').onclick = () => show('qwen_image');
+  if ($('gemmaAppTab')) $('gemmaAppTab').onclick = () => show('gemma');
   if ($('qwenImageToolTab')) $('qwenImageToolTab').onclick = () => show('qwen_image');
   if ($('toolPageTab')) $('toolPageTab').onclick = () => show('tool');
   $('libraryPageTab').onclick = () => show('library');
@@ -1251,7 +1297,7 @@
     const savedPage = localStorage.getItem('lstudio-active-page');
     if (hashTarget && panels[hashTarget] && hashTarget !== 'characters') {
       initialPage = hashTarget;
-      if (initialPage === 'tool' || initialPage === 'qwen_image') {
+      if (['tool', 'qwen_image', 'gemma'].includes(initialPage)) {
         activeApp = initialPage;
         try { localStorage.setItem('lstudio-active-app', activeApp); } catch (_) {}
       }

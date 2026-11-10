@@ -33,6 +33,8 @@ def consumer_run(operation, config, directory='/content', poll_seconds=1, interr
             tmp.replace(status_path)
 
     def report(stage, message, **data):
+        if stage in ('draft', 'debug'):
+            return original_event(stage, message, **data)
         with lock:
             if stage != 'heartbeat':
                 state['stage'] = stage

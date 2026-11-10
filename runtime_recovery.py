@@ -12,6 +12,10 @@ class ReconnectExhausted(RuntimeError):
     pass
 
 
+class RuntimeBusy(RuntimeError):
+    """A fresh job must wait for an occupied runtime before it submits code."""
+
+
 class CancellableWait:
     """Keep the client's event semantics while checking cancellation when quiet."""
     def __init__(self, event, check_cancelled):

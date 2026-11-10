@@ -45,6 +45,8 @@ from asset_library import AssetLibrary
 from compute_colab import ColabProvider
 from apps.h3 import H3Application, H3JobConfig
 from apps.qwen_image import QwenImageApplication, QwenImageJobConfig
+from apps.gemma_chat.application import APP_ID as GEMMA_APP_ID, GemmaApplication
+from apps.gemma_chat.workspace import GemmaWorkspace
 from workspace_runtime import ApplicationRegistry, ProviderRegistry, ProviderSpec
 from job_queue import JobStore, waiting_jobs, application_id, queue_plan
 # These imports also provide the runtime_services API injected into providers.
@@ -55,7 +57,7 @@ from colab_cli.client import Client, Prod, Variant, Accelerator, Shape
 from colab_cli.runtime import ColabRuntime
 from colab_cli.state import SessionState
 from colab_cli.contents import ContentsClient
-from runtime_recovery import observe_execution, connection_failure, TaskCancelled, ReconnectExhausted, enable_cancellation
+from runtime_recovery import observe_execution, connection_failure, TaskCancelled, ReconnectExhausted, RuntimeBusy, enable_cancellation
 
 BASE = Path(__file__).resolve().parent
 DATA = Path(os.environ.get('LSTUDIO_DATA_ROOT') or BASE).resolve()
@@ -128,7 +130,7 @@ def load_secret(path):
 
 
 COLAB_GPUS = ('G4', 'A100', 'H100', 'L4', 'T4')
-applications = ApplicationRegistry([H3Application(), QwenImageApplication()])
+applications = ApplicationRegistry([H3Application(), QwenImageApplication(), GemmaApplication()])
 providers = ProviderRegistry([
     ProviderSpec('colab', 'Google Colab', True, '使用自己的 Colab 计算单元，按需连接运行时', COLAB_GPUS),
     ProviderSpec('runpod', 'RunPod', False, '按需 GPU 实例'),
@@ -145,6 +147,11 @@ def safe_error(exc):
     # Never surface credential-bearing URL/query strings from requests exceptions.
     if hasattr(exc, 'response') and getattr(exc, 'response', None) is not None:
         response = exc.response
+        code = getattr(response, 'status_code', None)
+        if code == 503:
+            return 'Google/Colab 返回 HTTP 503（该显卡型号资源暂不可用，建议切换显卡如 L4/G4/T4 或稍后重试）。'
+        if code == 429:
+            return 'Google/Colab 返回 HTTP 429（请求过于频繁或配额受限，请稍后重试）。'
         return f'Google/Colab 请求失败（HTTP {response.status_code}），请检查授权、余额或显卡供应。'
     s = re.sub(r'https?://\S+', '[远程地址]', str(exc))
     return s[:1500]
@@ -183,7 +190,16 @@ def connection_diagnostic(exc, operation):
         reason = '网络请求超时（' + type(exc).__name__ + '）'
     elif getattr(exc, 'response', None) is not None:
         code = getattr(exc.response, 'status_code', None)
-        reason = 'Google/Colab 返回 HTTP ' + str(code) if code else safe_error(exc)
+        if code == 503:
+            reason = 'Google/Colab 返回 HTTP 503（该显卡型号资源暂不可用，建议切换显卡如 L4/G4/T4 或稍后重试）'
+        elif code == 429:
+            reason = 'Google/Colab 返回 HTTP 429（请求过于频繁或配额受限，请稍后重试）'
+        elif code in (401, 403):
+            reason = f'Google/Colab 返回 HTTP {code}（授权过期或计算单元不足，请检查账号设置）'
+        elif code:
+            reason = 'Google/Colab 返回 HTTP ' + str(code)
+        else:
+            reason = safe_error(exc)
     elif isinstance(exc, requests.ConnectionError):
         reason = '网络连接失败（' + type(exc).__name__ + '），请检查网络或代理'
     else:
@@ -345,8 +361,12 @@ class Controller:
     def __init__(self, directory=PRIVATE, videos=VIDEOS, transport=None, now=time.time, result_drive=None):
         self.directory, self.videos = directory, videos
         self.lock = threading.RLock()
+        self.consumer_probe_lock = threading.Lock()
         self.cancel_wakeup = threading.Event()
+        self.chat_wakeup = threading.Event()
         self.active = None
+        self.text_draft = ''
+        self.text_debug = {}
         self.session = None
         self.jobs = {}
         self.drive_storage = result_drive or DriveStorage(drive_cache if directory == PRIVATE else DriveCache(directory, load_secret, save_secret))
@@ -381,6 +401,12 @@ class Controller:
                 pass
         self.jobs = self.store.load_jobs()
         if self.jobs:
+            for job in self.jobs.values():
+                if job.get('chat_session') == 'ready':
+                    # The chat task ended with the local process; the runtime is
+                    # then governed by the normal idle-release policy.
+                    job.update(status='done', chat_session='ended', chat_end='restart', safe_release=True,
+                               message='本地程序重启，聊天会话已结束；如需继续请重新开启应用')
             for job in self.jobs.values():
                 if job['status'] in ('running', 'cancelling'):
                     job.update(status='interrupted', message='本地程序中断；等待核对远端任务，可继续取回结果。')
@@ -417,8 +443,12 @@ class Controller:
             return self.release_status()
 
     def release_status(self):
+        warmup = self.release_policy.mode == 'always' and (self.session or {}).get('gemma_warmup')
         deadline = (self.idle_since + self.release_policy.idle_minutes * 60
-                    if self.session and not self.active and not waiting_jobs(self.jobs) and self.idle_since is not None and self.release_policy.mode == 'idle' else None)
+                    if self.session and not self.active and not waiting_jobs(self.jobs) and self.idle_since is not None
+                    and (self.release_policy.mode == 'idle' or warmup) else None)
+        if (held := self.held_chat_job()) and (limit := self.chat_idle_limit()) is not None:
+            deadline = held.get('last_activity', self.now()) + limit
         return {'policy': self.release_policy.model_dump(), 'revision': self.release_revision,
                 'deadline': deadline, 'checking': self.release_checking,
                 'error': self.release_error, 'message': self.release_message,
@@ -489,6 +519,8 @@ class Controller:
             job = self.jobs.get(job_id)
             if job is None:
                 raise HTTPException(404,'任务不存在')
+            if job.get('chat_session') == 'ready' and self.end_chat_session(job_id):
+                return {'ok': True, 'pending': True, 'message': '正在结束聊天会话'}
             targets = self.cancel_targets(job)
             target_ids = {j['id'] for j in targets}
             if job.get('status') == 'queued' and (not self.active or self.active not in target_ids):
@@ -538,18 +570,52 @@ class Controller:
                 self.transport.cancel_pending_assignment(job)
             with self.lock:
                 for target in self.cancel_targets(job):
-                    saved = bool(target.get('file') or target.get('drive'))
-                    target.update(status='done' if saved else 'cancelled',safe_release=True,batch_complete=True)
-                    target.pop('cancel_error',None)
+                    saved = bool(target.get('file') or target.get('drive') or
+                                 (application_id(target) == GEMMA_APP_ID and target.get('safe_release') and target.get('remote_result')))
+                    target.update(status='done' if saved else 'cancelled', safe_release=True, batch_complete=True, assignment_pending=False)
+                    target.pop('cancel_error', None)
                 self.release_error = self.release_message = None
+                has_env = bool(self.session)
                 message = ('已取消剩余执行，已保存的结果和显卡环境保留' if job.get('file') or job.get('drive') else
-                           '任务已取消，显卡环境保留，继续处理后续任务')
+                           ('任务已取消，显卡环境保留，继续处理后续任务' if has_env else '任务已取消，未占用显卡，继续处理后续任务'))
                 if job.get('auto_cancel_reason'):
                     message += '；失败原因：' + job['auto_cancel_reason']
-                self.event(job,'done' if job.get('file') or job.get('drive') else 'cancelled', message)
+                self.event(job, 'done' if job.get('file') or job.get('drive') else 'cancelled', message)
         except Exception as exc:
-            job.update(status='error',safe_release=False,cancel_error=safe_error(exc))
-            self.event(job,'cancel','取消尚未确认：' + safe_error(exc) + '；环境保留，请重试取消')
+            resp = getattr(exc, 'response', None)
+            is_client_error = resp is not None and getattr(resp, 'status_code', None) in (400, 404)
+            no_remote_gpu = False
+            try:
+                if hasattr(self.transport, 'client'):
+                    client = self.transport.client()
+                    online = client.list_assignments()
+                    endpoint = (self.session or {}).get('endpoint') or job.get('endpoint')
+                    if not endpoint or not any(a.endpoint == endpoint for a in online):
+                        no_remote_gpu = True
+                        if self.session and not any(a.endpoint == self.session.get('endpoint') for a in online):
+                            self.session = None
+                            self.save_session()
+                else:
+                    if not self.session:
+                        no_remote_gpu = True
+            except Exception:
+                if not self.session and is_client_error:
+                    no_remote_gpu = True
+
+            if no_remote_gpu or (not self.session and is_client_error):
+                with self.lock:
+                    for target in self.cancel_targets(job):
+                        target.update(status='cancelled', safe_release=True, batch_complete=True, assignment_pending=False)
+                        target.pop('cancel_error', None)
+                    self.release_error = self.release_message = None
+                    message = '任务已取消，未占用显卡，继续处理后续任务'
+                    if job.get('auto_cancel_reason'):
+                        message += '；失败原因：' + job['auto_cancel_reason']
+                    self.event(job, 'cancelled', message)
+                return
+
+            job.update(status='error', safe_release=False, cancel_error=safe_error(exc))
+            self.event(job, 'cancel', '取消尚未确认：' + safe_error(exc) + '；环境保留，请重试取消')
         finally:
             job.pop('cancel_finishing',None)
             self.save_jobs()
@@ -559,6 +625,8 @@ class Controller:
             job = self.jobs.get(job_id)
             if not job or not job.get('config'):
                 raise HTTPException(404, '任务不存在或缺少配置')
+            if application_id(job) == GEMMA_APP_ID:
+                raise HTTPException(409, '请在 Gemma 聊天页面重新提交')
             if job.get('file') or job.get('drive'):
                 raise HTTPException(400, '该任务已有成片，无需重新提交')
             if job.get('status') in ('running', 'queued', 'cancelling'):
@@ -663,6 +731,8 @@ class Controller:
 
     def check_and_release(self, discard_pending=False, force=False):
         with self.lock:
+            if self.held_chat_job():
+                raise HTTPException(409, 'Gemma 聊天正在占用显卡，请先在 Gemma 页面关闭应用')
             if self.active:
                 raise HTTPException(409, '任务执行中，请先取消任务，确认停止后再释放显卡')
             if not self.session:
@@ -703,7 +773,7 @@ class Controller:
             if not self.session or self.active or waiting_jobs(self.jobs) or self.release_policy.mode == 'manual' or self.now() < self.release_retry_at:
                 return
             deadline = self.release_status()['deadline']
-            if self.release_policy.mode == 'idle' and (deadline is None or self.now() < deadline):
+            if (self.release_policy.mode == 'idle' or self.session.get('gemma_warmup')) and (deadline is None or self.now() < deadline):
                 return
             try:
                 self.check_and_release()
@@ -718,7 +788,7 @@ class Controller:
         def monitor():
             while not self.monitor_stop.wait(5):
                 try:
-                    self.refresh_consumer()
+                    self.refresh_consumer(background=True)
                     if waiting_jobs(self.jobs):
                         self.ensure_worker()
                     self.idle_tick()
@@ -740,6 +810,8 @@ class Controller:
             self.store.save_jobs(self.jobs)
 
     def history_clearable(self, job):
+        if application_id(job) == GEMMA_APP_ID:
+            return False
         if job['id'] in self.recycling or job['id'] in self.preparing_videos:
             return False
         if job.get('status') in ('queued', 'running', 'cancelling') or job['id'] == self.active:
@@ -954,6 +1026,8 @@ class Controller:
                     else:
                         raise HTTPException(404, '作品记录不存在')
                 else:
+                    if application_id(job) == GEMMA_APP_ID:
+                        raise HTTPException(409, '聊天记录在 Gemma 应用中管理')
                     batch_id = job.get('batch_id')
                     if batch_id:
                         targets = [j for j in self.jobs.values() if j.get('batch_id') == batch_id and not j.get('history_hidden') and self.history_clearable(j)]
@@ -1020,21 +1094,50 @@ class Controller:
         with self.lock:
             return queue_plan(self.jobs, self.session)
 
-    def refresh_consumer(self):
+    def refresh_consumer(self, *, background=False):
+        with self.consumer_probe_lock:
+            with self.lock:
+                endpoint = (self.session or {}).get('endpoint')
+                active_id = self.active
+                held = self.held_chat_job()
+            if held and endpoint:
+                # The chat task owns the runtime; probing would only queue cells
+                # behind the model server and cannot change the answer.
+                return self._record_consumer(endpoint, {'state': 'busy', 'app_id': GEMMA_APP_ID,
+                                                        'job_id': held['id'], 'stage': 'chat', 'fresh': True})
+            if not endpoint:
+                return self._record_consumer(endpoint, {'state': 'connecting' if active_id else 'disconnected'})
+            observe = self.transport.consumer_status
+            if background:
+                observe = getattr(self.transport, 'observe_consumer', observe)
+            for attempt in range(2):
+                try:
+                    state = observe()
+                except Exception as exc:
+                    transient = connection_failure(exc)
+                    reason = connection_diagnostic(exc, 'Colab 状态探测')['reason']
+                    state = {'state': 'unknown', 'error': 'Colab 状态探测：' + reason}
+                    if transient:
+                        state['probe_retry'] = 'retrying' if attempt == 0 else 'waiting'
+                    if transient and attempt == 0:
+                        observed = self._record_consumer(endpoint, state)
+                        if observed.get('endpoint') != endpoint:
+                            return observed
+                        if not self.monitor_stop.wait(.5):
+                            with self.lock:
+                                if endpoint != (self.session or {}).get('endpoint'):
+                                    return self._record_consumer(endpoint, state)
+                            continue
+                        state['probe_retry'] = 'waiting'
+                return self._record_consumer(endpoint, state)
+
+    def _record_consumer(self, endpoint, state):
         with self.lock:
-            endpoint = (self.session or {}).get('endpoint')
-            active_id = self.active
-        if not endpoint:
-            state = {'state': 'connecting' if active_id else 'disconnected'}
-        else:
-            try:
-                state = self.transport.consumer_status()
-            except Exception as exc:
-                state = {'state': 'unknown', 'error': safe_error(exc)}
-        with self.lock:
-            if endpoint == (self.session or {}).get('endpoint'):
-                self.consumer = {**state, 'endpoint': endpoint, 'checked_at': self.now()}
-                self.store.set_state('consumer', self.consumer)
+            current_endpoint = (self.session or {}).get('endpoint')
+            if endpoint != current_endpoint:
+                return {'state': 'unknown' if current_endpoint else 'disconnected', 'endpoint': current_endpoint}
+            self.consumer = {**state, 'endpoint': endpoint, 'checked_at': self.now()}
+            self.store.set_state('consumer', self.consumer)
             return dict(self.consumer)
 
     def queue_blocker(self):
@@ -1071,30 +1174,45 @@ class Controller:
                     self.save_jobs()
                     self.save_release_state()
                 try:
-                    if self.session:
+                    warm_gemma = application_id(target) == GEMMA_APP_ID and getattr(
+                        self.transport, 'can_reuse_gemma', lambda job: False)(target)
+                    if self.session and not warm_gemma:
+                        checking_gemma = application_id(target) == GEMMA_APP_ID
+                        if checking_gemma:
+                            started = time.monotonic()
+                            self.event(target, 'connect', '正在确认 Colab 运行时是否空闲')
                         state = self.refresh_consumer()
+                        if checking_gemma:
+                            elapsed = time.monotonic() - started
+                            result = {'idle': '运行时空闲', 'busy': '运行时仍在执行',
+                                      'disconnected': '运行时已断开'}.get(state['state'], '运行时状态待确认')
+                            self.event(target, 'connect', f'{result}，检查用时 {elapsed:.1f} 秒')
+                        session = self.session
                         recovering = (target.get('recover_existing') and state['state'] == 'busy'
                                       and state.get('job_id') == target['id']
                                       and state.get('run_id') == target.get('consumer_run_id'))
-                        if state['state'] != 'idle' and not recovering:
+                        if not session or state['state'] != 'idle' and not recovering:
                             with self.lock:
-                                target['status'] = 'queued'
+                                if target['status'] == 'running':
+                                    target['status'] = 'queued'
                             return
                         config = target['config']
                         if (self.provider_id != config.get('provider_id', 'colab') or
-                                self.session.get('app_id') != application_id(target) or
-                                self.session.get('accelerator') != config.get('gpu')):
+                                session.get('app_id') != application_id(target) or
+                                session.get('accelerator') != config.get('gpu')):
                             self.consumer = {**self.consumer, 'state': 'switching'}
-                            self.verify_saved_results(self.session['endpoint'])
+                            self.verify_saved_results(session['endpoint'])
                             self.transport.release()
                             # Providers clear session only after release has been confirmed.
                             if self.session:
                                 raise RuntimeError('释放尚未确认，暂停环境切换')
-                    target['queue_front'] = False
                     self.cancel_wakeup.clear()
                     target.pop('history_hidden', None)
                     self.run(target)
                     with self.lock:
+                        if target['status'] == 'queued':
+                            return
+                        target['queue_front'] = False
                         target.pop('recover_existing', None)
                         if target.get('batch_id'):
                             siblings = self.cancel_targets(target)
@@ -1133,6 +1251,9 @@ class Controller:
         if config is not None:
             providers.validate(applications.get(config.app_id), config.provider_id, config.gpu)
         with self.lock:
+            is_gemma = config is not None and config.app_id == GEMMA_APP_ID
+            if retry and application_id(self.jobs.get(retry, {})) == GEMMA_APP_ID:
+                raise HTTPException(409, '请在 Gemma 聊天页面处理这条消息')
             if retry and self.jobs.get(retry, {}).get('drive'):
                 job = self.jobs[retry]
                 if job.get('history_hidden') or retry in self.recycling:
@@ -1144,12 +1265,12 @@ class Controller:
                 return retry
             if (PRIVATE / 'drive-cache-session.dat').exists():
                 raise HTTPException(409, 'CPU 正在准备 Drive 模型缓存，请等保存完成后再生成')
-            if drive_cache.enabled and drive_cache.backend == 'api':
+            if not is_gemma and drive_cache.enabled and drive_cache.backend == 'api':
                 try:
                     drive_cache.quota()
                 except Exception as exc:
                     raise HTTPException(400, 'Drive 缓存未就绪：' + safe_error(exc) + '；尚未申请显卡') from None
-            if self.drive_storage.enabled:
+            if not is_gemma and self.drive_storage.enabled:
                 try:
                     self.drive_storage.preflight()
                 except Exception as exc:
@@ -1181,7 +1302,7 @@ class Controller:
                 job_id = uuid.uuid4().hex
                 job = dict(id=job_id, config=config.model_dump(), events=[], status='queued', stage='connect', message='排队中，等待执行', created=time.time())
                 self.jobs[job_id] = job
-                if config.count > 1:
+                if getattr(config, 'count', 1) > 1:
                     for index in range(config.count):
                         child = job if index == 0 else dict(id=uuid.uuid4().hex, events=[], status='queued',
                             stage='connect', message='排队中，等待执行', created=job['created'] + index / 1000)
@@ -1204,6 +1325,9 @@ class Controller:
     def run(self, job):
         application = applications.get(job['config'].get('app_id', 'h3'))
         config = application.config_model(**job['config'])
+        output_kind = self.app_output_kind(application)
+        opening_chat = output_kind == 'text' and config.operation == 'open'
+        self.text_draft = ''
         try:
             if config.provider_id != self.provider_id:
                 if self.session:
@@ -1213,18 +1337,30 @@ class Controller:
             if job.get('drive'):
                 self.download_drive_result(job)
                 return
-            self.event(job, 'connect', '正在连接 ' + config.gpu + '；只有提交任务才申请显卡')
+            if output_kind == 'text' and not opening_chat and self.session:
+                self.event(job, 'connect', f'使用已有 {config.gpu} 运行时，准备发送消息')
+            else:
+                self.event(job, 'connect', '正在连接 ' + config.gpu + '；只有提交任务才申请显卡')
             self.connected_operation(job,lambda:self.transport.connect(config), '连接／申请 ' + config.gpu)
             job['endpoint'] = self.session['endpoint']
             self.check_cancelled(job)
             self.save_jobs()
             self.event(job, 'connect', config.gpu + ' 运行时已连接，准备执行任务')
             if not job.get('remote_result'):
-                self.connected_operation(job,lambda:self.transport.execute(job))
+                self.connected_operation(job,lambda:self.transport.execute(job),
+                                         '执行 Gemma 任务' if output_kind == 'text' else '执行视频任务')
             self.check_cancelled(job)
             result = job['remote_result']
-            output_kind = self.app_output_kind(application)
-            if self.drive_storage.enabled and output_kind == 'video':
+            if output_kind == 'text':
+                valid = result.get('ready') is True if opening_chat else isinstance(result.get('text'), str) and bool(result['text'])
+                if not valid:
+                    raise RuntimeError('远端 Gemma 结果格式无效')
+                job['safe_release'] = True
+                with self.lock:
+                    if self.session and self.session.get('endpoint') == job['endpoint']:
+                        self.session.update(gemma_variant=config.variant, gemma_warmup=opening_chat)
+                        self.save_session()
+            elif self.drive_storage.enabled and output_kind == 'video':
                 self.event(job, 'download', '从 Colab 上传到 Drive，校验后自动下载到本机')
                 job['drive'] = self.connected_operation(job,lambda:self.transport.upload_drive(job), '上传视频到 Drive')
                 self.save_jobs()
@@ -1242,12 +1378,20 @@ class Controller:
                 target = output_folder / (job['id'] + application.output_extension)
                 partial.replace(target)
                 job['file'] = target.name
-            job['metadata'] = {k: result[k] for k in application.metadata_fields if k in result}
-            saved = '图片已保存到本机' if output_kind == 'image' else ('视频已上传 Drive 并校验' if job.get('drive') else '视频已保存到本机')
+            job['metadata'] = {k: result[k] for k in getattr(application, 'metadata_fields', ()) if k in result}
+            if output_kind == 'text':
+                saved = '模型已就绪' if opening_chat else '回复已保存到本机'
+            else:
+                saved = '图片已保存到本机' if output_kind == 'image' else ('视频已上传 Drive 并校验' if job.get('drive') else '视频已保存到本机')
             self.event(job, 'saved', saved)
             self.check_cancelled(job)
+            if opening_chat:
+                # A chat is one task from "open" to "close": hold the GPU so queued
+                # jobs of other applications wait instead of switching it away.
+                self.hold_chat_session(job)
+                return
             has_more = any(j.get('status') == 'queued' and not j.get('cancel_requested') for j in self.jobs.values())
-            release_now = self.release_policy.mode == 'always' and not has_more
+            release_now = self.release_policy.mode == 'always' and not has_more and not opening_chat
             if release_now:
                 self.event(job, 'release', '正在释放 Colab 显卡')
                 try:
@@ -1257,7 +1401,7 @@ class Controller:
                     self.release_error = safe_error(exc)
                     job['gpu_release_error'] = self.release_error
                     self.release_retry_at = self.now() + 60
-                    self.event(job, 'release', '视频已保存，但释放尚未确认：' + safe_error(exc))
+                    self.event(job, 'release', saved + '，但释放尚未确认：' + safe_error(exc))
                     if not job.get('drive'):
                         return
             if job.get('drive'):
@@ -1275,14 +1419,25 @@ class Controller:
                 return
             job['status'] = 'done'
             kept = (f'{saved}，闲置 {self.release_policy.idle_minutes} 分钟后检查并释放显卡'
-                     if self.release_policy.mode == 'idle' else saved + '，显卡保留；请手动检查并释放')
+                     if self.release_policy.mode == 'idle' or opening_chat and self.release_policy.mode == 'always'
+                     else saved + '，显卡保留；请手动检查并释放')
             self.event(job, 'done', saved + '，显卡已释放' if release_now else kept)
+        except RuntimeBusy as exc:
+            with self.lock:
+                if self.active == job['id']:
+                    self.active = None
+                if job.get('cancel_requested'):
+                    job.update(status='cancelled', safe_release=True, batch_complete=True)
+                    self.event(job, 'cancelled', '任务提交前已取消')
+                else:
+                    job['status'] = 'queued'
+                    self.event(job, 'connect', str(exc))
         except Exception as exc:
             if job.get('cancel_requested') or isinstance(exc, (TaskCancelled,ReconnectExhausted)):
                 job['cancel_requested'] = True
                 if isinstance(exc,ReconnectExhausted):
                     job['auto_cancel_reason'] = str(exc)
-                    self.event(job,'cancel','自动重连连续失败：' + str(exc) + '；正在确认原任务状态，保留显卡环境')
+                    self.event(job,'cancel','自动重连连续失败：' + str(exc) + ('；正在确认原任务状态，保留显卡环境' if self.session else '；正在取消任务，未占用显卡'))
                 self.finish_cancel(job)
                 return
             job['status'] = 'error'
@@ -1297,7 +1452,10 @@ class Controller:
                     message += '；失败任务的显卡已释放。'
                 except Exception as release_exc:
                     message += '；释放失败：' + safe_error(release_exc)
-            elif can_retrieve:
+            elif output_kind == 'text' and job.get('assignment_pending') and not self.session:
+                job['safe_release'] = False
+                message += '；显卡申请状态待确认，请先关闭应用。'
+            elif can_retrieve and not (output_kind == 'text' and job.get('safe_release')):
                 job['safe_release'] = False
                 message += '；运行时保留，请重试取回结果。'
             else:
@@ -1309,11 +1467,130 @@ class Controller:
             self.event(job, 'error', message)
         finally:
             with self.lock:
+                self.text_draft = ''
                 if not getattr(self, '_in_queue_worker', False):
                     self.active = None
                     self.idle_since = self.now() if self.session else None
                 self.save_release_state()
                 self.save_jobs()
+
+    # ---- Chat session: one queue task from "open app" to "close app" ----
+    CHAT_HEALTH_INTERVAL = 30
+    CHAT_HEALTH_FAILURES = 3
+    CHAT_END_MESSAGES = {
+        'close': '应用已关闭，聊天会话结束',
+        'idle': '聊天闲置超时，会话自动结束',
+        'lost': '远端模型已离线，聊天会话结束；如需继续请重新开启应用',
+        'shutdown': '本地程序退出，聊天会话结束',
+    }
+
+    def held_chat_job(self):
+        job = self.jobs.get(self.active) if isinstance(self.active, str) else None
+        return job if job and job.get('chat_session') == 'ready' else None
+
+    def chat_idle_limit(self):
+        """Seconds of inactivity before a chat gives the GPU back, or None for never.
+
+        Manual mode keeps a chat open indefinitely, unless other tasks are waiting
+        for the GPU: then the idle limit applies so a forgotten window cannot
+        starve the queue.
+        """
+        if self.release_policy.mode != 'manual' or waiting_jobs(self.jobs):
+            return self.release_policy.idle_minutes * 60
+        return None
+
+    def touch_chat_session(self, job=None):
+        with self.lock:
+            job = job or self.held_chat_job()
+            if job and job.get('chat_session') == 'ready':
+                job['last_activity'] = self.now()
+
+    def end_chat_session(self, job_id, reason='close'):
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if not job or job.get('chat_session') != 'ready':
+                return False
+            job['chat_end'] = reason
+        self.chat_wakeup.set()
+        return True
+
+    def chat_health(self, endpoint):
+        import requests
+        try:
+            return requests.get(endpoint.rstrip('/') + '/health', timeout=10).status_code == 200
+        except requests.RequestException:
+            return False
+
+    def _chat_end_reason(self, job, endpoint):
+        with self.lock:
+            if job.get('chat_end'):
+                return job['chat_end']
+            if job.get('cancel_requested'):
+                return 'close'
+            if self.monitor_stop.is_set():
+                return 'shutdown'
+            if (self.session or {}).get('endpoint') != endpoint:
+                return 'lost'
+            limit = self.chat_idle_limit()
+            if limit is not None and self.now() - job.get('last_activity', self.now()) >= limit:
+                return 'idle'
+        return None
+
+    def hold_chat_session(self, job):
+        endpoint = job['endpoint']
+        tunnel = (job.get('remote_result') or {}).get('endpoint')
+        with self.lock:
+            job.pop('chat_end', None)
+            job.update(status='running', chat_session='ready', last_activity=self.now(), safe_release=True)
+            self.save_jobs()
+        self.event(job, 'ready', '模型已就绪；聊天期间独占显卡，其他任务排队等待，关闭应用后继续处理')
+        failures = 0
+        next_probe = time.monotonic() + self.CHAT_HEALTH_INTERVAL
+        while (reason := self._chat_end_reason(job, endpoint)) is None:
+            if tunnel and time.monotonic() >= next_probe:
+                next_probe = time.monotonic() + self.CHAT_HEALTH_INTERVAL
+                recently_used = self.now() - job.get('last_activity', 0) < self.CHAT_HEALTH_INTERVAL
+                if recently_used or self.chat_health(tunnel):
+                    failures = 0
+                else:
+                    failures += 1
+                    if failures >= self.CHAT_HEALTH_FAILURES:
+                        job['chat_end'] = 'lost'
+                        continue
+            if self.chat_wakeup.wait(1):
+                self.chat_wakeup.clear()
+        self.finish_chat_session(job, endpoint, reason)
+
+    def finish_chat_session(self, job, endpoint, reason):
+        with self.lock:
+            waiting = bool(waiting_jobs(self.jobs))
+            own_runtime = bool(self.session and self.session.get('endpoint') == endpoint)
+        released, release_error = False, None
+        if reason in ('close', 'idle') and own_runtime and not waiting:
+            self.event(job, 'release', '聊天会话结束，正在释放 Colab 显卡')
+            try:
+                self.transport.release()
+                released = True
+            except Exception as exc:
+                release_error = safe_error(exc)
+                self.release_error = release_error
+                self.release_retry_at = self.now() + 60
+        message = self.CHAT_END_MESSAGES.get(reason, '聊天会话结束')
+        if reason == 'idle':
+            message = f'聊天闲置超过 {self.release_policy.idle_minutes} 分钟，会话自动结束'
+        if waiting and own_runtime:
+            message += '，显卡交给排队任务继续处理'
+        elif released:
+            message += '，显卡已释放'
+        if release_error:
+            message += '；显卡释放尚未确认：' + release_error
+        with self.lock:
+            job.pop('cancel_requested', None)
+            job.update(status='warning' if release_error else 'done', chat_session='ended',
+                       chat_end=reason, safe_release=True)
+            if release_error:
+                job['gpu_release_error'] = release_error
+        self.event(job, 'done', message)
 
     def public_drive(self, stored):
         if not stored:
@@ -1329,6 +1606,10 @@ class Controller:
         siblings = sorted((j for j in self.jobs.values() if job.get('batch_id') and j.get('batch_id') == job['batch_id']),
                           key=lambda j: j['batch_index'])
         app_id = config.get('app_id', 'h3')
+        if app_id == GEMMA_APP_ID:
+            return {**{key: job[key] for key in ('id', 'status', 'stage', 'message', 'created')},
+                    'app_id': app_id, 'provider_id': 'colab', 'creation': {'gpu': config['gpu']},
+                    'can_cancel': job['status'] in ('queued', 'running', 'cancelling')}
         application = applications.get(app_id)
         is_video = self.app_output_kind(application) == 'video'
         output_folder = self.videos if is_video else asset_library.folder('images', app_id, 'outputs')
@@ -1400,6 +1681,7 @@ async def lifespan(application):
 
 
 app = FastAPI(title='LStudio · LocalStudio', docs_url=None, redoc_url=None, lifespan=lifespan)
+app.include_router(GemmaWorkspace(controller, lambda: (PRIVATE / 'google-token.dat').exists()).router)
 app.mount('/static', StaticFiles(directory=BASE / 'static'), name='static')
 for app_inst in applications:
     app_web = getattr(app_inst, 'web_dir', None) or (BASE / 'apps' / app_inst.spec.id / 'web')
@@ -1457,7 +1739,8 @@ def index():
 def status():
     controller.recover_history()
     with controller.lock:
-        ordered = sorted((j for j in controller.jobs.values() if not j.get('history_hidden')),
+        ordered = sorted((j for j in controller.jobs.values() if not j.get('history_hidden')
+                          and not (application_id(j) == GEMMA_APP_ID and j.get('config', {}).get('operation') == 'reply')),
                          key=lambda j: j['created'], reverse=True)
         saved = [j for j in ordered if j.get('file') or j.get('drive')]
         active_or_queued = [j for j in ordered if j['status'] in ('running', 'queued', 'cancelling')]

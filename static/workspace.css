@@ -127,7 +127,10 @@ html[data-initial-page="connections"] #connectionPage {
 /* ==========================================================================
    Shared GPU Selector Card Component (Unified for H3, Qwen-Image & Future Apps)
    ========================================================================== */
-.gpu-card-wrap,
+.gpu-card-wrap {
+  position: relative;
+}
+
 .h3-gpu-card-wrap,
 .qi-gpu-card-wrap {
   position: relative !important;
@@ -338,6 +341,7 @@ html[data-initial-page="connections"] #connectionPage {
 }
 
 .gpu-menu-item {
+  text-align: left;
   display: flex !important;
   align-items: center !important;
   justify-content: space-between !important;
@@ -350,7 +354,8 @@ html[data-initial-page="connections"] #connectionPage {
   border: 1px solid transparent !important;
 }
 
-.gpu-menu-item:hover {
+.gpu-menu-item:hover,
+.gpu-menu-item:focus-visible {
   background: #1e2638 !important;
   border-color: #354460 !important;
 }

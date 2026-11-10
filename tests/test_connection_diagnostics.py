@@ -47,6 +47,9 @@ class ConnectionDiagnosticsTests(unittest.TestCase):
             error = ColabRequestError('error', request=None, response=response)
             self.assertEqual(connection_failure(error), expected)
             self.assertIn('HTTP ' + str(code), app.connection_diagnostic(error, '查询运行时')['reason'])
+        resp_503 = requests.Response(); resp_503.status_code = 503
+        err_503 = ColabRequestError('error', request=None, response=resp_503)
+        self.assertIn('建议切换显卡', app.connection_diagnostic(err_503, '申请并启动 A100 显卡')['reason'])
 
     def test_socket_permission_error_is_identifiable(self):
         error = requests.ConnectionError('[WinError 10013] socket access forbidden')

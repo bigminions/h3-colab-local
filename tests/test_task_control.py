@@ -5,6 +5,9 @@ import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
+from colab_cli.client import ColabRequestError
+import requests
+
 import app
 from tests.test_app import FakeTransport
 
@@ -222,6 +225,40 @@ class TaskControlTests(unittest.TestCase):
         self.assertTrue(self.job['safe_release'])
         self.assertNotIn(self.job, self.control.pending_jobs())
         self.assertIn('原 Colab 运行时已离线', self.job['message'])
+
+    def test_cancel_with_no_online_gpu_and_http_400_cancels_cleanly(self):
+        self.control.active = None
+        self.control.session = None
+        self.control.transport = app.ColabProvider(self.control, app.runtime_services)
+        self.job.update(status='error', assignment_pending=True, assignment_hash=self.job['id'], safe_release=False)
+        client = MagicMock()
+        err_resp = requests.Response()
+        err_resp.status_code = 400
+        client._get_assignment.side_effect = ColabRequestError('bad request', request=None, response=err_resp)
+        client.list_assignments.return_value = []
+        self.control.transport.client = lambda: client
+
+        self.control.cancel(self.job['id'])
+        self.assertEqual(self.job['status'], 'cancelled')
+        self.assertTrue(self.job['safe_release'])
+        self.assertFalse(self.job['assignment_pending'])
+        self.assertIn('未占用显卡', self.job['message'])
+
+    def test_cancel_when_session_is_offline_cancels_cleanly(self):
+        self.control.active = None
+        self.control.session = {'endpoint': 'offline-endpoint'}
+        self.control.transport = app.ColabProvider(self.control, app.runtime_services)
+        self.job.update(status='error', endpoint='offline-endpoint', safe_release=False)
+        client = MagicMock()
+        client.list_assignments.return_value = []
+        self.control.transport.client = lambda: client
+        self.control.transport.cancel_job = MagicMock(side_effect=RuntimeError('connection lost'))
+
+        self.control.cancel(self.job['id'])
+        self.assertEqual(self.job['status'], 'cancelled')
+        self.assertTrue(self.job['safe_release'])
+        self.assertIsNone(self.control.session)
+        self.assertIn('未占用显卡', self.job['message'])
 
 
 if __name__ == '__main__':

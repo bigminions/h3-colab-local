@@ -426,7 +426,7 @@ body {
 
 /* 6. Form Controls: Textarea & Inputs */
 #prompt,
-textarea {
+textarea:not([data-daisy-control]) {
   background-color: #11151d !important;
   border: 1px solid #3a4252 !important;
   color: #edf1f8 !important;
@@ -437,7 +437,7 @@ textarea {
 }
 
 #prompt:focus,
-textarea:focus {
+textarea:not([data-daisy-control]):focus {
   border-color: #8cacef !important;
   box-shadow: 0 0 0 2px rgba(140, 172, 239, 0.18) !important;
   outline: none !important;
@@ -680,7 +680,8 @@ input[type="checkbox"] {
 .sidebar-collapsed #applicationList {
   width: 100% !important;
   display: flex !important;
-  justify-content: center !important;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .sidebar-collapsed .sidebar-group-label {

@@ -4,6 +4,7 @@ import tempfile
 import threading
 import unittest
 from unittest.mock import patch
+from requests import ReadTimeout
 
 import app
 from job_queue import JobStore, waiting_jobs
@@ -128,6 +129,38 @@ class UnifiedQueueTests(unittest.TestCase):
         self.c._run_queue()
         self.assertEqual(self.c.jobs[key]['status'], 'queued')
         self.assertTrue(self.c.jobs[key]['queue_front'])
+        self.assertNotIn('execute', self.fake.calls)
+
+    def test_read_timeout_retries_status_and_dispatches_once_after_confirmation(self):
+        self.c.session = dict(endpoint='owned-test', app_id='h3', accelerator='A100')
+        key = self.enqueue('recover')
+
+        def probe():
+            if 'probe_retry' not in self.c.consumer:
+                raise ReadTimeout('Read timed out. (read timeout=10)')
+            self.assertEqual(self.c.consumer['probe_retry'], 'retrying')
+            return {'state': 'idle'}
+
+        with patch.object(self.fake, 'consumer_status', side_effect=probe) as observe, \
+                patch.object(self.c.monitor_stop, 'wait', return_value=False):
+            self.c._run_queue()
+        self.assertEqual(observe.call_count, 2)
+        self.assertEqual(self.c.jobs[key]['status'], 'done')
+        self.assertEqual(self.fake.calls.count('execute'), 1)
+        self.assertNotIn('probe_retry', self.c.consumer)
+
+    def test_repeated_probe_timeout_preserves_waiting_job_and_runtime(self):
+        self.c.session = dict(endpoint='owned-test', app_id='h3', accelerator='A100')
+        key = self.enqueue('wait', front=True)
+        with patch.object(self.fake, 'consumer_status', side_effect=ReadTimeout('Read timed out.')) as observe, \
+                patch.object(self.c.monitor_stop, 'wait', return_value=False):
+            self.c._run_queue()
+        self.assertEqual(observe.call_count, 2)
+        self.assertEqual(self.c.consumer['probe_retry'], 'waiting')
+        self.assertIn('响应超时', self.c.consumer['error'])
+        self.assertEqual(self.c.jobs[key]['status'], 'queued')
+        self.assertTrue(self.c.jobs[key]['queue_front'])
+        self.assertEqual(self.c.session['endpoint'], 'owned-test')
         self.assertNotIn('execute', self.fake.calls)
 
     def test_front_job_can_run_between_batch_children(self):

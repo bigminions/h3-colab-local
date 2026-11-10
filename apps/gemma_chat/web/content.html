@@ -1,0 +1,482 @@
+<main id="gemmaPage" class="gemma-page hidden" aria-labelledby="gemmaTitle" hidden>
+  <header class="gemma-header">
+    <div class="gemma-brand-wrap">
+      <button id="gemmaSidebarToggle" type="button" class="btn btn-sm btn-ghost gemma-sidebar-btn"
+              title="展开 / 收起会话列表" aria-label="展开 / 收起会话列表" aria-expanded="true">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+          <line x1="9" y1="3" x2="9" y2="21"/>
+        </svg>
+      </button>
+      <div class="gemma-brand-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+          <path d="M12 2L14.4 8.6L21 11L14.4 13.4L12 20L9.6 13.4L3 11L9.6 8.6L12 2Z"/>
+        </svg>
+      </div>
+      <div class="gemma-brand">
+        <div class="gemma-title-row">
+          <h1 id="gemmaTitle">大模型对话</h1>
+          <div id="gemmaStatusBadge" class="gemma-status-pill status-closed" title="当前模型部署状态">
+            <span class="gemma-status-dot"></span>
+            <span id="gemmaStatusText">未连接</span>
+          </div>
+        </div>
+        <p id="gemmaSubtitle">Colab · 文本聊天</p>
+      </div>
+    </div>
+    <div class="gemma-header-actions">
+      <button id="gemmaHeaderNew" type="button" class="btn btn-sm btn-ghost gemma-header-new-btn" title="新建聊天会话">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="12" y1="5" x2="12" y2="19"></line>
+          <line x1="5" y1="12" x2="19" y2="12"></line>
+        </svg>
+        <span>新对话</span>
+      </button>
+      <button id="gemmaDebug" type="button" class="btn btn-sm btn-ghost gemma-debug-trigger" aria-expanded="false"
+              aria-controls="gemmaDebugPanel" title="查看远端调试与运行性能指标">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="4 17 10 11 4 5"></polyline>
+          <line x1="12" y1="19" x2="20" y2="19"></line>
+        </svg>
+        <span>调试</span>
+      </button>
+      <button id="gemmaClose" type="button" class="btn btn-sm btn-outline btn-error gemma-close-btn" hidden title="释放 Colab 显卡并关闭应用">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M18.36 6.64a9 9 0 1 1-12.73 0"></path>
+          <line x1="12" y1="2" x2="12" y2="12"></line>
+        </svg>
+        <span>关闭应用</span>
+      </button>
+    </div>
+  </header>
+
+  <div id="gemmaError" class="gemma-error alert" role="alert" hidden>
+    <div class="gemma-error-content">
+      <svg id="gemmaErrorIcon" class="gemma-error-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="10"></circle>
+        <line x1="12" y1="8" x2="12" y2="12"></line>
+        <line x1="12" y1="16" x2="12.01" y2="16"></line>
+      </svg>
+      <span id="gemmaErrorText" class="gemma-error-text"></span>
+    </div>
+    <button id="gemmaErrorClose" class="gemma-error-close" type="button" aria-label="关闭提示" title="关闭提示">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="18" y1="6" x2="6" y2="18"></line>
+        <line x1="6" y1="6" x2="18" y2="18"></line>
+      </svg>
+    </button>
+  </div>
+
+  <!-- 部署配置卡片 -->
+  <section id="gemmaSetup" class="gemma-setup" aria-labelledby="gemmaSetupTitle">
+    <div class="gemma-setup-card">
+      <div class="gemma-setup-heading">
+        <h2 id="gemmaSetupTitle">选择模型</h2>
+        <p>开启后连接 Colab 显卡运行，数据保存在本地。</p>
+      </div>
+      <form id="gemmaOpenForm">
+        <fieldset class="gemma-variants">
+          <legend class="sr-only">模型选择</legend>
+          <label class="gemma-variant-card">
+            <input name="gemmaVariant" type="radio" class="radio radio-primary radio-sm gemma-variant-radio" value="native" checked>
+            <div class="gemma-variant-body">
+              <div class="gemma-variant-title-row">
+                <strong class="gemma-variant-name">Gemma 4 31B 原生版</strong>
+                <span class="badge badge-sm badge-success">官方推荐</span>
+                <span class="badge badge-sm badge-outline">多模态</span>
+              </div>
+              <p class="gemma-variant-desc">Google 官方 · QAT Q4_0 · 17.7 GB · 日常与长文深度对话</p>
+            </div>
+          </label>
+          <label class="gemma-variant-card">
+            <input name="gemmaVariant" type="radio" class="radio radio-primary radio-sm gemma-variant-radio" value="heretic">
+            <div class="gemma-variant-body">
+              <div class="gemma-variant-title-row">
+                <strong class="gemma-variant-name">Gemma 4 31B 破甲版</strong>
+                <span class="badge badge-sm badge-secondary">无限制</span>
+                <span class="badge badge-sm badge-outline">多模态</span>
+              </div>
+              <p class="gemma-variant-desc">mradermacher · Q4_K_M · 18.7 GB · 剧情小说与自由创作</p>
+            </div>
+          </label>
+          <label class="gemma-variant-card">
+            <input name="gemmaVariant" type="radio" class="radio radio-primary radio-sm gemma-variant-radio" value="gpt_oss_120b">
+            <div class="gemma-variant-body">
+              <div class="gemma-variant-title-row">
+                <strong class="gemma-variant-name">GPT-OSS 120B</strong>
+                <span class="badge badge-sm badge-warning">需 80G 显存</span>
+              </div>
+              <p class="gemma-variant-desc">OpenAI 官方开源 · 117B MoE (5.1B 激活) · ~63 GB · 深度推理</p>
+            </div>
+          </label>
+        </fieldset>
+        <div class="gemma-setup-actions">
+          <div class="gpu-card-wrap">
+            <button id="gemmaGpuCard" class="gpu-card" type="button" aria-haspopup="listbox"
+                    aria-expanded="false" aria-controls="gemmaGpuMenu">
+              <span class="gpu-card-header">
+                <span class="gpu-badge">
+                  <svg class="gpu-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="4" y="4" width="16" height="16" rx="2"/>
+                    <rect x="9" y="9" width="6" height="6"/>
+                    <path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/>
+                  </svg>
+                  Colab 显卡
+                </span>
+                <span class="gpu-action">切换 <span class="gpu-action-arrow">▾</span></span>
+              </span>
+              <span class="gpu-card-body">
+                <span id="gemmaGpuDisplay" class="gpu-name">L4 · 24GB</span>
+                <span id="gemmaGpuStatus" class="gpu-status status-idle">推荐 · 日常聊天</span>
+              </span>
+            </button>
+            <select id="gemmaGpu" hidden>
+              <option value="L4" selected>L4 · 24 GB</option>
+            </select>
+            <div id="gemmaGpuMenu" class="gpu-dropdown-menu hidden" role="listbox" aria-label="Colab 显卡选项"></div>
+          </div>
+          <button id="gemmaOpen" class="btn btn-primary gemma-launch-btn" type="submit">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polygon points="5 3 19 12 5 21 5 3"></polygon>
+            </svg>
+            <span>开启应用</span>
+          </button>
+        </div>
+        <p class="gemma-hint">首次部署需下载模型，显卡按工作台策略自动释放。</p>
+      </form>
+    </div>
+  </section>
+
+  <!-- 部署中状态 -->
+  <section id="gemmaLoading" class="gemma-setup gemma-loading" aria-labelledby="gemmaLoadingTitle" hidden>
+    <div class="gemma-loading-card">
+      <div class="gemma-loading-visual">
+        <span class="loading loading-spinner loading-lg text-primary" role="presentation"></span>
+        <div class="gemma-loading-pulse-ring"></div>
+      </div>
+      <h2 id="gemmaLoadingTitle">正在开启应用</h2>
+      <p id="gemmaLoadingStatus" role="status" class="gemma-loading-status-text">正在提交部署请求...</p>
+
+      <div class="gemma-steps-tracker" aria-hidden="true">
+        <div class="gemma-step-pill active" id="gemmaStepGpu">1. 申请算力</div>
+        <div class="gemma-step-connector"></div>
+        <div class="gemma-step-pill" id="gemmaStepTunnel">2. 挂载隧道</div>
+        <div class="gemma-step-connector"></div>
+        <div class="gemma-step-pill" id="gemmaStepWeights">3. 加载权重</div>
+        <div class="gemma-step-connector"></div>
+        <div class="gemma-step-pill" id="gemmaStepReady">4. 就绪连接</div>
+      </div>
+
+      <div class="gemma-load-log-box">
+        <div class="gemma-log-box-header">
+          <span class="gemma-log-title">实时运行进度</span>
+          <span class="gemma-log-indicator"></span>
+        </div>
+        <ol id="gemmaLoadLog" class="gemma-load-log" aria-label="加载进度"></ol>
+      </div>
+    </div>
+  </section>
+
+  <!-- 主聊天区域 -->
+  <div id="gemmaChat" class="gemma-chat" hidden>
+    <aside class="gemma-history bg-base-200" aria-label="会话列表">
+      <div class="gemma-history-actions">
+        <button id="gemmaNew" class="btn btn-sm btn-primary gemma-new-chat-btn" type="button">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"></line>
+            <line x1="5" y1="12" x2="19" y2="12"></line>
+          </svg>
+          新建聊天
+        </button>
+        <button id="gemmaHistoryToggle" class="btn btn-sm btn-ghost" type="button" aria-expanded="false"
+                aria-controls="gemmaChatList">历史</button>
+      </div>
+
+      <div class="gemma-search-wrap">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" class="gemma-search-icon">
+          <circle cx="11" cy="11" r="8"></circle>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+        </svg>
+        <input id="gemmaChatSearch" class="gemma-chat-search" type="search" placeholder="搜索历史对话..." aria-label="搜索历史对话">
+      </div>
+
+      <div class="gemma-history-subhead">
+        <span id="gemmaHistoryLabel" class="gemma-history-label">对话列表</span>
+        <span id="gemmaHistoryCount" class="badge badge-xs badge-ghost">0</span>
+      </div>
+
+      <nav id="gemmaChatList" class="gemma-chat-list" aria-labelledby="gemmaHistoryLabel"></nav>
+
+      <div id="gemmaChatMenu" class="gemma-chat-menu bg-base-100 border border-base-300" popover="auto"
+           role="menu" aria-label="聊天选项">
+        <button id="gemmaRemoveChat" class="btn btn-sm btn-ghost text-error" type="button" role="menuitem">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+          </svg>
+          移除此对话
+        </button>
+      </div>
+    </aside>
+
+    <section class="gemma-conversation" aria-label="当前聊天">
+      <div id="gemmaScroll" class="gemma-scroll" tabindex="0" aria-label="聊天消息">
+        <div id="gemmaEmpty" class="gemma-empty">
+          <div class="gemma-char-intro">
+            <span class="badge badge-primary badge-outline badge-sm">角色预设</span>
+            <h2>选择对话角色</h2>
+            <p>为当前对话选择专属人设与系统提示词，开启不同性格的沉浸式交流。</p>
+          </div>
+          <div id="gemmaCharacterGrid" class="gemma-characters-grid" role="radiogroup" aria-label="对话角色预设"></div>
+        </div>
+        <div id="gemmaMessages" class="gemma-messages"></div>
+      </div>
+
+      <form id="gemmaComposer" class="gemma-composer">
+        <p id="gemmaQueueHint" class="gemma-queue-hint" role="status" hidden></p>
+        <div id="gemmaInputWrap" class="gemma-input-wrap bg-base-200 border border-base-300">
+          <div id="gemmaImagePreviewWrap" class="gemma-image-preview-wrap" hidden></div>
+          <textarea id="gemmaPrompt" rows="1" maxlength="12000" aria-label="聊天消息" data-daisy-control
+                    placeholder="输入消息，可粘贴、拖拽或上传图片，Enter 发送..."></textarea>
+          <div class="gemma-composer-toolbar">
+            <input id="gemmaFileInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+            <button id="gemmaAttachBtn" type="button" class="btn btn-sm btn-ghost gemma-attach-btn" title="上传图片或截图 (支持粘贴、拖拽、选择图片)">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+                <circle cx="8.5" cy="8.5" r="1.5"/>
+                <polyline points="21 15 16 10 5 21"/>
+              </svg>
+            </button>
+            <button id="gemmaClearPrompt" type="button" class="gemma-clear-btn" title="清空输入" hidden aria-label="清空输入">✕</button>
+            <span id="gemmaCharCount" class="gemma-char-count">0 / 12,000</span>
+            <button id="gemmaStop" class="btn btn-sm btn-outline btn-error gemma-stop-btn" type="button" hidden>
+              <svg viewBox="0 0 24 24" width="12" height="12" fill="currentColor">
+                <rect x="5" y="5" width="14" height="14" rx="2"/>
+              </svg>
+              <span>停止</span>
+            </button>
+            <button id="gemmaSend" class="btn btn-sm btn-primary gemma-send-btn" type="submit" title="发送消息 (Enter)">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="12" y1="19" x2="12" y2="5"></line>
+                <polyline points="5 12 12 5 19 12"></polyline>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <p id="gemmaComposerHint" class="gemma-hint">支持图文多模态输入 · Enter 发送 · Shift + Enter 换行</p>
+      </form>
+    </section>
+  </div>
+
+  <!-- 远端调试侧边抽屉 -->
+  <aside id="gemmaDebugPanel" class="gemma-debug-panel bg-base-100" aria-labelledby="gemmaDebugTitle" hidden>
+    <div class="gemma-debug-heading">
+      <div class="gemma-debug-header-title">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="4 17 10 11 4 5"></polyline>
+          <line x1="12" y1="19" x2="20" y2="19"></line>
+        </svg>
+        <h2 id="gemmaDebugTitle">远端运行与性能诊断</h2>
+      </div>
+      <span id="gemmaDebugState" class="badge badge-outline badge-sm" role="status">正在读取</span>
+      <button id="gemmaDebugClose" class="btn btn-sm btn-ghost btn-circle" type="button" aria-label="关闭调试面板">✕</button>
+    </div>
+    <p id="gemmaDebugError" class="gemma-debug-error text-error" role="status" hidden></p>
+
+    <section id="gemmaDebugPerformance" class="gemma-debug-section" aria-labelledby="gemmaDebugPerformanceTitle" hidden>
+      <h3 id="gemmaDebugPerformanceTitle">本次推理性能</h3>
+      <dl class="gemma-debug-summary bg-base-200">
+        <div class="gemma-stat-card"><dt>生成速率</dt><dd id="gemmaDebugSpeed" class="gemma-stat-highlight">—</dd></div>
+        <div class="gemma-stat-card"><dt>首段延迟 (TTFT)</dt><dd id="gemmaDebugFirstText">—</dd></div>
+        <div class="gemma-stat-card"><dt>输出 Tokens</dt><dd id="gemmaDebugOutputTokens">—</dd></div>
+        <div class="gemma-stat-card"><dt>推理总耗时</dt><dd id="gemmaDebugElapsed">—</dd></div>
+        <div class="gemma-stat-card"><dt>输入 Tokens</dt><dd id="gemmaDebugInputTokens">—</dd></div>
+        <div class="gemma-stat-card"><dt>提示词耗时</dt><dd id="gemmaDebugPromptTime">—</dd></div>
+      </dl>
+      <p class="gemma-hint">耗时从 Colab 接收请求起算，首段延迟以收到首个 Token 流块为准。</p>
+    </section>
+
+    <section class="gemma-debug-section">
+      <h3>运行时指标</h3>
+      <dl class="gemma-debug-summary bg-base-200">
+        <div class="gemma-stat-card"><dt>分配显卡</dt><dd id="gemmaDebugGpu">—</dd></div>
+        <div class="gemma-stat-card"><dt>显卡 / 显存占用</dt><dd id="gemmaDebugUsage">—</dd></div>
+        <div class="gemma-stat-card"><dt>当前任务状态</dt><dd id="gemmaDebugTask">—</dd></div>
+        <div class="gemma-stat-card"><dt>远端心跳监测</dt><dd id="gemmaDebugHeartbeat">—</dd></div>
+      </dl>
+      <div id="gemmaDebugVramWrap" class="gemma-vram-bar-wrap" hidden>
+        <div class="gemma-vram-bar-label"><span>显存负载</span><span id="gemmaDebugVramPct">0%</span></div>
+        <div class="gemma-vram-bar-track"><div id="gemmaDebugVramBar" class="gemma-vram-bar-fill" style="width: 0%"></div></div>
+      </div>
+      <p id="gemmaDebugQueue" class="gemma-hint" hidden></p>
+    </section>
+
+    <section class="gemma-debug-section">
+      <h3>任务事件流</h3>
+      <ol id="gemmaDebugEvents" class="gemma-debug-events bg-base-200" tabindex="0" aria-label="任务进度">
+        <li>暂无任务记录</li>
+      </ol>
+    </section>
+
+    <section id="gemmaDebugServer" class="gemma-debug-section" hidden>
+      <h3>llama.cpp 引擎诊断日志</h3>
+      <pre id="gemmaDebugLines" class="gemma-debug-lines bg-base-200" tabindex="0" aria-label="llama.cpp 诊断"></pre>
+    </section>
+  </aside>
+
+  <!-- 自定义角色创建/编辑弹窗 -->
+  <dialog id="gemmaCharModal" class="modal gemma-char-modal">
+    <div class="modal-box gemma-modal-box bg-base-100 max-w-lg">
+      <div class="gemma-modal-header flex items-center justify-between pb-2 border-b border-base-300">
+        <h3 id="gemmaModalTitle" class="font-bold text-base flex items-center gap-2">
+          <span>✨</span>
+          <span>创建新角色</span>
+        </h3>
+        <button id="gemmaModalClose" type="button" class="btn btn-sm btn-ghost btn-circle" aria-label="关闭">✕</button>
+      </div>
+
+      <form id="gemmaCharForm" class="gemma-char-form flex flex-col gap-3 mt-3">
+        <input type="hidden" id="gemmaCharFormId" value="">
+
+        <div class="form-control">
+          <label class="label py-0.5"><span class="label-text font-medium text-xs">角色名称 *</span></label>
+          <input id="gemmaCharFormName" type="text" class="input input-sm input-bordered w-full" placeholder="例如：林薇、苏菲" required maxlength="40">
+        </div>
+
+        <div class="form-control">
+          <label class="label py-0.5"><span class="label-text font-medium text-xs">身份定位 / 标签</span></label>
+          <input id="gemmaCharFormTag" type="text" class="input input-sm input-bordered w-full" placeholder="例如：热情奔放 · 元气满满、理性逻辑" maxlength="80">
+        </div>
+
+        <!-- 角色头像与封面（统一为方形头像，纯数据库存储） -->
+        <div class="form-control">
+          <label class="label py-0.5">
+            <span class="label-text font-medium text-xs">角色头像（1:1 方形图，封面与消息均展示此图）*</span>
+          </label>
+          <div class="gemma-avatar-picker-wrap flex items-center gap-4 p-3 bg-base-200/60 border border-base-300 rounded-lg">
+            <!-- 方形封面效果预览 -->
+            <div class="flex flex-col items-center gap-1">
+              <div id="gemmaCharSquarePreview" class="gemma-square-avatar-preview">
+                <img id="gemmaCharSquareImg" src="" alt="方形预览" class="hidden">
+                <span id="gemmaCharSquareEmpty" class="text-[11px] opacity-50">无头像</span>
+              </div>
+              <span class="text-[10px] text-base-content/60">卡片封面效果</span>
+            </div>
+
+            <!-- 圆形气泡效果预览 -->
+            <div class="flex flex-col items-center gap-1">
+              <div id="gemmaCharCirclePreview" class="gemma-circle-avatar-preview">
+                <img id="gemmaCharCircleImg" src="" alt="圆形预览" class="hidden">
+                <span id="gemmaCharCircleEmpty" class="text-[10px] opacity-50">无头像</span>
+              </div>
+              <span class="text-[10px] text-base-content/60">对话气泡效果</span>
+            </div>
+
+            <!-- 操作上传区 -->
+            <div class="flex flex-col gap-1.5 flex-1 min-w-0">
+              <button type="button" id="gemmaSelectAvatarBtn" class="btn btn-sm btn-outline btn-primary gap-1 self-start">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                <span>选择/更换头像</span>
+              </button>
+              <div class="text-[11px] text-base-content/60 leading-tight">
+                支持任意比例图片，点击后提供简易可视裁剪，自动压缩存入数据库。
+              </div>
+              <input id="gemmaCharAvatarFileInput" type="file" accept="image/*" class="hidden">
+              <input type="hidden" id="gemmaCharFormAvatar" value="">
+            </div>
+          </div>
+        </div>
+
+        <div class="form-control">
+          <label class="label py-0.5"><span class="label-text font-medium text-xs">人设性格简述</span></label>
+          <input id="gemmaCharFormDesc" type="text" class="input input-sm input-bordered w-full" placeholder="一两句话概括角色性格、语气与特点" maxlength="300">
+        </div>
+
+        <div class="form-control">
+          <label class="label py-0.5"><span class="label-text font-medium text-xs">开场输入引导提示</span></label>
+          <input id="gemmaCharFormPlaceholder" type="text" class="input input-sm input-bordered w-full" placeholder="例如：和我说说你今天遇到了什么新鲜事吧！..." maxlength="150">
+        </div>
+
+        <div class="form-control">
+          <label class="label py-0.5 flex justify-between">
+            <span class="label-text font-medium text-xs">系统提示词 (System Prompt) *</span>
+            <span class="text-[11px] text-base-content/60">决定角色的口吻、性格、专业知识与回答风格</span>
+          </label>
+          <textarea id="gemmaCharFormSys" class="textarea textarea-sm textarea-bordered min-h-[110px] h-28 font-mono text-xs leading-relaxed" placeholder="设定角色的说话口吻、性格禁忌、专业背景等系统人设指示词..." required maxlength="8000"></textarea>
+        </div>
+
+        <div class="modal-action flex justify-between items-center mt-2 pt-2 border-t border-base-300">
+          <div class="flex gap-2">
+            <button id="gemmaCharFormDelete" type="button" class="btn btn-sm btn-error btn-outline hidden">删除角色</button>
+            <button id="gemmaCharFormReset" type="button" class="btn btn-sm btn-warning btn-outline hidden">重置为预设默认</button>
+          </div>
+          <div class="flex gap-2 ml-auto">
+            <button id="gemmaModalCancel" type="button" class="btn btn-sm btn-ghost">取消</button>
+            <button id="gemmaModalSave" type="submit" class="btn btn-sm btn-primary">保存角色</button>
+          </div>
+        </div>
+      </form>
+    </div>
+    <form method="dialog" class="modal-backdrop">
+      <button>关闭</button>
+    </form>
+  </dialog>
+
+  <!-- 关闭应用二次确认弹窗 -->
+  <dialog id="gemmaCloseConfirmModal" class="modal">
+    <div class="modal-box max-w-sm bg-base-100 border border-base-300 shadow-2xl">
+      <h3 class="font-bold text-base flex items-center gap-2 text-warning">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        <span>确认关闭应用？</span>
+      </h3>
+      <p id="gemmaCloseConfirmText" class="py-3 text-xs text-base-content/80 leading-relaxed">
+        关闭应用将释放 Colab 显卡并退出当前模型部署。如需继续聊天需要重新开启。
+      </p>
+      <div class="modal-action flex justify-end gap-2 mt-2 pt-2 border-t border-base-300">
+        <button id="gemmaCloseConfirmCancel" type="button" class="btn btn-sm btn-ghost">取消</button>
+        <button id="gemmaCloseConfirmProceed" type="button" class="btn btn-sm btn-error">确认关闭</button>
+      </div>
+    </div>
+    <form method="dialog" class="modal-backdrop">
+      <button>取消</button>
+    </form>
+  </dialog>
+
+  <!-- 简易通用方形头像裁剪弹窗 -->
+  <dialog id="gemmaCropModal" class="modal gemma-crop-modal">
+    <div class="modal-box max-w-sm bg-base-100 border border-base-300 shadow-2xl p-4 flex flex-col gap-3">
+      <div class="flex items-center justify-between border-b border-base-300 pb-2">
+        <h3 class="font-bold text-sm flex items-center gap-1.5">
+          <span>✂️</span>
+          <span>裁剪角色头像 (1:1 方形)</span>
+        </h3>
+        <button id="gemmaCropCloseBtn" type="button" class="btn btn-xs btn-ghost btn-circle">✕</button>
+      </div>
+
+      <!-- 裁剪可视交互区 -->
+      <div class="gemma-crop-stage-wrap flex justify-center items-center bg-black/50 rounded-lg overflow-hidden relative">
+        <canvas id="gemmaCropCanvas" width="300" height="300" class="gemma-crop-canvas block"></canvas>
+      </div>
+
+      <!-- 缩放控制 -->
+      <div class="flex items-center gap-2 px-1 text-xs">
+        <span class="opacity-70 whitespace-nowrap text-[11px]">缩放</span>
+        <button type="button" id="gemmaCropZoomOut" class="btn btn-xs btn-ghost btn-circle font-bold">-</button>
+        <input id="gemmaCropZoomSlider" type="range" min="1" max="3" step="0.01" value="1" class="range range-xs range-primary flex-1">
+        <button type="button" id="gemmaCropZoomIn" class="btn btn-xs btn-ghost btn-circle font-bold">+</button>
+        <button type="button" id="gemmaCropResetBtn" class="btn btn-xs btn-ghost text-[10px]">居中</button>
+      </div>
+
+      <div class="text-[11px] text-base-content/60 text-center">
+        鼠标拖动图片调整位置，滚轮或滑块缩放
+      </div>
+
+      <div class="modal-action flex justify-end gap-2 mt-0 pt-2 border-t border-base-300">
+        <button id="gemmaCropCancelBtn" type="button" class="btn btn-sm btn-ghost">取消</button>
+        <button id="gemmaCropConfirmBtn" type="button" class="btn btn-sm btn-primary">完成裁剪</button>
+      </div>
+    </div>
+    <form method="dialog" class="modal-backdrop">
+      <button>取消</button>
+    </form>
+  </dialog>
+</main>
