@@ -77,6 +77,17 @@ class GemmaSessionQueueTests(unittest.TestCase):
             self.control.ensure_worker()
         return job
 
+    def test_gemma_switches_from_qwen_after_completed_image_is_recycled(self):
+        self.control.session = dict(endpoint='owned-test', app_id='qwen_image_2_1', accelerator='L4')
+        job_id = 'a' * 32
+        self.control.jobs[job_id] = dict(
+            id=job_id, endpoint='owned-test', config={'app_id': 'qwen_image_2_1'},
+            status='done', file=job_id + '.png', history_hidden=True, history_recycle_token='test',
+        )
+        with patch.object(app, 'asset_library', app.AssetLibrary(self.dir / 'materials')):
+            self.open_chat()
+        self.assertEqual(self.fake.calls, ['release', 'connect', 'execute:' + APP_ID])
+
     def test_chat_holds_gpu_until_close_then_hands_over_to_queue(self):
         chat = self.open_chat()
         self.assertEqual(self.control.active, chat['id'])
@@ -122,6 +133,16 @@ class GemmaSessionQueueTests(unittest.TestCase):
         self.assertTrue(wait_until(lambda: chat['status'] == 'done'))
         self.assertEqual(chat['chat_end'], 'idle')
         self.assertIsNone(self.control.session)
+
+    def test_chat_session_reaches_configured_execution_limit(self):
+        with patch.object(app, 'TASK_TIMEOUT_SECONDS', 30):
+            chat = self.open_chat()
+        self.clock[0] += 30
+        self.control.chat_wakeup.set()
+        self.assertTrue(wait_until(lambda: chat['status'] == 'error'))
+        self.assertEqual(chat['chat_end'], 'timeout')
+        self.assertEqual(self.workspace.snapshot()['state'], 'closed')
+        self.assertIn('最长执行时间', self.workspace.snapshot()['notice'])
         self.assertEqual(self.workspace.snapshot()['notice'], chat['message'])
 
     def test_manual_mode_times_out_only_when_others_wait(self):
@@ -140,7 +161,7 @@ class GemmaSessionQueueTests(unittest.TestCase):
         self.control.chat_health = lambda endpoint: False
         chat = self.open_chat()
         self.clock[0] += 5
-        self.assertTrue(wait_until(lambda: chat['status'] == 'done'))
+        self.assertTrue(wait_until(lambda: chat['status'] == 'incomplete'))
         self.assertEqual(chat['chat_end'], 'lost')
 
     def test_cancel_on_held_chat_closes_session_cleanly(self):

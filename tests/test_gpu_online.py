@@ -109,10 +109,11 @@ class ControllerGpuTests(unittest.TestCase):
         with self.assertRaises(app.HTTPException):self.control.release_online_gpu('other')
         self.transport.release_detected_gpu.assert_not_called()
 
-    def test_missing_saved_file_blocks_external_release(self):
+    def test_missing_saved_file_does_not_block_external_release(self):
         self.control.jobs['saved']=dict(endpoint='other',status='done',file='missing.mp4')
-        with self.assertRaises(app.HTTPException):self.control.release_online_gpu('other')
-        self.transport.release_detected_gpu.assert_not_called()
+        self.transport.release_detected_gpu.return_value = True
+        self.assertTrue(self.control.release_online_gpu('other')['ok'])
+        self.transport.release_detected_gpu.assert_called_once_with('other')
 
     def test_owned_runtime_uses_existing_release_checks(self):
         self.control.session={'endpoint':'owned'}

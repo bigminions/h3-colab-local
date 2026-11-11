@@ -773,7 +773,7 @@
 
       const char = getCharacterByIdOrName(turn.character_id, turn.character_name) || getActiveCharacter(chatId);
       const text = turn.reply || turn.draft || '';
-      const unfinished = ['cancelled', 'error', 'interrupted', 'discarded'].includes(turn.status);
+      const unfinished = ['cancelled', 'error', 'interrupted', 'incomplete', 'discarded'].includes(turn.status);
       const isRunning = turn.status === 'running' || turn.status === 'queued';
 
       if (!article) {

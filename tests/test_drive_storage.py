@@ -173,13 +173,14 @@ class DriveStorageTests(unittest.TestCase):
         self.assertEqual(self.job['drive'], self.stored)
         response.close.assert_called_once()
 
-    def test_manual_release_rechecks_drive_integrity(self):
+    def test_manual_release_does_not_recheck_saved_drive_result(self):
         self.job.update(status='done', drive=self.stored, endpoint='owned-test')
         self.c.session = {'endpoint': 'owned-test'}
         self.fake.check_idle = lambda: True
-        with patch.object(self.store, 'confirm_stored', side_effect=RuntimeError('checksum mismatch')):
-            with self.assertRaises(app.HTTPException): self.c.check_and_release()
-        self.assertNotIn('release', self.fake.calls)
+        with patch.object(self.store, 'confirm_stored') as confirm:
+            self.assertTrue(self.c.check_and_release()['ok'])
+        confirm.assert_not_called()
+        self.assertIn('release', self.fake.calls)
 
     def test_recycle_prepares_verified_local_copy_without_deleting_drive(self):
         self.job.update(status='done', drive=self.stored)

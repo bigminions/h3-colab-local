@@ -304,31 +304,6 @@ class QwenImageWorkspaceIntegrationTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_verify_saved_results_supports_image_application(self):
-        ep = 'test-endpoint-img'
-        img_id = 'e' * 32 + '.png'
-        out_folder = self.library.folder('images', 'qwen_image_2_1', 'outputs')
-        out_folder.mkdir(parents=True, exist_ok=True)
-        target_img = out_folder / img_id
-        content = b'fake-png-content'
-        target_img.write_bytes(content)
-        digest = hashlib.sha256(content).hexdigest()
-
-        self.control.jobs['img_job_1'] = {
-            'id': 'img_job_1',
-            'endpoint': ep,
-            'config': {'app_id': 'qwen_image_2_1'},
-            'file': img_id,
-            'remote_result': {'size': len(content), 'sha256': digest},
-        }
-
-        self.control.verify_saved_results(ep)
-
-        target_img.write_bytes(b'corrupted')
-        with self.assertRaises(app.HTTPException) as ctx:
-            self.control.verify_saved_results(ep)
-        self.assertIn('图片', str(ctx.exception.detail))
-
     def test_qwen_image_reference_resolution_and_public_job_enrichment(self):
         ref_dir = self.library.folder('images', 'qwen_image_2_1', 'references')
         ref_dir.mkdir(parents=True, exist_ok=True)
@@ -427,7 +402,6 @@ class QwenImageWorkspaceIntegrationTests(unittest.TestCase):
         self.assertTrue(all(child['status'] == 'done' and child['batch_complete'] for child in children))
         for child, image in zip(children, images):
             self.assertEqual(self.library.resolve(child['file']).read_bytes(), (output / image['filename']).read_bytes())
-        self.control.verify_saved_results('test')
 
     def test_job_submission_and_image_download_flow(self):
         (self.root / 'google-token.dat').touch()

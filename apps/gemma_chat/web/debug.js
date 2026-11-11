@@ -9,7 +9,7 @@
   };
   const jobStates = {
     queued: '排队中', running: '执行中', cancelling: '正在停止', cancelled: '已停止',
-    done: '已完成', error: '失败', interrupted: '已中断', warning: '完成，有警告', discarded: '已丢弃',
+    done: '已完成', error: '失败', interrupted: '已中断', incomplete: '未完成', warning: '完成，有警告', discarded: '已丢弃',
   };
   let timer, pending, eventSignature = '';
   const count = new Intl.NumberFormat('zh-CN');

@@ -5,7 +5,7 @@ status snapshots and scoped cancellation requests, independently of stdout.
 """
 
 
-def consumer_run(operation, config, directory='/content', poll_seconds=1, interrupt=None):
+def consumer_run(operation, config, directory='/content', poll_seconds=1, interrupt=None, deadline=None):
     import json as _json
     import os as _os
     import signal as _signal
@@ -72,7 +72,9 @@ def consumer_run(operation, config, directory='/content', poll_seconds=1, interr
                 request = _json.loads(cancel_path.read_text(encoding='utf-8'))
             except (OSError, ValueError):
                 request = {}
-            if request.get('run_id') == state['run_id'] and request.get('job_id') == state['job_id']:
+            timed_out = deadline is not None and _time.time() >= deadline
+            own_request = request.get('run_id') == state['run_id'] and request.get('job_id') == state['job_id']
+            if not finished.is_set() and (timed_out or own_request):
                 cancelled.set()
                 with lock:
                     state['state'] = 'cancelling'

@@ -6,6 +6,7 @@ import threading
 import time
 import unittest
 from unittest.mock import MagicMock, patch
+from requests import ReadTimeout
 
 import app
 import remote_consumer
@@ -52,6 +53,23 @@ class ConsumerProviderTests(unittest.TestCase):
             self.assertEqual(self.provider.consumer_status(), {'state': 'idle'})
         idle.assert_called_once()
         record.assert_not_called()
+
+    def test_proxy_failure_reconciles_a_released_assignment(self):
+        self.provider._proxy_request = MagicMock(side_effect=ReadTimeout('offline'))
+        with patch.object(self.provider, 'client') as client:
+            client.return_value.list_assignments.return_value = []
+            self.assertEqual(self.provider.consumer_status(), {'state': 'disconnected'})
+        self.assertIsNone(self.control.session)
+        self.control.on_runtime_recycled.assert_called_once_with('owned')
+
+    def test_proxy_failure_with_unconfirmed_assignment_keeps_session(self):
+        self.provider._proxy_request = MagicMock(side_effect=ReadTimeout('proxy offline'))
+        with patch.object(self.provider, 'client') as client:
+            client.return_value.list_assignments.side_effect = ReadTimeout('Colab unavailable')
+            with self.assertRaisesRegex(ReadTimeout, 'proxy offline'):
+                self.provider.consumer_status()
+        self.assertEqual(self.control.session['endpoint'], 'owned')
+        self.control.on_runtime_recycled.assert_not_called()
 
     def test_cancel_rejects_a_different_remote_execution(self):
         self.provider._consumer_record = lambda: {'job_id': 'other', 'run_id': 'other'}
@@ -109,6 +127,24 @@ class RemoteConsumerTests(unittest.TestCase):
                 remote_consumer.consumer_run(operation, {'job_id': 'job', '_consumer_run_id': 'new'}, root, .01, interrupt)
             interrupt.assert_not_called()
             self.assertEqual(json.loads(Path(root, 'lstudio-consumer.json').read_text())['state'], 'done')
+
+    def test_remote_deadline_interrupts_without_a_local_cancel_request(self):
+        with tempfile.TemporaryDirectory(dir=app.PRIVATE) as root:
+            interrupted = threading.Event()
+
+            def operation(config):
+                self.assertTrue(interrupted.wait(3))
+                raise KeyboardInterrupt()
+
+            with patch.object(remote_consumer, 'event', MagicMock(), create=True), \
+                    patch('requests.get', return_value=self.response({'queue_running': [], 'queue_pending': []})):
+                with self.assertRaises(KeyboardInterrupt):
+                    remote_consumer.consumer_run(
+                        operation, {'job_id': 'job', '_consumer_run_id': 'run'},
+                        root, .01, interrupted.set, deadline=0,
+                    )
+            self.assertFalse(Path(root, 'lstudio-cancel.json').exists())
+            self.assertEqual(json.loads(Path(root, 'lstudio-consumer.json').read_text())['state'], 'cancelled')
 
     @staticmethod
     def response(data):

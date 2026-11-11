@@ -157,10 +157,11 @@ class RecoveryTests(unittest.TestCase):
             transport = app.ColabProvider(control, app.runtime_services)
             transport.refresh = lambda:SimpleNamespace(url='https://example.invalid',token='test-only',
                                                        kernel_id='kernel',session_id='session')
-            job = dict(id='test',config=app.H3JobConfig(prompt='test').model_dump(),events=[],status='running')
+            job = dict(id='test', config=app.H3JobConfig(prompt='test').model_dump(),
+                       events=[], status='running', execution_started=True)
             control.jobs['test'] = job
             result = {'path':'/content/ComfyUI/output/H3/test.mp4','size':1}
-            def observe(runtime, session, hook):
+            def observe(runtime, session, hook, *, timeout):
                 hook({'text':'H3_EVENT '+json.dumps({'stage':'result','message':'done','result':result})})
                 return []
             response = MagicMock();response.json.return_value=[{'id':'kernel','execution_state':'busy'}]

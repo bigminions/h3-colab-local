@@ -13,7 +13,7 @@ import time
 import uuid
 import base64
 
-from runtime_recovery import RuntimeBusy
+from runtime_recovery import RuntimeBusy, RuntimeReleased
 
 
 _probe_timing = ContextVar('colab_probe_timing', default=None)
@@ -154,11 +154,24 @@ class ColabProvider:
         if not session:
             return {'state': 'disconnected'}
         with consumer_probe_step('kernel_status'):
-            response = self._proxy_request('GET', '/api/kernels')
-            response.raise_for_status()
-            kernels = response.json()
-            if not isinstance(kernels, list):
-                raise RuntimeError('无法确认远端内核状态')
+            try:
+                response = self._proxy_request('GET', '/api/kernels')
+                response.raise_for_status()
+                kernels = response.json()
+                if not isinstance(kernels, list):
+                    raise RuntimeError('无法确认远端内核状态')
+            except Exception:
+                # A dead runtime can no longer answer its own proxy. Confirm against
+                # the assignment list before deciding whether it is gone.
+                if self.controller.session is session:
+                    try:
+                        with consumer_probe_step('verify_assignment_after_proxy_failure'):
+                            self.refresh()
+                    except RuntimeReleased:
+                        return {'state': 'disconnected'}
+                    except Exception:
+                        pass
+                raise
         busy = any(k.get('execution_state') != 'idle' for k in kernels)
         if passive and self._gemma_idle_confirmed(session):
             if not busy and any(k.get('id') == session['kernel_id'] for k in kernels):
@@ -196,7 +209,10 @@ class ColabProvider:
 
     def cancel_job(self, job):
         self.request_cancel(job)
+        deadline = job.get('execution_deadline')
         for _ in range(30):
+            if deadline is not None and self.controller.now() >= deadline:
+                break
             state = self.consumer_status()
             if state['state'] in ('idle', 'disconnected'):
                 return
@@ -211,27 +227,21 @@ class ColabProvider:
         return self.services.Client(self.services.Prod(), self.services.TimedSession(creds))
 
     def account(self):
+        session = self.controller.session
         client = self.client()
         assignments = client.list_assignments()
-        managed = (self.controller.session or {}).get('endpoint')
+        managed = (session or {}).get('endpoint')
         if managed and not any(a.endpoint == managed for a in assignments):
-            self.controller.session = None
-            if hasattr(self.controller, 'save_session'):
-                self.controller.save_session()
-            if hasattr(self.controller, 'on_runtime_recycled'):
-                self.controller.on_runtime_recycled(managed)
+            self.forget_released_runtime(session)
         return {'runtimes': [{'endpoint': a.endpoint, 'gpu': a.accelerator.value} for a in assignments],
                 'consumption': client.get_consumption_user_info().model_dump(mode='json')}
 
     def detect_online_gpus(self):
-        managed = (self.controller.session or {}).get('endpoint')
+        session = self.controller.session
+        managed = (session or {}).get('endpoint')
         assignments = [a for a in self.client().list_assignments() if a.accelerator in self.services.GPU_ACCELERATORS]
         if managed and not any(a.endpoint == managed for a in assignments):
-            self.controller.session = None
-            if hasattr(self.controller, 'save_session'):
-                self.controller.save_session()
-            if hasattr(self.controller, 'on_runtime_recycled'):
-                self.controller.on_runtime_recycled(managed)
+            self.forget_released_runtime(session)
         return {'runtimes': [dict(endpoint=a.endpoint, gpu=a.accelerator.value,
                                   managed=a.endpoint == (self.controller.session or {}).get('endpoint'))
                              for a in assignments],
@@ -290,20 +300,17 @@ class ColabProvider:
         active_id = getattr(self.controller,'active',None)
         owned_job = self.controller.jobs.get(active_id) if isinstance(active_id,str) else None
         notebook_hash = uuid.UUID(owned_job['id']) if owned_job else self.assignment_hash
-        if owned_job:
-            owned_job.update(assignment_hash=str(notebook_hash),assignment_pending=True)
-            self.controller.save_jobs()
+        assignment = None
         if config.endpoint:
-            match = next((a for a in assignments if a.endpoint == config.endpoint and a.accelerator == accelerator), None)
-            if match is None:
+            assignment = next((a for a in assignments if a.endpoint == config.endpoint and a.accelerator == accelerator), None)
+            if assignment is None:
                 released_by_this_app = any(j.get('endpoint') == config.endpoint and j['status'] == 'done' and j['config'].get('release_mode') == 'always' for j in self.controller.jobs.values())
                 if not released_by_this_app:
                     raise RuntimeError('选中的 ' + config.gpu + ' 运行时已离线或型号不匹配，请刷新列表。')
-                assignment = self.connection_step('申请并启动 ' + config.gpu + ' 显卡',
-                    lambda: client.assign(notebook_hash, variant=self.services.Variant.GPU, accelerator=accelerator, shape=shape))
-            else:
-                assignment = match
-        else:
+        if assignment is None:
+            if owned_job:
+                owned_job.update(assignment_hash=str(notebook_hash), assignment_pending=True)
+                self.controller.save_jobs()
             assignment = self.connection_step('申请并启动 ' + config.gpu + ' 显卡',
                 lambda: client.assign(notebook_hash, variant=self.services.Variant.GPU, accelerator=accelerator, shape=shape))
         proxy = assignment.runtime_proxy_info
@@ -317,19 +324,32 @@ class ColabProvider:
             owned_job['assignment_pending'] = False
         return self.services.SessionState(**self.controller.session)
 
+    def forget_released_runtime(self, session):
+        with self.controller.lock:
+            if self.controller.session is not session:
+                return
+            if hasattr(self.controller, 'on_runtime_recycled'):
+                self.controller.on_runtime_recycled(session['endpoint'])
+            if self.controller.session is session:
+                self.controller.session = None
+                if hasattr(self.controller, 'save_session'):
+                    self.controller.save_session()
+
     def refresh(self):
-        endpoint = self.controller.session['endpoint']
+        session = self.controller.session
+        if not session:
+            raise RuntimeReleased('原 Colab 运行时已释放')
+        endpoint = session['endpoint']
         match = next((a for a in self.client().list_assignments() if a.endpoint == endpoint), None)
         if match is None:
-            self.controller.session = None
-            if hasattr(self.controller, 'save_session'):
-                self.controller.save_session()
-            if hasattr(self.controller, 'on_runtime_recycled'):
-                self.controller.on_runtime_recycled(endpoint)
-            raise RuntimeError('Colab 运行时已被回收，远程临时文件可能已丢失。')
-        self.controller.session.update(url=match.runtime_proxy_info.url, token=match.runtime_proxy_info.token)
-        self.controller.save_session()
-        return self.services.SessionState(**self.controller.session)
+            self.forget_released_runtime(session)
+            raise RuntimeReleased('原 Colab 运行时已释放')
+        with self.controller.lock:
+            if self.controller.session is not session:
+                raise RuntimeReleased('原 Colab 运行时已断开')
+            session.update(url=match.runtime_proxy_info.url, token=match.runtime_proxy_info.token)
+            self.controller.save_session()
+            return self.services.SessionState(**session)
 
     def execute(self, job):
         self.application_id = job['config'].get('app_id', 'h3')
@@ -350,8 +370,10 @@ class ColabProvider:
             s = step('刷新 Colab 运行时连接', self.refresh)
         runtime = self.services.ColabRuntime(s.url, s.token, kernel_id=s.kernel_id, session_id=s.session_id)
         def remember(field, value):
-            self.controller.session[field] = value
-            self.controller.save_session()
+            with self.controller.lock:
+                if self.controller.session is session:
+                    session[field] = value
+                    self.controller.save_session()
         runtime.on_kernel_started = lambda value: remember('kernel_id', value)
         runtime.on_session_started = lambda value: remember('session_id', value)
         if self.controller.session:
@@ -362,7 +384,8 @@ class ColabProvider:
         self.controller.save_jobs()
         control_source = (self.services.BASE / 'remote_consumer.py').read_text(encoding='utf-8')
         source += '\n' + control_source + '\n_lstudio_app_run = run\n'
-        source += 'def run(config):\n    config["_consumer_run_id"] = ' + repr(job['consumer_run_id']) + '\n    return consumer_run(_lstudio_app_run, config)\n'
+        source += 'def run(config):\n    config["_consumer_run_id"] = ' + repr(job['consumer_run_id']) + '\n'
+        source += '    return consumer_run(_lstudio_app_run, config, deadline=' + repr(job.get('execution_deadline')) + ')\n'
         use_drive_cache = self.services.drive_cache.enabled and getattr(application, 'uses_drive_cache', True)
         if use_drive_cache:
             import base64
@@ -474,10 +497,11 @@ class ColabProvider:
             elif s.kernel_id and s.session_id:
                 kernels = step('核对 Jupyter 内核执行状态', read_kernel_states)
                 if any(k.get('id') == s.kernel_id and k.get('execution_state') == 'busy' for k in kernels):
-                    if text_job and not job.get('execution_started'):
+                    if not job.get('execution_started'):
                         raise RuntimeBusy('Jupyter 内核仍在执行，等待重新确认')
                     self.controller.event(job, 'recover', '远端原任务仍在执行，已重新连接进度；不重复提交')
-                    observed = self.services.observe_execution(runtime, s.session_id, output_hook)
+                    observed = self.services.observe_execution(
+                        runtime, s.session_id, output_hook, timeout=self.controller.remaining_execution_time(job))
                     errors = [o for o in observed if o.get('output_type') == 'error']
                     if errors:
                         raise RuntimeError(errors[-1].get('evalue','远端原任务执行失败'))
@@ -492,7 +516,7 @@ class ColabProvider:
                 submitted_at = time.monotonic()
             outputs = runtime.execute_code(code, allow_stdin=use_drive_cache,
                 stdin_hook=self.services.drive_cache.runtime_stdin_hook(runtime) if use_drive_cache and self.services.drive_cache.backend == 'api' else None,
-                output_hook=output_hook, timeout=4500)
+                output_hook=output_hook, timeout=self.controller.remaining_execution_time(job))
             for output in outputs:
                 output_hook(output)
             errors = [o for o in outputs if o.get('output_type') == 'error']
@@ -517,16 +541,21 @@ class ColabProvider:
 
     def remote_json(self, code, marker, timeout=180):
         s = self.refresh()
+        session = self.controller.session
         runtime = self.services.ColabRuntime(s.url, s.token, kernel_id=s.kernel_id, session_id=s.session_id)
         def remember(field, value):
-            self.controller.session[field] = value
-            self.controller.save_session()
+            with self.controller.lock:
+                if session and self.controller.session is session:
+                    session[field] = value
+                    self.controller.save_session()
         runtime.on_kernel_started = lambda value: remember('kernel_id', value)
         runtime.on_session_started = lambda value: remember('session_id', value)
         try:
             active_job = self.controller.jobs.get(self.controller.active)
             if active_job:
                 self.services.enable_cancellation(runtime, lambda: self.controller.check_cancelled(active_job))
+            if active_job:
+                timeout = min(timeout, self.controller.remaining_execution_time(active_job))
             outputs = runtime.execute_code(code, timeout=timeout)
             for output in outputs:
                 for line in str(output.get('text', '')).splitlines():
@@ -611,22 +640,22 @@ print('H3_DRIVE_UPLOAD ' + json.dumps(value))
     def check_idle(self, endpoint=None):
         """Check a listed runtime without allocating a VM or interrupting a kernel."""
         import requests
-        endpoint = endpoint or self.controller.session['endpoint']
-        managed = (self.controller.session or {}).get('endpoint') == endpoint
+        session = self.controller.session
+        endpoint = endpoint or session['endpoint']
+        managed = (session or {}).get('endpoint') == endpoint
         with consumer_probe_step('list_assignments'):
             assignment = next((a for a in self.client().list_assignments() if a.endpoint == endpoint), None)
         if assignment is None:
             if managed:
-                self.controller.session = None
-                if hasattr(self.controller, 'save_session'):
-                    self.controller.save_session()
-                if hasattr(self.controller, 'on_runtime_recycled'):
-                    self.controller.on_runtime_recycled(endpoint)
+                self.forget_released_runtime(session)
             return True
         if managed:
-            self.controller.session.update(url=assignment.runtime_proxy_info.url, token=assignment.runtime_proxy_info.token)
-            self.controller.save_session()
-            s = self.services.SessionState(**self.controller.session)
+            with self.controller.lock:
+                if self.controller.session is not session:
+                    return False
+                session.update(url=assignment.runtime_proxy_info.url, token=assignment.runtime_proxy_info.token)
+                self.controller.save_session()
+                s = self.services.SessionState(**session)
         else:
             s = self.services.SessionState(endpoint=endpoint, url=assignment.runtime_proxy_info.url,
                              token=assignment.runtime_proxy_info.token, name='h3-gpu-check',
@@ -643,9 +672,10 @@ print('H3_DRIVE_UPLOAD ' + json.dumps(value))
         kernel_id = s.kernel_id if any(k.get('id') == s.kernel_id for k in kernels) else None
         runtime = self.services.ColabRuntime(s.url, s.token, kernel_id=kernel_id, session_id=s.session_id)
         def remember(field, value):
-            if managed:
-                self.controller.session[field] = value
-                self.controller.save_session()
+            with self.controller.lock:
+                if managed and self.controller.session is session:
+                    session[field] = value
+                    self.controller.save_session()
         runtime.on_kernel_started = lambda value: remember('kernel_id', value)
         runtime.on_session_started = lambda value: remember('session_id', value)
         app_id = 'h3'

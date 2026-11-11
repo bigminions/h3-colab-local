@@ -64,6 +64,8 @@ python -m venv .venv
 
 - **日常使用（推荐）**：  
   直接在文件管理器中**双击 `start.cmd`**（或在终端运行 `.\start.cmd`）。启动器会自动拉起服务并在默认浏览器打开工作台：[http://127.0.0.1:7865/](http://127.0.0.1:7865/)。
+
+  队列任务默认最多执行 2 小时，排在其他任务后面的等待时间不计入。可在启动前设置环境变量 `LSTUDIO_TASK_TIMEOUT_SECONDS`，单位为秒。PowerShell 中例如运行 `$env:LSTUDIO_TASK_TIMEOUT_SECONDS = '10800'`，再运行 `.\start.cmd`，即可将上限改为 3 小时。Gemma 的开启任务包含模型部署和会话占用时间。
 - **开发者 / 排查启动问题**：  
   可在终端前台运行以查看实时控制台日志：
   ```powershell

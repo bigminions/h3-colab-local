@@ -43,13 +43,13 @@ class TaskControlTests(unittest.TestCase):
         self.assertEqual(fake.calls.count('connect'),1)
         self.assertEqual(fake.calls[-1],'release')
 
-    def test_three_failed_reconnects_cancel_and_preserve_runtime(self):
+    def test_three_failed_reconnects_end_as_failed_and_preserve_runtime(self):
         fake=FakeTransport(self.control)
         fake.execute=MagicMock(side_effect=RuntimeError('Connection was lost.'))
         self.control.transport=fake
         self.control.run(self.job)
         self.assertEqual(fake.execute.call_count,4)
-        self.assertEqual(self.job['status'],'cancelled')
+        self.assertEqual(self.job['status'],'error')
         self.assertEqual(self.job['reconnect_attempts'],3)
         self.assertIsNone(self.control.active)
         self.assertIsNotNone(self.control.session)
@@ -224,7 +224,8 @@ class TaskControlTests(unittest.TestCase):
         self.assertIsNone(self.control.session)
         self.assertTrue(self.job['safe_release'])
         self.assertNotIn(self.job, self.control.pending_jobs())
-        self.assertIn('原 Colab 运行时已离线', self.job['message'])
+        self.assertEqual(self.job['status'], 'incomplete')
+        self.assertIn('原 Colab 运行时已释放', self.job['message'])
 
     def test_cancel_with_no_online_gpu_and_http_400_cancels_cleanly(self):
         self.control.active = None

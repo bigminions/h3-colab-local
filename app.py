@@ -1,6 +1,7 @@
 """LStudio local workspace, application jobs and compute coordination."""
 import ctypes
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from ctypes import wintypes
 import hashlib
 import io
@@ -57,7 +58,8 @@ from colab_cli.client import Client, Prod, Variant, Accelerator, Shape
 from colab_cli.runtime import ColabRuntime
 from colab_cli.state import SessionState
 from colab_cli.contents import ContentsClient
-from runtime_recovery import observe_execution, connection_failure, TaskCancelled, ReconnectExhausted, RuntimeBusy, enable_cancellation
+from runtime_recovery import (observe_execution, connection_failure, TaskCancelled, ReconnectExhausted,
+                              RuntimeBusy, RuntimeReleased, TaskDeadlineExceeded, enable_cancellation)
 
 BASE = Path(__file__).resolve().parent
 DATA = Path(os.environ.get('LSTUDIO_DATA_ROOT') or BASE).resolve()
@@ -73,6 +75,12 @@ PORT = int(os.environ.get('LSTUDIO_PORT', '7865'))
 LOCAL_ORIGINS = {f'http://127.0.0.1:{PORT}', f'http://localhost:{PORT}'}
 GPU_ACCELERATORS = {Accelerator.G4, Accelerator.T4, Accelerator.L4, Accelerator.A100, Accelerator.H100}
 CONNECT_PROGRESS_INTERVAL = 15
+TASK_TIMEOUT_SECONDS = int(os.environ.get('LSTUDIO_TASK_TIMEOUT_SECONDS', '7200'))
+if TASK_TIMEOUT_SECONDS <= 0:
+    raise ValueError('LSTUDIO_TASK_TIMEOUT_SECONDS 必须为正整数')
+DISPATCH_TIMEOUT_SECONDS = 60
+RUNTIME_RELEASED_MESSAGE = '原 Colab 运行时已释放，任务未完成，可重新提交。'
+task_time_remaining = ContextVar('task_time_remaining', default=None)
 
 
 def atomic(path, text):
@@ -161,7 +169,7 @@ class TimedSession(AuthorizedSession):
     def request(self, method, url, **kwargs):
         path = urlparse(url).path
         allocating = method.upper() == 'POST' and path == '/tun/m/assign'
-        kwargs.setdefault('timeout', (15, 180 if allocating else 60))
+        kwargs.setdefault('timeout', bounded_request_timeout(15, 180 if allocating else 60))
         started = time.monotonic()
         try:
             return super().request(method, url, **kwargs)
@@ -210,12 +218,20 @@ def connection_diagnostic(exc, operation):
     return detail
 
 
+def bounded_request_timeout(connect, read):
+    remaining = task_time_remaining.get()
+    if remaining is None:
+        return connect, read
+    seconds = remaining()
+    return min(connect, seconds), min(read, seconds)
+
+
 class TimedContents(ContentsClient):
     def _request(self, method, path, params=None, json_data=None):
         import requests
         response = requests.request(method, self.base_url + '/api/contents/' + quote(path.strip('/'), safe='/'),
             params={'authuser': '0', 'colab-runtime-proxy-token': self.token, **(params or {})},
-            json=json_data, timeout=(15, 180))
+            json=json_data, timeout=bounded_request_timeout(15, 180))
         response.raise_for_status()
         return response.json()
 
@@ -490,14 +506,28 @@ class Controller:
                 and not (j.get('file') or j.get('drive')) and not j.get('safe_release')]
 
     def check_cancelled(self, job):
+        if job.get('status') == 'incomplete':
+            raise RuntimeReleased(job['message'])
         if job.get('cancel_requested'):
             raise TaskCancelled('任务已请求取消')
+        deadline = job.get('execution_deadline')
+        if deadline is not None and self.now() >= deadline:
+            raise TaskDeadlineExceeded('任务已达到最长执行时间')
+
+    def remaining_execution_time(self, job):
+        self.check_cancelled(job)
+        deadline = job.get('execution_deadline')
+        return max(.001, deadline - self.now()) if deadline is not None else TASK_TIMEOUT_SECONDS
 
     def connected_operation(self, job, operation, label='执行视频任务'):
         for attempt in range(4):
             self.check_cancelled(job)
             try:
-                return operation()
+                context = task_time_remaining.set(lambda: self.remaining_execution_time(job))
+                try:
+                    return operation()
+                finally:
+                    task_time_remaining.reset(context)
             except Exception as exc:
                 self.check_cancelled(job)
                 if not connection_failure(exc):
@@ -512,7 +542,7 @@ class Controller:
                     raise ReconnectExhausted(job['failure_reason']) from exc
                 job['reconnect_attempts'] = job.get('reconnect_attempts',0) + 1
                 self.event(job,'recover',job['failure_reason'] + elapsed + f'；正在自动重试 {attempt+1}/3，保留原任务')
-                self.cancel_wakeup.wait(2 * (attempt+1))
+                self.cancel_wakeup.wait(min(2 * (attempt+1), self.remaining_execution_time(job)))
 
     def cancel_targets(self, job):
         return [j for j in self.jobs.values() if j['id'] == job['id'] or
@@ -525,6 +555,8 @@ class Controller:
                 raise HTTPException(404,'任务不存在')
             if job.get('comfy_batch'):
                 job = self.jobs[job['batch_id']]
+            if job.get('status') == 'incomplete':
+                raise HTTPException(409, '该任务已结束，无需取消')
             if job.get('chat_session') == 'ready' and self.end_chat_session(job_id):
                 return {'ok': True, 'pending': True, 'message': '正在结束聊天会话'}
             targets = self.cancel_targets(job)
@@ -543,7 +575,7 @@ class Controller:
             if self.session and job.get('endpoint') and job['endpoint'] != self.session['endpoint']:
                 raise HTTPException(409,'此任务不属于当前运行时，未执行取消')
             for target in targets:
-                if not (target.get('file') or target.get('drive')):
+                if not (target.get('file') or target.get('drive') or target.get('terminal_failure')):
                     target.update(cancel_requested=True,status='cancelling')
             # A saved active item may still be uploading or own the remaining batch.
             if self.active:
@@ -556,7 +588,7 @@ class Controller:
         return_pending = bool(self.active)
         return {'ok':True,'pending':return_pending,'message':job.get('message')}
 
-    def finish_cancel(self, job):
+    def finish_cancel(self, job, reconnect_failed=False):
         with self.lock:
             if job.get('cancel_finishing'):
                 return
@@ -575,7 +607,14 @@ class Controller:
             elif job.get('assignment_pending'):
                 self.transport.cancel_pending_assignment(job)
             with self.lock:
+                if job.get('status') == 'incomplete':
+                    return
+                if reconnect_failed:
+                    self.finish_failed_task(job, 'error', '自动重连失败，任务已停止。' + job['auto_cancel_reason'])
+                    return
                 for target in self.cancel_targets(job):
+                    if target.get('terminal_failure'):
+                        continue
                     saved = bool(target.get('file') or target.get('drive') or
                                  (application_id(target) == GEMMA_APP_ID and target.get('safe_release') and target.get('remote_result')))
                     target.update(status='done' if saved else 'cancelled', safe_release=True, batch_complete=True, assignment_pending=False)
@@ -588,14 +627,16 @@ class Controller:
                     message += '；失败原因：' + job['auto_cancel_reason']
                 self.event(job, 'done' if job.get('file') or job.get('drive') else 'cancelled', message)
         except Exception as exc:
+            if job.get('status') == 'incomplete':
+                return
             resp = getattr(exc, 'response', None)
             is_client_error = resp is not None and getattr(resp, 'status_code', None) in (400, 404)
             no_remote_gpu = False
+            endpoint = (self.session or {}).get('endpoint') or job.get('endpoint')
             try:
                 if hasattr(self.transport, 'client'):
                     client = self.transport.client()
                     online = client.list_assignments()
-                    endpoint = (self.session or {}).get('endpoint') or job.get('endpoint')
                     if not endpoint or not any(a.endpoint == endpoint for a in online):
                         no_remote_gpu = True
                         if self.session and not any(a.endpoint == self.session.get('endpoint') for a in online):
@@ -608,9 +649,18 @@ class Controller:
                 if not self.session and is_client_error:
                     no_remote_gpu = True
 
-            if no_remote_gpu or (not self.session and is_client_error):
+            if reconnect_failed:
+                if no_remote_gpu and endpoint:
+                    self.on_runtime_recycled(endpoint)
+                    if job.get('status') == 'incomplete':
+                        return
+                detail = '任务已停止。' if no_remote_gpu else '远端停止尚未确认。'
+                self.finish_failed_task(job, 'error', '自动重连失败，' + detail + job['auto_cancel_reason'])
+            elif no_remote_gpu or (not self.session and is_client_error):
                 with self.lock:
                     for target in self.cancel_targets(job):
+                        if target.get('terminal_failure'):
+                            continue
                         target.update(status='cancelled', safe_release=True, batch_complete=True, assignment_pending=False)
                         target.pop('cancel_error', None)
                     self.release_error = self.release_message = None
@@ -620,8 +670,9 @@ class Controller:
                     self.event(job, 'cancelled', message)
                 return
 
-            job.update(status='error', safe_release=False, cancel_error=safe_error(exc))
-            self.event(job, 'cancel', '取消尚未确认：' + safe_error(exc) + '；环境保留，请重试取消')
+            else:
+                job.update(status='error', safe_release=False, cancel_error=safe_error(exc))
+                self.event(job, 'cancel', '取消尚未确认：' + safe_error(exc) + '；环境保留，请重试取消')
         finally:
             job.pop('cancel_finishing',None)
             self.save_jobs()
@@ -647,7 +698,8 @@ class Controller:
                               safe_release=False, batch_complete=False, created=self.now())
                 for key in ('remote_result', 'execution_started', 'consumer_run_id', 'prompt_id',
                             'cancel_requested', 'auto_cancel_reason', 'history_hidden', 'local_download_error',
-                            'gpu_release_error', 'cancel_error', 'recover_existing'):
+                            'gpu_release_error', 'cancel_error', 'recover_existing', 'execution_deadline',
+                            'dispatch_started_at', 'endpoint', 'assignment_pending', 'assignment_hash', 'terminal_failure'):
                     target.pop(key, None)
 
             job.update(queue_order=self.queue_order(placement == 'front'), queue_front=placement == 'front')
@@ -656,30 +708,6 @@ class Controller:
             self.ensure_worker()
 
             return {'ok': True, 'id': job_id}
-
-    def verify_saved_results(self, endpoint):
-        for job in self.jobs.values():
-            if job.get('endpoint') != endpoint:
-                continue
-            if job.get('drive'):
-                self.drive_storage.confirm_stored(job['drive'])
-            if job.get('file'):
-                app_id = job.get('config', {}).get('app_id', 'h3')
-                application = applications.get(app_id)
-                output_folder = self.output_folder_for(application) if application else self.videos
-                path = output_folder / job['file']
-                if not path.is_file():
-                    is_video = self.app_output_kind(application) == 'video' if application else True
-                    noun = '视频' if is_video else '图片'
-                    raise HTTPException(409, f'本机{noun}文件已丢失，运行时保留，请先取回结果。')
-                result = job.get('remote_result')
-                if result:
-                    with path.open('rb') as handle:
-                        digest = hashlib.file_digest(handle, 'sha256').hexdigest()
-                    if path.stat().st_size != result['size'] or digest != result['sha256']:
-                        is_video = self.app_output_kind(application) == 'video' if application else True
-                        noun = '视频' if is_video else '图片'
-                        raise HTTPException(409, f'本机{noun}校验失败，运行时保留，请先取回结果。')
 
     def release_online_gpu(self, endpoint):
         with self.lock:
@@ -691,7 +719,6 @@ class Controller:
                 raise HTTPException(409, '该显卡有未取回的结果，请先取回再释放')
             self.release_checking = True
             try:
-                self.verify_saved_results(endpoint)
                 released = self.transport.release_detected_gpu(endpoint)
                 return {'ok': True, 'endpoint': endpoint,
                         'message': '已检查并确认显卡已释放' if released else '该显卡已离线，无需释放'}
@@ -702,24 +729,46 @@ class Controller:
             finally:
                 self.release_checking = False
 
+    def finish_failed_task(self, job, status, message):
+        with self.lock:
+            if job['status'] == 'incomplete' and status != 'incomplete':
+                return
+            targets = self.cancel_targets(job) if job.get('comfy_batch') else [job]
+            events = []
+            for target in targets:
+                if target.get('file') or target.get('drive'):
+                    if target['status'] in ('running', 'cancelling'):
+                        target.update(status='warning', safe_release=True)
+                        events.append((target, 'done', '结果已保存；' + message))
+                    continue
+                target.update(status=status, safe_release=True, queue_front=False, terminal_failure=True)
+                target.pop('recover_existing', None)
+                target.setdefault('events', [])
+                events.append((target, status, message))
+            if job.get('batch_id'):
+                siblings = targets if job.get('comfy_batch') else self.cancel_targets(job)
+                if all(j['status'] not in ('queued', 'running', 'cancelling') for j in siblings):
+                    for child in siblings:
+                        child['batch_complete'] = True
+            for target, stage, detail in events:
+                self.event(target, stage, detail)
+
     def on_runtime_recycled(self, endpoint):
         with self.lock:
             if self.session and self.session.get('endpoint') == endpoint:
                 self.session = None
                 self.save_session()
-            affected = False
             for job in self.jobs.values():
-                if job.get('endpoint') == endpoint and not (job.get('file') or job.get('drive')) and not job.get('safe_release'):
-                    job.update(safe_release=True)
-                    if job.get('status') in ('running', 'queued', 'cancelling'):
-                        job.update(status='interrupted', message='Colab 运行时已被回收，未能完成生成。')
-                    elif job.get('status') in ('error', 'interrupted'):
-                        msg = job.get('message', '')
-                        if '运行时已离线' not in msg and '已被回收' not in msg:
-                            job.update(message=(msg + '；原 Colab 运行时已离线。').strip('；'))
-                    affected = True
-            if affected:
-                self.save_jobs()
+                if job.get('endpoint') != endpoint or job.get('file') or job.get('drive'):
+                    continue
+                if job.get('chat_session') == 'ready':
+                    job['chat_end'] = 'lost'
+                    self.chat_wakeup.set()
+                    continue
+                if (job['status'] in ('running', 'cancelling') or job.get('recover_existing')
+                        or job['status'] in ('error', 'interrupted') and not job.get('safe_release')):
+                    self.finish_failed_task(job, 'incomplete', RUNTIME_RELEASED_MESSAGE)
+            self.save_jobs()
             self.idle_since = None
             self.release_error = None
             self.release_message = '已检查：当前没有本控制台管理的显卡，无需释放'
@@ -752,10 +801,8 @@ class Controller:
                 raise HTTPException(409, '存在未取回的视频。先重试取回，再检查并释放。')
             self.release_checking = True
             try:
-                if not force:
-                    self.verify_saved_results(self.session['endpoint'])
-                    if not self.transport.check_idle():
-                        raise HTTPException(409, 'Colab 仍有任务运行或排队，显卡已保留，请稍后再检查。')
+                if not force and not self.transport.check_idle():
+                    raise HTTPException(409, 'Colab 仍有任务运行或排队，显卡已保留，请稍后再检查。')
                 if self.session:
                     self.transport.release()
                 self._discard_pending_jobs()
@@ -1158,8 +1205,26 @@ class Controller:
 
     def queue_blocker(self):
         endpoint = (self.session or {}).get('endpoint')
-        return next((j for j in self.pending_jobs() if j.get('status') in ('error', 'interrupted', 'cancelling')
-                     and (endpoint and j.get('endpoint') == endpoint or j.get('assignment_pending'))), None)
+        for job in self.pending_jobs():
+            if job.get('safe_release') or job['status'] not in ('error', 'interrupted', 'cancelling'):
+                continue
+            if not (endpoint and job.get('endpoint') == endpoint or job.get('assignment_pending')):
+                continue
+            if self.now() < job.setdefault('execution_deadline', self.now() + TASK_TIMEOUT_SECONDS):
+                return job
+            self.finish_failed_task(job, 'error', '任务已达到最长执行时间，已结束等待恢复。')
+        return None
+
+    def defer_dispatch(self, job, message):
+        with self.lock:
+            if job['status'] == 'incomplete':
+                return False
+            deadline = job['dispatch_started_at'] + min(DISPATCH_TIMEOUT_SECONDS, TASK_TIMEOUT_SECONDS)
+            if self.now() >= min(deadline, job.get('execution_deadline', deadline)):
+                self.finish_failed_task(job, 'error', '无法启动任务，已结束等待。' + message)
+                return False
+            job.update(status='queued', stage='connect', message=message)
+            return True
 
     def _run_queue(self):
         self._in_queue_worker = True
@@ -1184,12 +1249,14 @@ class Controller:
                         self.configure_release(ReleasePolicy(mode=target['config']['release_mode'],
                             idle_minutes=target['config'].get('idle_minutes', 10)))
                     self.active = target['id']
+                    target.setdefault('dispatch_started_at', self.now())
                     target.update(status='running', stage='connect', message='正在准备执行任务')
                     self.idle_since = None
                     self.release_error = self.release_message = None
                     self.save_jobs()
                     self.save_release_state()
                 try:
+                    self.check_cancelled(target)
                     warm_gemma = application_id(target) == GEMMA_APP_ID and getattr(
                         self.transport, 'can_reuse_gemma', lambda job: False)(target)
                     if self.session and not warm_gemma:
@@ -1198,6 +1265,8 @@ class Controller:
                             started = time.monotonic()
                             self.event(target, 'connect', '正在确认 Colab 运行时是否空闲')
                         state = self.refresh_consumer()
+                        if target['status'] == 'incomplete':
+                            continue
                         if checking_gemma:
                             elapsed = time.monotonic() - started
                             result = {'idle': '运行时空闲', 'busy': '运行时仍在执行',
@@ -1207,34 +1276,38 @@ class Controller:
                         recovering = (target.get('recover_existing') and state['state'] == 'busy'
                                       and state.get('job_id') == target['id']
                                       and state.get('run_id') == target.get('consumer_run_id'))
-                        if not session or state['state'] != 'idle' and not recovering:
-                            with self.lock:
-                                if target['status'] == 'running':
-                                    target.update(status='queued', message=(
-                                        '等待 Colab 运行时空闲' if state['state'] in ('busy', 'cancelling')
-                                        else '等待重新确认 Colab 运行时状态'))
-                            return
+                        if session and state['state'] != 'idle' and not recovering:
+                            if self.defer_dispatch(target, state.get('error') or (
+                                    '等待 Colab 运行时空闲' if state['state'] in ('busy', 'cancelling')
+                                    else '等待重新确认 Colab 运行时状态')):
+                                return
+                            continue
                         config = target['config']
-                        if (self.provider_id != config.get('provider_id', 'colab') or
+                        if session and (self.provider_id != config.get('provider_id', 'colab') or
                                 session.get('app_id') != application_id(target) or
                                 session.get('accelerator') != config.get('gpu')):
                             self.consumer = {**self.consumer, 'state': 'switching'}
-                            self.verify_saved_results(session['endpoint'])
                             self.transport.release()
                             # Providers clear session only after release has been confirmed.
                             if self.session:
                                 raise RuntimeError('释放尚未确认，暂停环境切换')
+                    if not self.session and target.get('recover_existing'):
+                        self.finish_failed_task(target, 'incomplete', RUNTIME_RELEASED_MESSAGE)
+                        continue
                     self.cancel_wakeup.clear()
                     target.pop('history_hidden', None)
+                    target.setdefault('execution_deadline', self.now() + TASK_TIMEOUT_SECONDS)
                     self.run(target)
                     with self.lock:
                         if target['status'] == 'queued':
-                            return
+                            if self.defer_dispatch(target, target['message']):
+                                return
+                            continue
                         target['queue_front'] = False
                         target.pop('recover_existing', None)
                         if target.get('batch_id'):
                             siblings = self.cancel_targets(target)
-                            if target['status'] in ('error', 'interrupted'):
+                            if target['status'] in ('error', 'interrupted') and not target.get('terminal_failure'):
                                 for child in siblings:
                                     if child['status'] == 'queued':
                                         child.update(status='interrupted', message='本批暂停，重试后继续生成')
@@ -1243,13 +1316,21 @@ class Controller:
                             if all(j['status'] not in ('queued', 'running', 'cancelling') for j in siblings):
                                 for child in siblings:
                                     child['batch_complete'] = True
+                except RuntimeReleased:
+                    if target['status'] != 'incomplete':
+                        self.finish_failed_task(target, 'incomplete', RUNTIME_RELEASED_MESSAGE)
+                except TaskDeadlineExceeded as exc:
+                    self.finish_failed_task(target, 'error', str(exc))
+                except TaskCancelled:
+                    self.finish_cancel(target)
                 except Exception as exc:
                     with self.lock:
-                        target.update(status='queued')
                         self.release_error = safe_error(exc)
                         self.consumer = {**self.consumer, 'state': 'unknown', 'error': self.release_error}
-                        self.event(target, 'connect', '消费者状态未确认，队列暂停：' + self.release_error)
-                    return
+                        message = '消费者状态未确认：' + self.release_error
+                        if self.defer_dispatch(target, message):
+                            self.event(target, 'connect', message)
+                            return
                 finally:
                     with self.lock:
                         self.active = None
@@ -1293,10 +1374,11 @@ class Controller:
                 retry_endpoint = job.get('endpoint')
                 if not retry_endpoint and job.get('batch_id'):
                     retry_endpoint = next((j.get('endpoint') for j in self.cancel_targets(job) if j.get('endpoint')), None)
-                if not self.session or retry_endpoint != self.session['endpoint'] or job['status'] == 'discarded':
+                if not self.session or retry_endpoint != self.session['endpoint'] or job['status'] in ('discarded', 'incomplete') or job.get('terminal_failure'):
                     raise HTTPException(409, '原任务的运行时已离线，无法在另一个运行时取回。')
                 batch = sorted((j for j in self.jobs.values() if j.get('batch_id') == job.get('batch_id')
-                                and job.get('batch_id') and not (j.get('file') or j.get('drive'))),
+                                and job.get('batch_id') and not j.get('terminal_failure')
+                                and not (j.get('file') or j.get('drive'))),
                                key=lambda j: j['batch_index'])
                 if batch:
                     job = batch[0]
@@ -1342,6 +1424,7 @@ class Controller:
         output_kind = self.app_output_kind(application)
         opening_chat = output_kind == 'text' and config.operation == 'open'
         self.text_draft = ''
+        job.setdefault('execution_deadline', self.now() + TASK_TIMEOUT_SECONDS)
         try:
             if config.provider_id != self.provider_id:
                 if self.session:
@@ -1357,11 +1440,19 @@ class Controller:
                 self.event(job, 'connect', f'使用已有 {config.gpu} 运行时，准备发送消息')
             else:
                 self.event(job, 'connect', '正在连接 ' + config.gpu + '；只有提交任务才申请显卡')
-            self.connected_operation(job,lambda:self.transport.connect(config), '连接／申请 ' + config.gpu)
-            job['endpoint'] = self.session['endpoint']
-            if job.get('comfy_batch'):
-                for child in self.cancel_targets(job):
-                    child['endpoint'] = job['endpoint']
+            try:
+                self.connected_operation(job, lambda: self.transport.connect(config), '连接／申请 ' + config.gpu)
+            except RuntimeReleased:
+                if job.get('endpoint') or job.get('recover_existing') or self.session:
+                    raise
+                self.connected_operation(job, lambda: self.transport.connect(config), '重新连接／申请 ' + config.gpu)
+            with self.lock:
+                if not self.session:
+                    raise RuntimeReleased('原 Colab 运行时已释放')
+                job['endpoint'] = self.session['endpoint']
+                if job.get('comfy_batch'):
+                    for child in self.cancel_targets(job):
+                        child['endpoint'] = job['endpoint']
             self.check_cancelled(job)
             self.save_jobs()
             self.event(job, 'connect', config.gpu + ' 运行时已连接，准备执行任务')
@@ -1431,6 +1522,8 @@ class Controller:
             self.event(job, 'done', saved + '，显卡已释放' if release_now else kept)
         except RuntimeBusy as exc:
             with self.lock:
+                if job.get('status') == 'incomplete':
+                    return
                 if self.active == job['id']:
                     self.active = None
                 if job.get('cancel_requested'):
@@ -1439,13 +1532,20 @@ class Controller:
                 else:
                     job['status'] = 'queued'
                     self.event(job, 'connect', str(exc))
+        except RuntimeReleased:
+            if job.get('status') != 'incomplete':
+                self.finish_failed_task(job, 'incomplete', RUNTIME_RELEASED_MESSAGE)
+        except TaskDeadlineExceeded as exc:
+            self.finish_failed_task(job, 'error', str(exc))
         except Exception as exc:
+            if job.get('status') == 'incomplete':
+                return
             if job.get('cancel_requested') or isinstance(exc, (TaskCancelled,ReconnectExhausted)):
                 job['cancel_requested'] = True
                 if isinstance(exc,ReconnectExhausted):
                     job['auto_cancel_reason'] = str(exc)
                     self.event(job,'cancel','自动重连连续失败：' + str(exc) + ('；正在确认原任务状态，保留显卡环境' if self.session else '；正在取消任务，未占用显卡'))
-                self.finish_cancel(job)
+                self.finish_cancel(job, reconnect_failed=isinstance(exc, ReconnectExhausted))
                 return
             job['status'] = 'error'
             message = safe_error(exc)
@@ -1542,6 +1642,7 @@ class Controller:
         'close': '应用已关闭，聊天会话结束',
         'idle': '聊天闲置超时，会话自动结束',
         'lost': '远端模型已离线，聊天会话结束；如需继续请重新开启应用',
+        'timeout': '聊天会话已达到最长执行时间；如需继续请重新开启应用',
         'shutdown': '本地程序退出，聊天会话结束',
     }
 
@@ -1592,6 +1693,9 @@ class Controller:
                 return 'shutdown'
             if (self.session or {}).get('endpoint') != endpoint:
                 return 'lost'
+            deadline = job.get('execution_deadline')
+            if deadline is not None and self.now() >= deadline:
+                return 'timeout'
             limit = self.chat_idle_limit()
             if limit is not None and self.now() - job.get('last_activity', self.now()) >= limit:
                 return 'idle'
@@ -1627,7 +1731,7 @@ class Controller:
             waiting = bool(waiting_jobs(self.jobs))
             own_runtime = bool(self.session and self.session.get('endpoint') == endpoint)
         released, release_error = False, None
-        if reason in ('close', 'idle') and own_runtime and not waiting:
+        if reason in ('close', 'idle', 'timeout') and own_runtime and not waiting:
             self.event(job, 'release', '聊天会话结束，正在释放 Colab 显卡')
             try:
                 self.transport.release()
@@ -1647,11 +1751,12 @@ class Controller:
             message += '；显卡释放尚未确认：' + release_error
         with self.lock:
             job.pop('cancel_requested', None)
-            job.update(status='warning' if release_error else 'done', chat_session='ended',
+            status = {'lost': 'incomplete', 'timeout': 'error'}.get(reason, 'warning' if release_error else 'done')
+            job.update(status=status, chat_session='ended',
                        chat_end=reason, safe_release=True)
             if release_error:
                 job['gpu_release_error'] = release_error
-        self.event(job, 'done', message)
+        self.event(job, status, message)
 
     def public_drive(self, stored):
         if not stored:
@@ -1706,7 +1811,7 @@ class Controller:
             queue_info = next((j for j in self.queue_snapshot() if j['id'] == job['id']), {})
         return {'app_id': app_id, 'provider_id': config.get('provider_id', 'colab'),
                 'queue_position': queue_info.get('position'), 'queue_reason': queue_info.get('reason'),
-                **{k: v for k, v in job.items() if k not in ('remote_result', 'config', 'safe_release', 'drive_upload_id')},
+                **{k: v for k, v in job.items() if k not in ('remote_result', 'config', 'safe_release', 'drive_upload_id', 'terminal_failure')},
                 'local_file': local_file,
                 'is_preparing': is_preparing,
                 'is_downloading': is_preparing,
@@ -1717,10 +1822,10 @@ class Controller:
                 'can_clear_history': self.history_clearable(job),
                 'drive': self.public_drive(job.get('drive')),
                 'recovery_kind': 'download' if job.get('drive') else 'retrieve' if job.get('remote_result') else 'resume',
-                'can_cancel': bool(job['id'] == self.active or job.get('batch_id') and active.get('batch_id') == job['batch_id'] or job.get('assignment_pending') and job.get('cancel_requested') or job.get('status') == 'queued' or self.session and
+                'can_cancel': not job.get('terminal_failure') and bool(job['id'] == self.active or job.get('batch_id') and active.get('batch_id') == job['batch_id'] or job.get('assignment_pending') and job.get('cancel_requested') or job.get('status') == 'queued' or self.session and
                     job.get('endpoint') == self.session['endpoint'] and job['status'] in ('error','interrupted','queued','running','cancelling') and not (job.get('file') or job.get('drive'))),
                 'can_retry': bool(job.get('drive') and not local_file and not is_preparing
-                    or not job.get('cancel_requested') and not self.active and self.session and job.get('endpoint') == self.session['endpoint'] and job['status'] in ('error', 'interrupted') and not (job.get('file') or job.get('drive'))),
+                    or not job.get('terminal_failure') and not job.get('cancel_requested') and not self.active and self.session and job.get('endpoint') == self.session['endpoint'] and job['status'] in ('error', 'interrupted') and not (job.get('file') or job.get('drive'))),
                 'can_resubmit': bool(not (job.get('file') or job.get('drive')) and job.get('status') not in ('running', 'queued', 'cancelling', 'done') and bool(job.get('config')))}
 
 

@@ -913,7 +913,7 @@ function renderVariantVideoWrap(sibling) {
     placeholder.className = 'task-card-video-placeholder';
     placeholder.innerHTML = `<span class="queued-icon">⏳</span><span>第 ${sibling.batch_index || 1} 个视频等待排队中…</span>`;
     videoWrap.append(placeholder);
-  } else if (['error', 'interrupted'].includes(sibling.status)) {
+  } else if (['error', 'interrupted', 'incomplete'].includes(sibling.status)) {
     const placeholder = document.createElement('div');
     placeholder.className = 'task-card-video-placeholder';
     placeholder.innerHTML = `<span>第 ${sibling.batch_index || 1} 个视频生成未完成或已中断</span>`;
@@ -1037,7 +1037,7 @@ function renderTaskStream(jobs) {
     group.runningSibling = group.siblings.find(j => ['running', 'cancelling'].includes(j.status));
     group.queuedSiblings = group.siblings.filter(j => j.status === 'queued');
     group.completedSiblings = group.siblings.filter(j => (j.local_file !== undefined ? j.local_file : !!j.file) && !j.local_download_error);
-    group.failedSiblings = group.siblings.filter(j => ['error', 'interrupted'].includes(j.status));
+    group.failedSiblings = group.siblings.filter(j => ['error', 'interrupted', 'incomplete'].includes(j.status));
     group.downloadingSiblings = group.siblings.filter(j => j.is_preparing || j.is_downloading);
 
     group.isRunning = !!group.runningSibling;
@@ -1148,7 +1148,8 @@ function renderTaskStream(jobs) {
       stateBadge.textContent = `已完成 ${group.completedSiblings.length}/${group.total} 个`;
     } else if (group.failedSiblings.length > 0) {
       stateBadge.className = 'task-badge badge-error';
-      stateBadge.textContent = '未完成 / 已暂停';
+      stateBadge.textContent = group.failedSiblings.some(j => j.status === 'interrupted')
+        ? '未完成 / 已暂停' : group.failedSiblings.some(j => j.status === 'error') ? '失败' : '未完成';
     } else {
       stateBadge.className = 'task-badge';
       stateBadge.textContent = job.status === 'cancelled' ? '已取消' : job.status;

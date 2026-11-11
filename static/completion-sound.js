@@ -135,6 +135,7 @@
       const isFailed = j => j && (
         j.status === 'error' ||
         j.status === 'interrupted' ||
+        j.status === 'incomplete' ||
         (!!j.local_download_error && !locallyReady(j))
       );
 

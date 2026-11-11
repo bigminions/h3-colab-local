@@ -94,6 +94,89 @@ class UnifiedQueueTests(unittest.TestCase):
         self.assertEqual(self.c.jobs[key]['status'], 'done')
         self.assertEqual(self.fake.calls[:2], ['release', 'connect'])
 
+    def test_released_runtime_finishes_active_job_and_dispatches_the_next(self):
+        lost = self.enqueue('lost')
+        next_job = self.enqueue('next')
+        execute = self.fake.execute
+
+        def execute_job(job):
+            if job['id'] == lost:
+                self.c.on_runtime_recycled('owned-test')
+                return
+            execute(job)
+
+        self.fake.execute = execute_job
+        self.c._run_queue()
+
+        self.assertEqual(self.c.jobs[lost]['status'], 'incomplete')
+        self.assertEqual(self.c.jobs[next_job]['status'], 'done')
+        self.assertEqual(self.fake.calls.count('connect'), 2)
+
+    def test_deadline_expires_during_execution_and_next_job_runs(self):
+        first = self.enqueue('slow')
+        second = self.enqueue('next')
+        clock = [1000]
+        self.c.now = lambda: clock[0]
+        execute = self.fake.execute
+
+        def execute_job(job):
+            if job['id'] == first:
+                clock[0] += 5
+            execute(job)
+
+        self.fake.execute = execute_job
+        with patch.object(app, 'TASK_TIMEOUT_SECONDS', 5):
+            self.c._run_queue()
+
+        self.assertEqual(self.c.jobs[first]['status'], 'error')
+        self.assertIn('最长执行时间', self.c.jobs[first]['message'])
+        self.assertNotIn(self.c.jobs[first], self.c.pending_jobs())
+        self.assertEqual(self.c.jobs[second]['status'], 'done')
+        self.assertEqual(self.fake.calls.count('download'), 1)
+
+    def test_unresponsive_dispatch_fails_after_wait_and_attempts_next_job(self):
+        first = self.enqueue('blocked')
+        second = self.enqueue('next')
+        self.c.session = dict(endpoint='owned-test', app_id='h3', accelerator='A100')
+        clock = [1000]
+        self.c.now = lambda: clock[0]
+        with patch.object(self.fake, 'consumer_status', side_effect=[
+                {'state': 'unknown'}, {'state': 'unknown'}, {'state': 'idle'}]):
+            self.c._run_queue()
+            self.assertEqual(self.c.jobs[first]['status'], 'queued')
+            clock[0] += app.DISPATCH_TIMEOUT_SECONDS
+            self.c._run_queue()
+
+        self.assertEqual(self.c.jobs[first]['status'], 'error')
+        self.assertIn('无法启动任务', self.c.jobs[first]['message'])
+        self.assertEqual(self.c.jobs[second]['status'], 'done')
+
+    def test_runtime_released_during_probe_dispatches_without_retrying_old_runtime(self):
+        key = self.enqueue('next')
+        self.c.session = dict(endpoint='stale', app_id='h3', accelerator='A100')
+
+        def probe():
+            self.c.on_runtime_recycled('stale')
+            return {'state': 'disconnected'}
+
+        with patch.object(self.fake, 'consumer_status', side_effect=probe):
+            self.c._run_queue()
+
+        self.assertEqual(self.c.jobs[key]['status'], 'done')
+        self.assertEqual(self.fake.calls[:2], ['connect', 'execute'])
+
+    def test_release_ends_all_unfinished_children_of_one_remote_batch(self):
+        root = self.enqueue('images', 'qwen_image_2_1', count=2)
+        children = self.c.cancel_targets(self.c.jobs[root])
+        self.c.session = dict(endpoint='stale', app_id='qwen_image_2_1', accelerator='A100')
+        for child in children:
+            child['endpoint'] = 'stale'
+        self.c.jobs[root]['status'] = 'running'
+        self.c.on_runtime_recycled('stale')
+
+        self.assertTrue(all(child['status'] == 'incomplete' and child['batch_complete'] for child in children))
+        self.assertFalse(waiting_jobs(self.c.jobs))
+
     def test_cancel_running_keeps_environment_for_next_job(self):
         first = self.enqueue('cancel me')
         second = self.enqueue('next')

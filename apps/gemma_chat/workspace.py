@@ -227,7 +227,7 @@ class GemmaWorkspace:
         """
         latest = max((job for job in self.jobs() if job['config']['operation'] == 'open'),
                      key=lambda job: job['created'], default={})
-        if latest.get('id') == self.closed_id or latest.get('status') in SUCCESS:
+        if latest.get('id') == self.closed_id or latest.get('status') in SUCCESS or latest.get('chat_session') == 'ended':
             return {}
         return latest
 
@@ -238,7 +238,7 @@ class GemmaWorkspace:
     def last_session_notice(self):
         latest = max((job for job in self.jobs() if job['config']['operation'] == 'open'),
                      key=lambda job: job['created'], default={})
-        if latest.get('id') != self.closed_id and latest.get('chat_end') in {'idle', 'lost', 'restart'}:
+        if latest.get('id') != self.closed_id and latest.get('chat_end') in {'idle', 'lost', 'restart', 'timeout'}:
             return latest.get('message')
         return None
 

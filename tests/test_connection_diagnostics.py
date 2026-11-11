@@ -69,7 +69,7 @@ class ConnectionDiagnosticsTests(unittest.TestCase):
             transport.cancel_pending_assignment = MagicMock()
             control.transport = transport
             control.run(job)
-            self.assertEqual(job['status'], 'cancelled')
+            self.assertEqual(job['status'], 'error')
             self.assertEqual(client.assign.call_count, 4)
             transport.cancel_pending_assignment.assert_called_once_with(job)
             self.assertEqual(len(job['connection_errors']), 4)

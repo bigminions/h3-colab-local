@@ -1314,7 +1314,7 @@ function updateQiGpuDisplay() {
       group.runningSibling = runningJobs.find(j => ['running', 'cancelling'].includes(j.status));
       group.queuedSiblings = group.siblings.filter(j => j.status === 'queued');
       group.completedSiblings = group.siblings.filter(j => (j.local_file !== undefined ? j.local_file : !!j.file) && !j.local_download_error);
-      group.failedSiblings = group.siblings.filter(j => ['error', 'interrupted'].includes(j.status));
+      group.failedSiblings = group.siblings.filter(j => ['error', 'interrupted', 'incomplete'].includes(j.status));
 
       group.isRunning = !!group.runningSibling;
       group.isQueued = !group.runningSibling && group.queuedSiblings.length === group.siblings.length;
@@ -1434,7 +1434,8 @@ function updateQiGpuDisplay() {
         stateBadge.textContent = `已完成 ${group.completedSiblings.length}/${group.total} 张`;
       } else if (group.failedSiblings.length > 0) {
         stateBadge.className = 'task-badge badge-error';
-        stateBadge.textContent = '未完成 / 已暂停';
+        stateBadge.textContent = group.failedSiblings.some(j => j.status === 'interrupted')
+          ? '未完成 / 已暂停' : group.failedSiblings.some(j => j.status === 'error') ? '失败' : '未完成';
       } else {
         stateBadge.className = 'task-badge';
         stateBadge.textContent = statusLabel(job.status);
@@ -1633,7 +1634,7 @@ function updateQiGpuDisplay() {
           placeholder.className = 'task-card-image-placeholder';
           placeholder.innerHTML = `<span class="queued-icon">⏳</span><span>${escapeHtml(queueNote)}</span>`;
           mediaWrap.append(placeholder);
-        } else if (['error', 'interrupted'].includes(sibling.status)) {
+        } else if (['error', 'interrupted', 'incomplete'].includes(sibling.status)) {
           const placeholder = document.createElement('div');
           placeholder.className = 'task-card-image-placeholder is-error';
           placeholder.innerHTML = `<span>❌ 图片生成失败或已中断</span><span class="error-msg">${escapeHtml(sibling.message || '')}</span>`;
@@ -1902,6 +1903,7 @@ function updateQiGpuDisplay() {
       case 'done': return '已完成';
       case 'error': return '错误';
       case 'interrupted': return '已中断';
+      case 'incomplete': return '未完成';
       case 'cancelling': return '正在取消';
       case 'cancelled': return '已取消';
       default: return status || '就绪';
