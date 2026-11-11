@@ -45,6 +45,14 @@ class ConsumerProviderTests(unittest.TestCase):
             self.assertEqual(self.provider.consumer_status()['state'], 'busy')
         idle.assert_called_once()
 
+    def test_confirmed_idle_does_not_read_previous_task_record(self):
+        self.provider._proxy_request = MagicMock(return_value=self.response([{'execution_state': 'idle'}]))
+        with patch.object(self.provider, 'check_idle', return_value=True) as idle, \
+                patch.object(self.provider, '_consumer_record') as record:
+            self.assertEqual(self.provider.consumer_status(), {'state': 'idle'})
+        idle.assert_called_once()
+        record.assert_not_called()
+
     def test_cancel_rejects_a_different_remote_execution(self):
         self.provider._consumer_record = lambda: {'job_id': 'other', 'run_id': 'other'}
         with patch.object(self.provider, '_proxy_request') as request:

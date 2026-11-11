@@ -244,6 +244,12 @@
   outline-offset: 1px !important;
 }
 
+#qwenImagePage .qi-resolution-bar .qi-ratio-box {
+  height: 32px !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+}
+
 /* Model & Encoder dropdowns */
 #qwenImagePage .qi-model-fields {
   display: flex !important;

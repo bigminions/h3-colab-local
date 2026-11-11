@@ -19,6 +19,7 @@ def waiting_jobs(jobs, session=None):
         position = job.get('queue_order', job.get('created', 0))
         return (0 if front else 1, 0 if front or affinity else 1, position)
     return sorted((job for job in jobs.values() if job.get('status') == 'queued'
+                   and not (job.get('comfy_batch') and job.get('batch_id') != job['id'])
                    and not job.get('cancel_requested')), key=order)
 
 

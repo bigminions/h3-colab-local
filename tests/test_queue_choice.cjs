@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const source = fs.readFileSync('static/workspace.js', 'utf8');
 const body = source.slice(source.indexOf('  let queuePlacementResolve ='), source.indexOf('  window.Workspace ='));
-function setup(status, observedConsumer = status.consumer) {
+function setup(status) {
   const elements = new Map();
   const element = id => {
     if (!elements.has(id)) elements.set(id, {
@@ -18,10 +18,7 @@ function setup(status, observedConsumer = status.consumer) {
   const requests = [];
   const ctx = vm.createContext({$:element, api: async path => {
     requests.push(path);
-    if (path === 'consumer') {
-      if (observedConsumer instanceof Error) throw observedConsumer;
-      return observedConsumer || {state:'unknown'};
-    }
+    assert.equal(path, 'status');
     return status;
   }});
   vm.runInContext(body + '\nglobalThis.choose = chooseQueuePlacement; globalThis.respond = closeQueuePlacementModal;', ctx);
@@ -49,21 +46,18 @@ function setup(status, observedConsumer = status.consumer) {
   const idle = setup({active:null,managed_gpu:true,compute:{gpu:'G4'},consumer:{state:'idle'},queue:[]});
   assert.equal(await idle.ctx.choose({targetAppId:'h3',targetGpu:'A100'}), 'back');
   assert.equal(idle.elements.has('queuePlacementModal'), false, 'idle environment switching is handled by the dispatcher');
-  assert.deepEqual(idle.requests, ['status', 'consumer'], 'retained environments are checked before offering queue placement');
-  for (const cachedState of ['busy', 'unknown', 'blocked']) {
-    const stale = setup({active:null,managed_gpu:true,consumer:{state:cachedState},queue:[]}, {state:'idle'});
-    assert.equal(await stale.ctx.choose({targetAppId:'qwen_image_2_1',targetGpu:'T4'}), 'back');
-    assert.equal(stale.elements.has('queuePlacementModal'), false, 'an idle consumer overrides a stale ' + cachedState + ' snapshot');
+  assert.deepEqual(idle.requests, ['status'], 'a retained environment does not add a remote probe');
+  for (const targetAppId of ['h3', 'qwen_image_2_1', 'gemma_chat']) {
+    const unknown = setup({active:null,managed_gpu:true,consumer:{state:'unknown'},queue:[]});
+    assert.equal(await unknown.ctx.choose({targetAppId,targetGpu:'L4'}), 'back');
+    assert.equal(unknown.elements.has('queuePlacementModal'), false);
+    assert.deepEqual(unknown.requests, ['status'], 'unconfirmed remote state does not delay submission');
   }
-  for (const observation of [{state:'unknown'}, new Error('observation unavailable')]) {
-    const unknown = setup({active:null,managed_gpu:true,consumer:{state:'busy'},queue:[]}, observation);
-    assert.equal(await unknown.ctx.choose({}), 'back');
-    assert.equal(unknown.elements.has('queuePlacementModal'), false, 'unconfirmed state is handled by the dispatcher without a misleading queue choice');
-  }
-  const remoteBusy = setup({active:null,managed_gpu:true,consumer:{state:'idle'},queue:[]}, {state:'busy',app_id:'h3'});
+  const remoteBusy = setup({active:null,managed_gpu:true,consumer:{state:'busy',app_id:'h3'},queue:[]});
   const remoteChoice = remoteBusy.ctx.choose({});
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(remoteBusy.elements.get('queuePlacementModal').open, true, 'a confirmed remote task still requires queue placement');
+  assert.equal(remoteBusy.elements.get('queuePlacementModal').open, true, 'the latest busy state still shows the queue dialog');
+  assert.equal(remoteBusy.elements.get('queuePlacementFront').disabled, true, 'a running task cannot be overtaken');
   remoteBusy.ctx.respond('back');
   assert.equal(await remoteChoice, 'back');
   const waiting = setup({active:null,managed_gpu:false,queue:[{id:'queued'}]});

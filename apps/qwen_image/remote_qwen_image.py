@@ -92,6 +92,16 @@ DIMENSIONS = {
     '2:3': (832, 1216),
 }
 
+DIMENSIONS_2K = {
+    '1:1': (2048, 2048),
+    '16:9': (2752, 1536),
+    '9:16': (1536, 2752),
+    '4:3': (2400, 1792),
+    '3:4': (1792, 2400),
+    '3:2': (2528, 1696),
+    '2:3': (1696, 2528),
+}
+
 MODEL_CACHE = None
 CURRENT_CONFIG = {}
 EXPECTED_GPU = 'A100'
@@ -140,19 +150,28 @@ def normalize_edit_prompt(prompt: str) -> str:
     prompt = re.sub(r'(?<![A-Za-z0-9_])@?[iI]mage\s*(\d+)', r'Picture \1', prompt)
     return prompt
 
+def output_prefix(c):
+    prefix = 'local_' + c.get('job_id', 'preview')
+    if c.get('count', 1) > 1 and c.get('_consumer_run_id'):
+        prefix += '_' + c['_consumer_run_id']
+    return prefix
+
+
 def build_graph(c):
     def node(cls, **inputs):
         return {'class_type': cls, 'inputs': inputs}
 
     aspect_ratio = c.get('aspect_ratio', '1:1')
-    width, height = DIMENSIONS.get(aspect_ratio, (1024, 1024))
+    dimensions = DIMENSIONS_2K if c.get('resolution') == '2k' else DIMENSIONS
+    width, height = dimensions.get(aspect_ratio, dimensions['1:1'])
     prompt = c.get('prompt', '')
     negative_prompt = c.get('negative_prompt', '')
     seed = c.get('seed', 0)
     steps = c.get('steps', 8)
     cfg = c.get('cfg', 1.0)
     denoise = c.get('denoise', 0.75)
-    job_id = c.get('job_id', 'preview')
+    count = c.get('count', 1)
+    filename_prefix = 'QwenImage/' + output_prefix(c)
     refs = c.get('references', [])
 
     if is_edit_job(c):
@@ -205,6 +224,10 @@ def build_graph(c):
         g['40'] = node('FluxKontextMultiReferenceLatentMethod', conditioning=['4', 0], reference_latents_method='index_timestep_zero')
         g['41'] = node('FluxKontextMultiReferenceLatentMethod', conditioning=['5', 0], reference_latents_method='index_timestep_zero')
         g['6'] = node('VAEEncode', pixels=['21', 0], vae=['3', 0])
+        latent = ['6', 0]
+        if count > 1:
+            g['15'] = node('RepeatLatentBatch', samples=latent, amount=count)
+            latent = ['15', 0]
 
         g['30'] = node('ModelSamplingAuraFlow', model=['1', 0], shift=3.0)
         g['31'] = node('CFGNorm', model=['30', 0], strength=1.0)
@@ -213,7 +236,7 @@ def build_graph(c):
                       model=['31', 0],
                       positive=['40', 0],
                       negative=['41', 0],
-                      latent_image=['6', 0],
+                      latent_image=latent,
                       seed=seed,
                       steps=edit_steps,
                       cfg=edit_cfg,
@@ -222,7 +245,7 @@ def build_graph(c):
                       denoise=1.0)
 
         g['8'] = node('VAEDecode', samples=['7', 0], vae=['3', 0])
-        g['9'] = node('SaveImage', images=['8', 0], filename_prefix='QwenImage/local_' + job_id)
+        g['9'] = node('SaveImage', images=['8', 0], filename_prefix=filename_prefix)
         return g
 
     model_file = normalize_model_file(c.get('model_file', 'qwen-image-2.1-turbo-Q4_K_M.gguf'))
@@ -249,8 +272,13 @@ def build_graph(c):
         g['6'] = node('VAEEncode', pixels=['21', 0], vae=['3', 0])
         effective_denoise = denoise
     else:
-        g['6'] = node('EmptyLatentImage', width=width, height=height, batch_size=1)
+        g['6'] = node('EmptyLatentImage', width=width, height=height, batch_size=count)
         effective_denoise = 1.0
+
+    latent = ['6', 0]
+    if refs and count > 1:
+        g['15'] = node('RepeatLatentBatch', samples=latent, amount=count)
+        latent = ['15', 0]
 
     TURBO_SIGMAS = '1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0.0'
 
@@ -268,7 +296,7 @@ def build_graph(c):
         g['12'] = node('BasicScheduler', model=['1', 0], scheduler='simple', steps=steps, denoise=effective_denoise)
         sigmas_ref = ['12', 0]
 
-    if cfg <= 1.01 or not negative_prompt:
+    if cfg <= 1.0:
         g['13'] = node('BasicGuider', model=['1', 0], conditioning=['4', 0])
     else:
         g['13'] = node('CFGGuider', model=['1', 0], positive=['4', 0], negative=['5', 0], cfg=cfg)
@@ -278,10 +306,10 @@ def build_graph(c):
                   guider=['13', 0],
                   sampler=['11', 0],
                   sigmas=sigmas_ref,
-                  latent_image=['6', 0])
+                  latent_image=latent)
 
     g['8'] = node('VAEDecode', samples=['7', 0], vae=['3', 0])
-    g['9'] = node('SaveImage', images=['8', 0], filename_prefix='QwenImage/local_' + job_id)
+    g['9'] = node('SaveImage', images=['8', 0], filename_prefix=filename_prefix)
     return g
 
 
@@ -293,9 +321,17 @@ def result_for(path):
     with Image.open(str(path)) as img:
         width, height = img.size
     metadata = dict(width=width, height=height)
-    digest = hashlib.file_digest(path.open('rb'), 'sha256').hexdigest()
-    result = dict(path=str(path), size=path.stat().st_size, sha256=digest, **metadata)
-    event('result', '图片已生成，准备保存结果', result=result)
+    with path.open('rb') as handle:
+        digest = hashlib.file_digest(handle, 'sha256').hexdigest()
+    return dict(path=str(path), size=path.stat().st_size, sha256=digest, **metadata)
+
+
+def report_results(paths):
+    images = [result_for(path) for path in paths]
+    result = dict(images[0])
+    if len(images) > 1:
+        result['images'] = images
+    event('result', f'已生成 {len(images)} 张图片，准备保存结果', result=result)
     return result
 
 
@@ -388,10 +424,13 @@ def generate(c):
     if queue.get('queue_running') or queue.get('queue_pending'):
         raise PreserveRuntimeError('ComfyUI 仍有任务在排队或运行中，请等待完成后提交')
 
-    candidates = sorted((ROOT / 'output' / 'QwenImage').glob('local_' + c['job_id'] + '*.png'))
+    count = c.get('count', 1)
+    candidates = sorted((ROOT / 'output' / 'QwenImage').glob(output_prefix(c) + '_*.png'))
     if candidates:
+        if count > 1 and len(candidates) != count:
+            raise PreserveRuntimeError(f'批量生图产物不完整，找到 {len(candidates)}/{count} 张，已保留运行时')
         event('generate', '找到已完成的生成产物，直接取回')
-        return result_for(candidates[-1])
+        return report_results(candidates if count > 1 else candidates[-1:])
 
     graph = build_graph(c)
     event('generate', '向 ComfyUI 提交生图工作流…')
@@ -427,18 +466,16 @@ def generate(c):
             outputs = history[prompt_id].get('outputs', {})
             save_node = outputs.get('9', {})
             images = save_node.get('images', [])
-            if images:
-                img_info = images[0]
-                subfolder = img_info.get('subfolder', 'QwenImage')
-                filename = img_info.get('filename')
-                output_path = ROOT / 'output' / subfolder / filename
-                if output_path.exists():
-                    return result_for(output_path)
             status = history[prompt_id].get('status', {})
             if status.get('status_str') == 'error':
                 messages = status.get('messages', [])
                 err = '; '.join(str(m) for m in messages) or 'ComfyUI 内部生图错误'
                 raise RuntimeError(err)
+            if images or status.get('completed'):
+                if len(images) != count:
+                    raise PreserveRuntimeError(f'ComfyUI 返回 {len(images)}/{count} 张图片，已保留运行时')
+                paths = [ROOT / 'output' / img.get('subfolder', 'QwenImage') / img['filename'] for img in images]
+                return report_results(paths)
 
     raise RuntimeError('生图任务超时（超过 30 分钟）')
 

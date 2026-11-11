@@ -4,6 +4,9 @@ The adapter owns resource acquisition, transport, recovery and release. It asks
 an application adapter for executable source rather than selecting a model.
 """
 import json
+import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import PurePosixPath
 import threading
 import time
@@ -11,6 +14,42 @@ import uuid
 import base64
 
 from runtime_recovery import RuntimeBusy
+
+
+_probe_timing = ContextVar('colab_probe_timing', default=None)
+_probe_logger = logging.getLogger('uvicorn.error.colab_probe')
+
+
+@contextmanager
+def log_consumer_probe(source):
+    started = time.monotonic()
+    timing = {'source': source, 'steps': [], 'attempts': 0, 'state': 'error'}
+    token = _probe_timing.set(timing)
+    try:
+        yield timing
+    finally:
+        _probe_timing.reset(token)
+        timing['total_ms'] = round((time.monotonic() - started) * 1000)
+        if source != 'monitor' or timing['state'] != 'disconnected':
+            _probe_logger.info('Colab consumer probe %s', json.dumps(timing))
+
+
+@contextmanager
+def consumer_probe_step(name):
+    timing = _probe_timing.get()
+    if timing is None:
+        yield
+        return
+    started = time.monotonic()
+    step = {'name': name, 'attempt': timing['attempts']}
+    try:
+        yield
+    except Exception as exc:
+        step['error_type'] = type(exc).__name__
+        raise
+    finally:
+        step['ms'] = round((time.monotonic() - started) * 1000)
+        timing['steps'].append(step)
 
 
 class ColabProvider:
@@ -114,17 +153,26 @@ class ColabProvider:
         session = self.controller.session
         if not session:
             return {'state': 'disconnected'}
-        response = self._proxy_request('GET', '/api/kernels')
-        response.raise_for_status()
-        kernels = response.json()
-        if not isinstance(kernels, list):
-            raise RuntimeError('无法确认远端内核状态')
+        with consumer_probe_step('kernel_status'):
+            response = self._proxy_request('GET', '/api/kernels')
+            response.raise_for_status()
+            kernels = response.json()
+            if not isinstance(kernels, list):
+                raise RuntimeError('无法确认远端内核状态')
         busy = any(k.get('execution_state') != 'idle' for k in kernels)
         if passive and self._gemma_idle_confirmed(session):
             if not busy and any(k.get('id') == session['kernel_id'] for k in kernels):
                 return {'state': 'idle'}
             self._gemma_idle = None
-        record = self._consumer_record()
+        if not busy:
+            if passive and session.get('app_id') == 'gemma_chat' and self.controller.active:
+                # Avoid submitting a probe cell during local Gemma dispatch.
+                return {'state': 'connecting'}
+            # The kernel can be idle while the generation subprocess still has work.
+            if self.check_idle():
+                return {'state': 'idle'}
+        with consumer_probe_step('task_record'):
+            record = self._consumer_record()
         heartbeat = record.get('heartbeat')
         fresh = isinstance(heartbeat, (int, float)) and abs(time.time() - heartbeat) < 30
         detail = {k: record[k] for k in ('job_id', 'app_id', 'run_id', 'stage', 'prompt_id',
@@ -132,12 +180,7 @@ class ColabProvider:
         if busy:
             return {**detail, 'state': 'cancelling' if fresh and record.get('state') == 'cancelling' else
                     'busy' if fresh else 'unknown', 'fresh': fresh}
-        # Avoid submitting a probe cell during the dispatch of a local Gemma task.
-        if passive and session.get('app_id') == 'gemma_chat' and self.controller.active:
-            return {**detail, 'state': 'connecting', 'fresh': fresh}
-        # A finished notebook cell alone does not prove the ComfyUI subprocess is idle.
-        idle = self.check_idle()
-        return {**detail, 'state': 'idle' if idle else 'busy', 'fresh': fresh}
+        return {**detail, 'state': 'busy', 'fresh': fresh}
 
     def request_cancel(self, job):
         if not self.controller.session:
@@ -570,7 +613,8 @@ print('H3_DRIVE_UPLOAD ' + json.dumps(value))
         import requests
         endpoint = endpoint or self.controller.session['endpoint']
         managed = (self.controller.session or {}).get('endpoint') == endpoint
-        assignment = next((a for a in self.client().list_assignments() if a.endpoint == endpoint), None)
+        with consumer_probe_step('list_assignments'):
+            assignment = next((a for a in self.client().list_assignments() if a.endpoint == endpoint), None)
         if assignment is None:
             if managed:
                 self.controller.session = None
@@ -588,11 +632,12 @@ print('H3_DRIVE_UPLOAD ' + json.dumps(value))
                              token=assignment.runtime_proxy_info.token, name='h3-gpu-check',
                              variant='GPU', accelerator=assignment.accelerator.value,
                              machine_shape='HIGH_RAM', kernel_id=None, session_id=None)
-        response = requests.get(s.url.rstrip('/') + '/api/kernels',
-            params={'authuser': '0', 'colab-runtime-proxy-token': s.token},
-            headers={'X-Colab-Client-Agent': 'colab-cli', 'X-Colab-Runtime-Proxy-Token': s.token}, timeout=(10, 20))
-        response.raise_for_status()
-        kernels = response.json()
+        with consumer_probe_step('kernel_before_idle_check'):
+            response = requests.get(s.url.rstrip('/') + '/api/kernels',
+                params={'authuser': '0', 'colab-runtime-proxy-token': s.token},
+                headers={'X-Colab-Client-Agent': 'colab-cli', 'X-Colab-Runtime-Proxy-Token': s.token}, timeout=(10, 20))
+            response.raise_for_status()
+            kernels = response.json()
         if not isinstance(kernels, list) or any(k.get('execution_state') != 'idle' for k in kernels):
             return False
         kernel_id = s.kernel_id if any(k.get('id') == s.kernel_id for k in kernels) else None
@@ -609,7 +654,8 @@ print('H3_DRIVE_UPLOAD ' + json.dumps(value))
         application = self.services.applications.get(app_id)
         code = application.idle_probe
         try:
-            outputs = runtime.execute_code(code, timeout=20)
+            with consumer_probe_step('execute_idle_check'):
+                outputs = runtime.execute_code(code, timeout=20)
             for output in outputs:
                 for line in str(output.get('text', '')).splitlines():
                     if line.startswith(application.idle_marker):
@@ -622,6 +668,7 @@ print('H3_DRIVE_UPLOAD ' + json.dumps(value))
                         return result['idle'] is True
             raise RuntimeError('无法确认 Colab 生成队列，保留显卡，请稍后检查。')
         finally:
-            runtime.stop()
+            with consumer_probe_step('stop_idle_check_connection'):
+                runtime.stop()
 
 

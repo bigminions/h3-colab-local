@@ -31,6 +31,7 @@ class QwenImageJobConfig(BaseModel):
     negative_prompt: str = Field(default='', max_length=2000)
     title: str = Field(default='', max_length=80)
     aspect_ratio: Literal['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3'] = '1:1'
+    resolution: Literal['standard', '2k'] = 'standard'
     model_file: Literal[
         'qwen-image-2.1-turbo-Q4_K_M.gguf',
         'qwen-image-2.1-turbo-fp8.safetensors',

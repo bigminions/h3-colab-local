@@ -42,7 +42,7 @@ from drive_cache import DriveCache
 from drive_storage import DriveStorage
 from history_recycle import HistoryRecycle
 from asset_library import AssetLibrary
-from compute_colab import ColabProvider
+from compute_colab import ColabProvider, consumer_probe_step, log_consumer_probe
 from apps.h3 import H3Application, H3JobConfig
 from apps.qwen_image import QwenImageApplication, QwenImageJobConfig
 from apps.gemma_chat.application import APP_ID as GEMMA_APP_ID, GemmaApplication
@@ -417,6 +417,10 @@ class Controller:
                         child['batch_complete'] = True
                         if child['status'] == 'interrupted':
                             child['status'] = 'done'
+                elif self.jobs.get(batch_id, {}).get('status') == 'interrupted':
+                    for child in siblings:
+                        if child.get('comfy_batch') and child['status'] == 'queued':
+                            child.update(status='interrupted', message='批次中断，可继续取回结果')
         if (directory / 'session.dat').exists():
             self.session = json.loads(load_secret(directory / 'session.dat'))
         self.provider_id = 'colab'
@@ -519,6 +523,8 @@ class Controller:
             job = self.jobs.get(job_id)
             if job is None:
                 raise HTTPException(404,'任务不存在')
+            if job.get('comfy_batch'):
+                job = self.jobs[job['batch_id']]
             if job.get('chat_session') == 'ready' and self.end_chat_session(job_id):
                 return {'ok': True, 'pending': True, 'message': '正在结束聊天会话'}
             targets = self.cancel_targets(job)
@@ -625,6 +631,9 @@ class Controller:
             job = self.jobs.get(job_id)
             if not job or not job.get('config'):
                 raise HTTPException(404, '任务不存在或缺少配置')
+            if job.get('comfy_batch'):
+                job = self.jobs[job['batch_id']]
+                job_id = job['id']
             if application_id(job) == GEMMA_APP_ID:
                 raise HTTPException(409, '请在 Gemma 聊天页面重新提交')
             if job.get('file') or job.get('drive'):
@@ -632,18 +641,14 @@ class Controller:
             if job.get('status') in ('running', 'queued', 'cancelling'):
                 raise HTTPException(409, '任务正在处理或已在排队中')
 
-            job.update(status='queued', stage='connect', message='排队中，等待执行',
-                       safe_release=False, batch_complete=False, created=self.now())
-            job.pop('remote_result', None)
-            job.pop('execution_started', None)
-            job.pop('consumer_run_id', None)
-            job.pop('prompt_id', None)
-            job.pop('cancel_requested', None)
-            job.pop('auto_cancel_reason', None)
-            job.pop('history_hidden', None)
-            job.pop('local_download_error', None)
-            job.pop('gpu_release_error', None)
-            job.pop('cancel_error', None)
+            targets = self.cancel_targets(job) if job.get('comfy_batch') else [job]
+            for target in targets:
+                target.update(status='queued', stage='connect', message='排队中，等待执行',
+                              safe_release=False, batch_complete=False, created=self.now())
+                for key in ('remote_result', 'execution_started', 'consumer_run_id', 'prompt_id',
+                            'cancel_requested', 'auto_cancel_reason', 'history_hidden', 'local_download_error',
+                            'gpu_release_error', 'cancel_error', 'recover_existing'):
+                    target.pop(key, None)
 
             job.update(queue_order=self.queue_order(placement == 'front'), queue_front=placement == 'front')
             self.event(job, 'connect', '已重新提交任务，加入排队')
@@ -1094,42 +1099,53 @@ class Controller:
         with self.lock:
             return queue_plan(self.jobs, self.session)
 
-    def refresh_consumer(self, *, background=False):
-        with self.consumer_probe_lock:
-            with self.lock:
-                endpoint = (self.session or {}).get('endpoint')
-                active_id = self.active
-                held = self.held_chat_job()
-            if held and endpoint:
-                # The chat task owns the runtime; probing would only queue cells
-                # behind the model server and cannot change the answer.
-                return self._record_consumer(endpoint, {'state': 'busy', 'app_id': GEMMA_APP_ID,
-                                                        'job_id': held['id'], 'stage': 'chat', 'fresh': True})
-            if not endpoint:
-                return self._record_consumer(endpoint, {'state': 'connecting' if active_id else 'disconnected'})
-            observe = self.transport.consumer_status
-            if background:
-                observe = getattr(self.transport, 'observe_consumer', observe)
-            for attempt in range(2):
-                try:
+    def refresh_consumer(self, *, background=False, source='dispatch'):
+        with log_consumer_probe('monitor' if background else source) as timing:
+            waiting_since = time.monotonic()
+            with self.consumer_probe_lock:
+                timing['lock_wait_ms'] = round((time.monotonic() - waiting_since) * 1000)
+                state = self._observe_consumer(background, timing)
+            timing['state'] = state['state']
+            return state
+
+    def _observe_consumer(self, background, timing):
+        with self.lock:
+            endpoint = (self.session or {}).get('endpoint')
+            active_id = self.active
+            held = self.held_chat_job()
+        if held and endpoint:
+            # The chat task owns the runtime, so a probe cannot change the answer.
+            return self._record_consumer(endpoint, {'state': 'busy', 'app_id': GEMMA_APP_ID,
+                                                    'job_id': held['id'], 'stage': 'chat', 'fresh': True})
+        if not endpoint:
+            return self._record_consumer(endpoint, {'state': 'connecting' if active_id else 'disconnected'})
+        observe = self.transport.consumer_status
+        if background:
+            observe = getattr(self.transport, 'observe_consumer', observe)
+        for attempt in range(2):
+            timing['attempts'] = attempt + 1
+            try:
+                with consumer_probe_step('observe'):
                     state = observe()
-                except Exception as exc:
-                    transient = connection_failure(exc)
-                    reason = connection_diagnostic(exc, 'Colab 状态探测')['reason']
-                    state = {'state': 'unknown', 'error': 'Colab 状态探测：' + reason}
-                    if transient:
-                        state['probe_retry'] = 'retrying' if attempt == 0 else 'waiting'
-                    if transient and attempt == 0:
-                        observed = self._record_consumer(endpoint, state)
-                        if observed.get('endpoint') != endpoint:
-                            return observed
-                        if not self.monitor_stop.wait(.5):
-                            with self.lock:
-                                if endpoint != (self.session or {}).get('endpoint'):
-                                    return self._record_consumer(endpoint, state)
-                            continue
-                        state['probe_retry'] = 'waiting'
-                return self._record_consumer(endpoint, state)
+            except Exception as exc:
+                transient = connection_failure(exc)
+                reason = connection_diagnostic(exc, 'Colab 状态探测')['reason']
+                state = {'state': 'unknown', 'error': 'Colab 状态探测：' + reason}
+                if transient:
+                    state['probe_retry'] = 'retrying' if attempt == 0 else 'waiting'
+                if transient and attempt == 0:
+                    observed = self._record_consumer(endpoint, state)
+                    if observed.get('endpoint') != endpoint:
+                        return observed
+                    with consumer_probe_step('retry_delay'):
+                        stopped = self.monitor_stop.wait(.5)
+                    if not stopped:
+                        with self.lock:
+                            if endpoint != (self.session or {}).get('endpoint'):
+                                return self._record_consumer(endpoint, state)
+                        continue
+                    state['probe_retry'] = 'waiting'
+            return self._record_consumer(endpoint, state)
 
     def _record_consumer(self, endpoint, state):
         with self.lock:
@@ -1168,7 +1184,7 @@ class Controller:
                         self.configure_release(ReleasePolicy(mode=target['config']['release_mode'],
                             idle_minutes=target['config'].get('idle_minutes', 10)))
                     self.active = target['id']
-                    target.update(status='running')
+                    target.update(status='running', stage='connect', message='正在准备执行任务')
                     self.idle_since = None
                     self.release_error = self.release_message = None
                     self.save_jobs()
@@ -1194,7 +1210,9 @@ class Controller:
                         if not session or state['state'] != 'idle' and not recovering:
                             with self.lock:
                                 if target['status'] == 'running':
-                                    target['status'] = 'queued'
+                                    target.update(status='queued', message=(
+                                        '等待 Colab 运行时空闲' if state['state'] in ('busy', 'cancelling')
+                                        else '等待重新确认 Colab 运行时状态'))
                             return
                         config = target['config']
                         if (self.provider_id != config.get('provider_id', 'colab') or
@@ -1220,6 +1238,8 @@ class Controller:
                                 for child in siblings:
                                     if child['status'] == 'queued':
                                         child.update(status='interrupted', message='本批暂停，重试后继续生成')
+                                        if target.get('comfy_batch'):
+                                            child['safe_release'] = target.get('safe_release', False)
                             if all(j['status'] not in ('queued', 'running', 'cancelling') for j in siblings):
                                 for child in siblings:
                                     child['batch_complete'] = True
@@ -1251,7 +1271,6 @@ class Controller:
         if config is not None:
             providers.validate(applications.get(config.app_id), config.provider_id, config.gpu)
         with self.lock:
-            is_gemma = config is not None and config.app_id == GEMMA_APP_ID
             if retry and application_id(self.jobs.get(retry, {})) == GEMMA_APP_ID:
                 raise HTTPException(409, '请在 Gemma 聊天页面处理这条消息')
             if retry and self.jobs.get(retry, {}).get('drive'):
@@ -1265,16 +1284,6 @@ class Controller:
                 return retry
             if (PRIVATE / 'drive-cache-session.dat').exists():
                 raise HTTPException(409, 'CPU 正在准备 Drive 模型缓存，请等保存完成后再生成')
-            if not is_gemma and drive_cache.enabled and drive_cache.backend == 'api':
-                try:
-                    drive_cache.quota()
-                except Exception as exc:
-                    raise HTTPException(400, 'Drive 缓存未就绪：' + safe_error(exc) + '；尚未申请显卡') from None
-            if not is_gemma and self.drive_storage.enabled:
-                try:
-                    self.drive_storage.preflight()
-                except Exception as exc:
-                    raise HTTPException(400, 'Drive 成片存储未就绪：' + safe_error(exc) + '；尚未申请显卡') from None
             if retry:
                 job = self.jobs.get(retry)
                 if not job or job.get('file') or job.get('drive'):
@@ -1303,11 +1312,16 @@ class Controller:
                 job = dict(id=job_id, config=config.model_dump(), events=[], status='queued', stage='connect', message='排队中，等待执行', created=time.time())
                 self.jobs[job_id] = job
                 if getattr(config, 'count', 1) > 1:
+                    comfy_batch = isinstance(config, QwenImageJobConfig)
                     for index in range(config.count):
                         child = job if index == 0 else dict(id=uuid.uuid4().hex, events=[], status='queued',
                             stage='connect', message='排队中，等待执行', created=job['created'] + index / 1000)
-                        child.update(config={**config.model_dump(), 'count': 1, 'seed': (config.seed + index) % 2**53},
+                        count = config.count if comfy_batch and index == 0 else 1
+                        seed = config.seed if comfy_batch else (config.seed + index) % 2**53
+                        child.update(config={**config.model_dump(), 'count': count, 'seed': seed},
                                      batch_id=job_id, batch_index=index + 1, batch_total=config.count, batch_complete=False)
+                        if comfy_batch:
+                            child['comfy_batch'] = True
                         self.jobs[child['id']] = child
                 target_id = job['id']
 
@@ -1337,12 +1351,17 @@ class Controller:
             if job.get('drive'):
                 self.download_drive_result(job)
                 return
+            self.check_cancelled(job)
+            self.check_job_drive(job, application, output_kind)
             if output_kind == 'text' and not opening_chat and self.session:
                 self.event(job, 'connect', f'使用已有 {config.gpu} 运行时，准备发送消息')
             else:
                 self.event(job, 'connect', '正在连接 ' + config.gpu + '；只有提交任务才申请显卡')
             self.connected_operation(job,lambda:self.transport.connect(config), '连接／申请 ' + config.gpu)
             job['endpoint'] = self.session['endpoint']
+            if job.get('comfy_batch'):
+                for child in self.cancel_targets(job):
+                    child['endpoint'] = job['endpoint']
             self.check_cancelled(job)
             self.save_jobs()
             self.event(job, 'connect', config.gpu + ' 运行时已连接，准备执行任务')
@@ -1365,19 +1384,7 @@ class Controller:
                 job['drive'] = self.connected_operation(job,lambda:self.transport.upload_drive(job), '上传视频到 Drive')
                 self.save_jobs()
             else:
-                download_desc = '下载图片到本机并校验 SHA-256' if output_kind == 'image' else '下载 MP4 到本机并校验 SHA-256'
-                self.event(job, 'download', download_desc)
-                output_folder = self.output_folder_for(application)
-                partial = output_folder / (job['id'] + '.partial')
-                op_name = '下载图片到本机' if output_kind == 'image' else '下载视频到本机'
-                self.connected_operation(job,lambda:self.transport.download(result, partial), op_name)
-                with partial.open('rb') as handle:
-                    digest = hashlib.file_digest(handle, 'sha256').hexdigest()
-                if partial.stat().st_size != result['size'] or digest != result['sha256']:
-                    raise RuntimeError('下载校验未通过，Colab 运行时已保留，请重试取回。')
-                target = output_folder / (job['id'] + application.output_extension)
-                partial.replace(target)
-                job['file'] = target.name
+                self.save_local_outputs(job, application, output_kind, result)
             job['metadata'] = {k: result[k] for k in getattr(application, 'metadata_fields', ()) if k in result}
             if output_kind == 'text':
                 saved = '模型已就绪' if opening_chat else '回复已保存到本机'
@@ -1473,6 +1480,60 @@ class Controller:
                     self.idle_since = self.now() if self.session else None
                 self.save_release_state()
                 self.save_jobs()
+
+    def save_local_outputs(self, job, application, output_kind, result):
+        batch = job.get('comfy_batch')
+        targets = sorted(self.cancel_targets(job), key=lambda child: child['batch_index']) if batch else [job]
+        results = result.get('images', []) if batch else [result]
+        if len(targets) != len(results) or batch and len(results) != job['config']['count']:
+            raise RuntimeError('返回的图片数量与批次不符，Colab 运行时已保留，请重试取回。')
+
+        output_folder = self.output_folder_for(application)
+        op_name = '下载图片到本机' if output_kind == 'image' else '下载视频到本机'
+        self.event(job, 'download', f'下载 {len(results)} 张图片到本机并校验 SHA-256' if batch
+                   else op_name + '并校验 SHA-256')
+        staged = []
+        for child, image in zip(targets, results):
+            self.check_cancelled(job)
+            target = output_folder / (child['id'] + application.output_extension)
+            partial = target.with_suffix('.partial')
+            if batch and self.valid_local_video(target, image):
+                partial = target
+            elif not batch or not self.valid_local_video(partial, image):
+                self.connected_operation(job, lambda: self.transport.download(image, partial), op_name)
+                if not self.valid_local_video(partial, image):
+                    raise RuntimeError('下载校验未通过，Colab 运行时已保留，请重试取回。')
+            staged.append((child, image, partial, target))
+
+        with self.lock:
+            self.check_cancelled(job)
+            for _, _, partial, target in staged:
+                if partial != target:
+                    partial.replace(target)
+            for child, image, _, target in staged:
+                child['file'] = target.name
+                if child is not job:
+                    child.update(status='done', stage='done', message='图片已保存到本机',
+                                 endpoint=job['endpoint'], remote_result=image,
+                                 metadata={key: image[key] for key in application.metadata_fields if key in image})
+            self.save_jobs()
+
+    def check_job_drive(self, job, application, output_kind):
+        result_on_drive = output_kind == 'video' and self.drive_storage.enabled
+        cache_needs_check = (not job.get('remote_result') and getattr(application, 'uses_drive_cache', True)
+                             and drive_cache.enabled and drive_cache.backend == 'api')
+        if result_on_drive:
+            self.event(job, 'connect', '正在检查 Drive 成片存储')
+            try:
+                self.drive_storage.preflight()
+            except Exception as exc:
+                raise RuntimeError('Drive 成片存储未就绪：' + safe_error(exc)) from None
+        if cache_needs_check and not (result_on_drive and getattr(self.drive_storage, 'authorization', None) is drive_cache):
+            self.event(job, 'connect', '正在检查 Drive 模型缓存')
+            try:
+                drive_cache.quota()
+            except Exception as exc:
+                raise RuntimeError('Drive 缓存未就绪：' + safe_error(exc)) from None
 
     # ---- Chat session: one queue task from "open app" to "close app" ----
     CHAT_HEALTH_INTERVAL = 30
@@ -1796,7 +1857,7 @@ def compute_status():
 
 @app.get('/api/consumer')
 def consumer_status():
-    return controller.refresh_consumer()
+    return controller.refresh_consumer(source='api')
 
 
 @app.get('/api/assets')
@@ -2174,9 +2235,10 @@ def create_job(config: JobConfig, placement: Literal["back", "front"] = "back"):
             except ValueError as exc:
                 raise HTTPException(400, str(exc)) from None
     job_id = controller.start(config, placement=placement)
-    batch_id = controller.jobs[job_id].get('batch_id')
-    return {'id': job_id, 'ids': [j['id'] for j in controller.jobs.values() if j.get('batch_id') == batch_id]
-            if batch_id else [job_id]}
+    with controller.lock:
+        batch_id = controller.jobs[job_id].get('batch_id')
+        ids = [j['id'] for j in controller.jobs.values() if j.get('batch_id') == batch_id] if batch_id else [job_id]
+    return {'id': job_id, 'ids': ids}
 
 
 @app.get('/api/jobs/{job_id}')

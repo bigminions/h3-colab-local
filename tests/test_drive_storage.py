@@ -17,6 +17,7 @@ class DriveStorageTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.auth = MagicMock(token_path=self.root / 'drive-token.dat', enabled=False, backend='native')
+        self.auth.quota.return_value = {'limit': '100', 'usage': '10'}
         self.auth.token_path.write_bytes(b'test only')
         self.store = DriveStorage(self.auth)
         self.data = b'video'
@@ -45,11 +46,21 @@ class DriveStorageTests(unittest.TestCase):
         self.auth.token_path.unlink()
         self.assertFalse(self.store.enabled)
 
-    def test_preflight_full_drive_blocks_before_allocation(self):
+    def test_full_drive_fails_saved_task_before_allocation(self):
         self.auth.quota.return_value = {'limit': '10', 'usage': '10'}
-        with patch.object(app, 'drive_cache', enabled=False):
-            with self.assertRaises(app.HTTPException):
-                self.c.start(app.H3JobConfig(prompt='new'))
+        self.auth.enabled = True
+        self.auth.backend = 'api'
+        with patch.object(app, 'drive_cache', self.auth), patch.object(self.c, 'ensure_worker'):
+            job_id = self.c.start(app.H3JobConfig(prompt='new'))
+            self.auth.quota.assert_not_called()
+            self.assertEqual(self.c.store.load_jobs()[job_id]['status'], 'queued')
+            with patch.object(app, 'controller', self.c):
+                queued = next(job for job in app.status()['jobs'] if job['id'] == job_id)
+            self.assertEqual(queued['status'], 'queued')
+            self.c._run_queue()
+        self.auth.quota.assert_called_once()
+        self.assertEqual(self.c.jobs[job_id]['status'], 'error')
+        self.assertIn('Drive 空间已满', self.c.jobs[job_id]['message'])
         self.assertEqual(self.fake.calls, [])
 
     def test_resume_reuses_id_without_creating_another_file(self):

@@ -114,7 +114,8 @@
 
                 <label class="field-label" for="qiNegativePrompt">反向提示词 (Negative Prompt · 可选)</label>
 
-                <input id="qiNegativePrompt" type="text" placeholder="例如：模糊、低分辨率、畸变、多余肢体、水印、文字">
+                <input id="qiNegativePrompt" type="text" aria-describedby="qiNegativeHint" placeholder="例如：模糊、低分辨率、畸变、多余肢体、水印、文字">
+                <span id="qiNegativeHint" class="hint">CFG 为 1 时，反向提示词不参与采样。</span>
 
               </div>
 
@@ -136,7 +137,7 @@
 
               <div class="qi-ratio-bar" role="radiogroup" aria-label="画面比例选择">
 
-                <label class="qi-ratio-item" title="1:1 · 1024 × 1024 · 方图">
+                <label class="qi-ratio-item" title="1:1 · 方图">
 
                   <input type="radio" name="qiAspectRatio" value="1:1" checked>
 
@@ -150,7 +151,7 @@
 
                 </label>
 
-                <label class="qi-ratio-item" title="16:9 · 1344 × 768 · 宽屏横图">
+                <label class="qi-ratio-item" title="16:9 · 宽屏横图">
 
                   <input type="radio" name="qiAspectRatio" value="16:9">
 
@@ -164,7 +165,7 @@
 
                 </label>
 
-                <label class="qi-ratio-item" title="9:16 · 768 × 1344 · 手机全屏">
+                <label class="qi-ratio-item" title="9:16 · 手机全屏">
 
                   <input type="radio" name="qiAspectRatio" value="9:16">
 
@@ -178,7 +179,7 @@
 
                 </label>
 
-                <label class="qi-ratio-item" title="4:3 · 1152 × 864 · 经典横版">
+                <label class="qi-ratio-item" title="4:3 · 经典横版">
 
                   <input type="radio" name="qiAspectRatio" value="4:3">
 
@@ -192,7 +193,7 @@
 
                 </label>
 
-                <label class="qi-ratio-item" title="3:4 · 864 × 1152 · 社交竖图">
+                <label class="qi-ratio-item" title="3:4 · 社交竖图">
 
                   <input type="radio" name="qiAspectRatio" value="3:4">
 
@@ -206,7 +207,7 @@
 
                 </label>
 
-                <label class="qi-ratio-item" title="3:2 · 1216 × 832 · 单反横画幅">
+                <label class="qi-ratio-item" title="3:2 · 单反横画幅">
 
                   <input type="radio" name="qiAspectRatio" value="3:2">
 
@@ -220,7 +221,7 @@
 
                 </label>
 
-                <label class="qi-ratio-item" title="2:3 · 832 × 1216 · 人像海报">
+                <label class="qi-ratio-item" title="2:3 · 人像海报">
 
                   <input type="radio" name="qiAspectRatio" value="2:3">
 
@@ -239,6 +240,20 @@
             </fieldset>
 
             <div class="qi-model-fields">
+
+              <div class="qi-field">
+                <span id="qiResolutionLabel" class="field-label">分辨率</span>
+                <div class="qi-ratio-bar qi-resolution-bar" role="radiogroup" aria-labelledby="qiResolutionLabel" aria-describedby="qiFormatNote">
+                  <label class="qi-ratio-item">
+                    <input type="radio" name="qiResolution" value="standard" checked>
+                    <span class="qi-ratio-box">标准</span>
+                  </label>
+                  <label class="qi-ratio-item">
+                    <input type="radio" name="qiResolution" value="2k">
+                    <span class="qi-ratio-box">2K</span>
+                  </label>
+                </div>
+              </div>
 
               <div class="qi-field">
 

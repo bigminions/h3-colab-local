@@ -348,7 +348,14 @@
     $('computeGpuName').textContent = gpu || `${$('gpu').value} · 按需启动`;
     const consumer = status.consumer || {};
     const labels = { connecting: '正在连接', busy: '正在处理', switching: '正在切换环境', cancelling: '正在取消', unknown: '远端状态待确认', blocked: '等待处理未完成任务' };
-    $('computeSummary').textContent = labels[consumer.state] || (busy ? '正在运行' : connected ? '空闲 · 环境已保留' : status.authorized ? '账号已连接 · GPU 未启动' : '未连接账号');
+    const ownerId = status.active || (consumer.state === 'busy' ? consumer.job_id : null);
+    const owner = status.jobs?.find(job => job.id === ownerId);
+    const ownerApp = owner?.app_id || consumer.app_id;
+    const ownerName = {h3: 'H3 视频', qwen_image_2_1: 'Qwen-Image', gemma_chat: '大模型对话'}[ownerApp] || '当前任务';
+    const summary = labels[consumer.state] || (busy ? '正在运行' : connected ? '空闲 · 环境已保留' : status.authorized ? '账号已连接 · GPU 未启动' : '未连接账号');
+    $('computeSummary').textContent = consumer.state === 'unknown' && !busy && status.queue?.length
+      ? '队列暂停 · ' + (consumer.error || '远端状态待确认')
+      : ownerId ? `${ownerName} · ${ownerId.slice(0, 8)} · ${summary}` : summary;
     $('computeSummary').title = [consumer.job_id ? '任务 ' + consumer.job_id.slice(0, 8) : '', consumer.stage || '', consumer.error || ''].filter(Boolean).join(' · ');
     $('computePageTab').title = `${$('computeProviderName').textContent} · ${$('computeGpuName').textContent} · ${$('computeSummary').textContent} · ${$('balance').textContent} 单元`;
     $('computeIndicator').classList.toggle('connected', connected || status.authorized);
@@ -1146,13 +1153,8 @@
     queueChoicePending = true;
     try {
       const status = await api('status');
-      let consumer = status.consumer || {};
+      const consumer = status.consumer || {};
       const waiting = status.queue || [];
-      if (!status.active && !waiting.length && status.managed_gpu) {
-        // A retained environment or a stale observer snapshot is not a waiting task.
-        try { consumer = await api('consumer'); }
-        catch (_) { consumer = {state: 'unknown'}; }
-      }
       const needsQueue = !!status.active || waiting.length > 0 ||
         ['busy', 'connecting', 'switching', 'cancelling'].includes(consumer.state) && status.managed_gpu;
       if (!needsQueue) return 'back';

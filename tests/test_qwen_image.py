@@ -21,6 +21,7 @@ from apps.qwen_image import (
     files_for,
     normalize_edit_prompt,
 )
+from apps.qwen_image import remote_qwen_image
 from asset_library import AssetLibrary
 
 
@@ -32,6 +33,7 @@ class QwenImageConfigTests(unittest.TestCase):
         self.assertEqual(cfg.model_file, 'qwen-image-2.1-turbo-Q4_K_M.gguf')
         self.assertEqual(cfg.encoder, 'int8_convrot')
         self.assertEqual(cfg.aspect_ratio, '1:1')
+        self.assertEqual(cfg.resolution, 'standard')
         self.assertEqual(cfg.steps, 8)
         self.assertEqual(cfg.cfg, 1.0)
         self.assertEqual(cfg.count, 1)
@@ -60,6 +62,22 @@ class QwenImageConfigTests(unittest.TestCase):
             latent = graph['6']['inputs']
             self.assertEqual(latent['width'], w)
             self.assertEqual(latent['height'], h)
+
+    def test_2k_text_generation_canvas(self):
+        sizes = {
+            '1:1': (2048, 2048),
+            '16:9': (2752, 1536),
+            '9:16': (1536, 2752),
+            '4:3': (2400, 1792),
+            '3:4': (1792, 2400),
+            '3:2': (2528, 1696),
+            '2:3': (1696, 2528),
+        }
+        for ratio, size in sizes.items():
+            with self.subTest(ratio=ratio):
+                cfg = QwenImageJobConfig(prompt='test', aspect_ratio=ratio, resolution='2k')
+                latent = build_graph(cfg.model_dump())['6']['inputs']
+                self.assertEqual((latent['width'], latent['height']), size)
 
     def test_reference_images_set_image_generation_type(self):
         ref_id = 'a' * 32 + '.png'
@@ -217,6 +235,21 @@ class QwenImageRemoteWorkflowTests(unittest.TestCase):
         self.assertEqual(g['20']['inputs']['image'], 'ref1.jpg')
         self.assertEqual(g['22']['inputs']['image'], 'ref2.png')
 
+    def test_2k_reference_canvas_in_both_image_modes(self):
+        for edit_type in ('instruction', 'repaint'):
+            with self.subTest(edit_type=edit_type):
+                cfg = QwenImageJobConfig(
+                    prompt='test', resolution='2k', aspect_ratio='3:4', edit_type=edit_type, count=2,
+                    references=[ReferenceImage(image_id='a' * 32 + '.png')],
+                )
+                graph = build_graph(cfg.model_dump())
+                scale = graph['21']['inputs']
+                self.assertEqual((scale['width'], scale['height']), (1792, 2400))
+                self.assertEqual(graph['6']['inputs']['pixels'], ['21', 0])
+                self.assertEqual(graph['15']['class_type'], 'RepeatLatentBatch')
+                self.assertEqual(graph['15']['inputs'], {'samples': ['6', 0], 'amount': 2})
+                self.assertEqual(graph['7']['inputs']['latent_image'], ['15', 0])
+
     def test_files_for_qwen_image_edit(self):
         cfg = {
             'model_file': 'qwen-image-edit-2511-Q4_K_M.gguf',
@@ -244,6 +277,14 @@ class QwenImageRemoteWorkflowTests(unittest.TestCase):
         self.assertEqual(g['12']['class_type'], 'ManualSigmas')
         self.assertIn('0.978453', g['12']['inputs']['sigmas'])
         self.assertEqual(g['13']['class_type'], 'BasicGuider')
+
+    def test_turbo_cfg_above_one_uses_empty_negative_conditioning(self):
+        config = QwenImageJobConfig(prompt='test', cfg=3.5)
+        graph = build_graph(config.model_dump())
+        self.assertEqual(graph['5']['inputs']['text'], '')
+        self.assertEqual(graph['13']['class_type'], 'CFGGuider')
+        self.assertEqual(graph['13']['inputs']['negative'], ['5', 0])
+        self.assertEqual(graph['13']['inputs']['cfg'], 3.5)
 
 
 class QwenImageWorkspaceIntegrationTests(unittest.TestCase):
@@ -325,6 +366,68 @@ class QwenImageWorkspaceIntegrationTests(unittest.TestCase):
         self.assertEqual(len(qwen_scopes), 2)
         purposes = {s['purpose'] for s in qwen_scopes}
         self.assertEqual(purposes, {'references', 'outputs'})
+
+    def test_2k_job_resolution_is_saved_and_returned(self):
+        (self.root / 'google-token.dat').touch()
+        config = QwenImageJobConfig(prompt='test', resolution='2k', count=2)
+        with patch.object(self.control, 'ensure_worker'), patch.object(app, 'drive_cache', MagicMock(enabled=False)):
+            ids = app.create_job(config)['ids']
+        self.assertEqual(len(ids), 2)
+        self.assertEqual([entry['id'] for entry in self.control.queue_snapshot()], ids[:1])
+        self.assertEqual(self.control.jobs[ids[0]]['config']['count'], 2)
+        for job_id in ids:
+            job = self.control.jobs[job_id]
+            self.assertEqual(job['config']['resolution'], '2k')
+            self.assertEqual(self.control.public_job(job)['creation']['resolution'], '2k')
+
+    def test_comfy_batch_submits_once_and_recovers_interrupted_download(self):
+        output = self.root / 'output' / 'QwenImage'
+        output.mkdir(parents=True)
+        images = []
+        for index, color in enumerate(('red', 'blue'), 1):
+            name = f'comfy_{index}.png'
+            Image.new('RGB', (8, 8), color).save(output / name)
+            images.append({'filename': name, 'subfolder': 'QwenImage'})
+
+        transport = MagicMock()
+        self.control.transport = transport
+        transport.connect.side_effect = lambda config: setattr(self.control, 'session', {
+            'endpoint': 'test', 'app_id': config.app_id, 'accelerator': config.gpu})
+        transport.consumer_status.return_value = {'state': 'idle'}
+        transport.execute.side_effect = lambda job: job.update(remote_result=remote_qwen_image.generate({
+            **job['config'], 'job_id': job['id'], '_consumer_run_id': 'test-run'}))
+
+        def download(result, path):
+            if result['path'].endswith('comfy_2.png') and transport.download.call_count == 2:
+                raise RuntimeError('test download interrupted')
+            path.write_bytes(Path(result['path']).read_bytes())
+
+        transport.download.side_effect = download
+        history = {'prompt': {'outputs': {'9': {'images': images}}}}
+        with patch.object(app, 'drive_cache', MagicMock(enabled=False)), \
+                patch.object(self.control, 'ensure_worker'), \
+                patch.object(remote_qwen_image, 'ROOT', self.root), \
+                patch.object(remote_qwen_image, 'event'), \
+                patch.object(remote_qwen_image.time, 'sleep'), \
+                patch('requests.get', side_effect=[MagicMock(json=lambda: {}), MagicMock(json=lambda: history)]), \
+                patch('requests.post', return_value=MagicMock(ok=True, json=lambda: {'prompt_id': 'prompt'})) as submit:
+            job_id = self.control.start(QwenImageJobConfig(prompt='test', count=2))
+            self.control._run_queue()
+            job = self.control.jobs[job_id]
+            self.assertEqual(job['status'], 'error')
+            self.assertFalse(any('file' in child for child in self.control.cancel_targets(job)))
+            self.control.start(None, retry=job_id)
+            self.control._run_queue()
+
+        submit.assert_called_once()
+        self.assertEqual(submit.call_args.kwargs['json']['prompt']['6']['inputs']['batch_size'], 2)
+        transport.execute.assert_called_once()
+        self.assertEqual(transport.download.call_count, 3)
+        children = sorted(self.control.cancel_targets(job), key=lambda child: child['batch_index'])
+        self.assertTrue(all(child['status'] == 'done' and child['batch_complete'] for child in children))
+        for child, image in zip(children, images):
+            self.assertEqual(self.library.resolve(child['file']).read_bytes(), (output / image['filename']).read_bytes())
+        self.control.verify_saved_results('test')
 
     def test_job_submission_and_image_download_flow(self):
         (self.root / 'google-token.dat').touch()

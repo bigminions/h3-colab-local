@@ -1,4 +1,5 @@
 """Single-user scheduling and persistence; no account or network access."""
+import json
 from pathlib import Path
 import tempfile
 import threading
@@ -142,12 +143,18 @@ class UnifiedQueueTests(unittest.TestCase):
             return {'state': 'idle'}
 
         with patch.object(self.fake, 'consumer_status', side_effect=probe) as observe, \
-                patch.object(self.c.monitor_stop, 'wait', return_value=False):
+                patch.object(self.c.monitor_stop, 'wait', return_value=False), \
+                self.assertLogs('uvicorn.error.colab_probe', level='INFO') as logs:
             self.c._run_queue()
         self.assertEqual(observe.call_count, 2)
         self.assertEqual(self.c.jobs[key]['status'], 'done')
         self.assertEqual(self.fake.calls.count('execute'), 1)
         self.assertNotIn('probe_retry', self.c.consumer)
+        timing = json.loads(logs.records[0].args[0])
+        self.assertEqual((timing['source'], timing['state'], timing['attempts']), ('dispatch', 'idle', 2))
+        self.assertGreaterEqual(timing['total_ms'], timing['lock_wait_ms'])
+        self.assertEqual([step['name'] for step in timing['steps']], ['observe', 'retry_delay', 'observe'])
+        self.assertEqual(timing['steps'][0]['error_type'], 'ReadTimeout')
 
     def test_repeated_probe_timeout_preserves_waiting_job_and_runtime(self):
         self.c.session = dict(endpoint='owned-test', app_id='h3', accelerator='A100')

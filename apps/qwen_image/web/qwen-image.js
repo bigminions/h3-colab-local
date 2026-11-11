@@ -35,15 +35,16 @@ function updateQiGpuDisplay() {
 (() => {
   const $ = id => document.getElementById(id);
   const getApiKey = () => $('apiKey')?.value || '__API_KEY__';
+  const formatStorageKey = 'lstudio-qi-format';
 
   const RATIO_NOTES = {
-    '1:1': '1024 × 1024 px · 方图',
-    '16:9': '1344 × 768 px · 宽屏横图',
-    '9:16': '768 × 1344 px · 手机全屏',
-    '4:3': '1152 × 864 px · 经典横版',
-    '3:4': '864 × 1152 px · 社交竖图',
-    '3:2': '1216 × 832 px · 单反横画幅',
-    '2:3': '832 × 1216 px · 人像海报'
+    '1:1': '方图',
+    '16:9': '宽屏横图',
+    '9:16': '手机全屏',
+    '4:3': '经典横版',
+    '3:4': '社交竖图',
+    '3:2': '单反横画幅',
+    '2:3': '人像海报'
   };
 
   const DIMENSIONS = {
@@ -56,14 +57,26 @@ function updateQiGpuDisplay() {
     '2:3': '832 × 1216'
   };
 
+  const DIMENSIONS_2K = {
+    '1:1': '2048 × 2048',
+    '16:9': '2752 × 1536',
+    '9:16': '1536 × 2752',
+    '4:3': '2400 × 1792',
+    '3:4': '1792 × 2400',
+    '3:2': '2528 × 1696',
+    '2:3': '1696 × 2528'
+  };
+
   let mode = 'text'; // 'text' | 'image'
   let references = []; // [{ slot: 1..3, image_id, name, url, pending, error }]
   let qiActiveMentionIndex = 0;
   let qiMentionMatches = [];
   let submitting = false;
+  let submitCooldownUntil = 0;
   let historyRemoval = null;
   let historyBusy = false;
   let latestJobs = [];
+  let latestStatus = {};
   let runStarts = {};
   let activeJobId = null;
 
@@ -93,10 +106,15 @@ function updateQiGpuDisplay() {
 
   async function refreshStatusNow() {
     try {
-      const s = await api('status');
-      latestJobs = s.jobs || [];
-      renderTaskStream(s.jobs || []);
+      updateStatus(await api('status'));
     } catch (_) {}
+  }
+
+  function updateStatus(status) {
+    latestStatus = status;
+    activeJobId = status.active || null;
+    latestJobs = status.jobs || [];
+    renderTaskStream(latestJobs);
   }
 
   function setMode(newMode) {
@@ -181,9 +199,61 @@ function updateQiGpuDisplay() {
     return document.querySelector('input[name="qiAspectRatio"]:checked')?.value || '1:1';
   }
 
+  function queueMessage(job) {
+    const consumer = latestStatus.consumer || {};
+    const ownerId = latestStatus.active || (consumer.state === 'busy' ? consumer.job_id : null);
+    const owner = latestJobs.find(item => item.id === ownerId);
+    if (ownerId && ownerId !== job.id) {
+      const appId = owner?.app_id || consumer.app_id;
+      const name = {h3: 'H3 视频', qwen_image_2_1: 'Qwen-Image', gemma_chat: '大模型对话'}[appId] || '当前';
+      const message = owner?.message === '排队中，等待执行' ? '正在确认运行时状态' : owner?.message || '正在处理';
+      return `等待${name}任务 ${ownerId.slice(0, 8)} · ${message}`;
+    }
+    if (consumer.state === 'unknown') {
+      return '队列暂停 · ' + (consumer.error || '正在确认 Colab 运行时状态');
+    }
+    if (consumer.state === 'blocked') {
+      return `队列暂停 · 等待处理未完成任务 ${consumer.job_id?.slice(0, 8) || ''}`;
+    }
+    if (consumer.state === 'busy') {
+      return consumer.job_id === job.id ? '当前任务正在远端执行 · 等待同步进度' : '等待远端任务完成 · 当前任务身份待确认';
+    }
+    return job.message || '排队中，等待执行';
+  }
+
+  function selectedResolution() {
+    return document.querySelector('input[name="qiResolution"]:checked')?.value || 'standard';
+  }
+
+  function formatDimensions(ratio, resolution) {
+    const dimensions = resolution === '2k' ? DIMENSIONS_2K : DIMENSIONS;
+    return dimensions[ratio] || '';
+  }
+
   function updateRatioNote() {
     const ratio = selectedRatio();
-    if ($('qiFormatNote')) $('qiFormatNote').textContent = RATIO_NOTES[ratio] || '1024 × 1024 px';
+    const note = $('qiFormatNote');
+    if (note) note.textContent = `${formatDimensions(ratio, selectedResolution())} px · ${RATIO_NOTES[ratio]}`;
+  }
+
+  function saveFormat() {
+    try {
+      localStorage.setItem(formatStorageKey, JSON.stringify({
+        aspect_ratio: selectedRatio(),
+        resolution: selectedResolution()
+      }));
+    } catch (_) {}
+  }
+
+  function restoreFormat() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(formatStorageKey));
+      if (!saved) return;
+      for (const [name, value] of [['qiAspectRatio', saved.aspect_ratio], ['qiResolution', saved.resolution]]) {
+        const radio = [...document.querySelectorAll(`input[name="${name}"]`)].find(input => input.value === value);
+        if (radio) radio.checked = true;
+      }
+    } catch (_) {}
   }
 
   function showError(msg) {
@@ -579,8 +649,17 @@ function updateQiGpuDisplay() {
     return document.querySelector('input[name="releaseMode"]:checked')?.value || 'idle';
   }
 
+  function updateGenerateButton(pendingLabel = '正在提交…') {
+    const button = $('qiGenerate');
+    if (!button) return;
+    const remaining = Math.ceil((submitCooldownUntil - Date.now()) / 1000);
+    button.disabled = submitting || remaining > 0;
+    button.textContent = remaining > 0 ? `已提交 (${remaining}s)` : submitting ? pendingLabel : '开始生图';
+  }
+
   async function submitJob(e) {
     e.preventDefault();
+    if (submitting || Date.now() < submitCooldownUntil) return;
     showError('');
     const prompt = $('qiPrompt')?.value?.trim();
     if (!prompt) {
@@ -614,6 +693,7 @@ function updateQiGpuDisplay() {
       prompt: prompt,
       negative_prompt: negativePrompt,
       aspect_ratio: ratio,
+      resolution: selectedResolution(),
       model_file: modelFile,
       encoder: encoder,
       steps: steps,
@@ -627,35 +707,28 @@ function updateQiGpuDisplay() {
       references: mode === 'image' ? references.map(r => ({ slot: r.slot, image_id: r.image_id })) : []
     };
 
-    const gpuOk = await (window.Workspace?.chooseQueuePlacement ? window.Workspace.chooseQueuePlacement({
-      targetAppId: 'qwen_image_2_1',
-      targetGpu: gpu || 'T4'
-    }) : Promise.resolve('back'));
-    if (!gpuOk) return;
-
-    const submitBtn = $('qiGenerate');
+    submitting = true;
+    updateGenerateButton('正在检查队列…');
     try {
-      submitting = true;
-      if (submitBtn) {
-        submitBtn.disabled = true;
-        submitBtn.textContent = '正在提交任务…';
-      }
-      await api('jobs?placement=' + gpuOk, {
+      const placement = window.Workspace?.chooseQueuePlacement
+        ? await window.Workspace.chooseQueuePlacement({targetAppId: payload.app_id, targetGpu: gpu})
+        : 'back';
+      if (!placement) return;
+      updateGenerateButton();
+      await api('jobs?placement=' + placement, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
-      showError('');
-      await refreshStatusNow();
+      submitCooldownUntil = Date.now() + 5000;
     } catch (err) {
       showError('生图提交失败：' + err.message);
+      return;
     } finally {
       submitting = false;
-      if (submitBtn) {
-        submitBtn.disabled = false;
-        submitBtn.textContent = '开始生图';
-      }
+      updateGenerateButton();
     }
+    await refreshStatusNow();
   }
 
   // Elapsed time calculation matching H3
@@ -714,6 +787,10 @@ function updateQiGpuDisplay() {
   }
 
   function updateRunMonitor() {
+    if (submitCooldownUntil) {
+      if (Date.now() >= submitCooldownUntil) submitCooldownUntil = 0;
+      updateGenerateButton();
+    }
     const stream = $('qiTaskStreamList');
     if (!stream) return;
     stream.querySelectorAll('.task-card.is-running, .task-card.is-queued').forEach(card => {
@@ -875,11 +952,13 @@ function updateQiGpuDisplay() {
       if ($('qiNegativePrompt')) $('qiNegativePrompt').value = creation.negative_prompt || '';
       if (creation.aspect_ratio) {
         const radio = document.querySelector(`input[name="qiAspectRatio"][value="${creation.aspect_ratio}"]`);
-        if (radio) {
-          radio.checked = true;
-          updateRatioNote();
-        }
+        if (radio) radio.checked = true;
       }
+      const resolution = creation.resolution === '2k' ? '2k' : 'standard';
+      const resolutionRadio = document.querySelector(`input[name="qiResolution"][value="${resolution}"]`);
+      if (resolutionRadio) resolutionRadio.checked = true;
+      updateRatioNote();
+      saveFormat();
       if ($('qiModelFile') && creation.model_file) {
         const mapped = creation.model_file.replace('qwen-image-2.1-UC-', 'qwen-image-2.1-turbo-');
         $('qiModelFile').value = mapped;
@@ -892,8 +971,6 @@ function updateQiGpuDisplay() {
         }
       }
       if ($('qiEncoder') && creation.encoder) $('qiEncoder').value = creation.encoder;
-      if ($('qiSteps') && creation.steps) $('qiSteps').value = creation.steps;
-      if ($('qiCfg') && creation.cfg) $('qiCfg').value = creation.cfg;
       if ($('qiCount') && creation.count) {
         $('qiCount').value = creation.count;
         if ($('qiDecreaseCount')) $('qiDecreaseCount').disabled = creation.count <= 1;
@@ -946,6 +1023,8 @@ function updateQiGpuDisplay() {
       } else {
         setMode('text');
       }
+      if ($('qiSteps') && creation.steps) $('qiSteps').value = creation.steps;
+      if ($('qiCfg') && creation.cfg) $('qiCfg').value = creation.cfg;
 
       if (creation.gpu && $('qiGpu')) {
         if ([...$('qiGpu').options].some(o => o.value === creation.gpu)) {
@@ -1229,8 +1308,10 @@ function updateQiGpuDisplay() {
 
     for (const group of groups) {
       group.siblings.sort((a, b) => (a.batch_index || 0) - (b.batch_index || 0));
+      group.comfyBatch = !!group.siblings[0].comfy_batch;
       group.total = group.siblings[0]?.batch?.total || group.siblings[0]?.batch_total || group.siblings.length;
-      group.runningSibling = group.siblings.find(j => ['running', 'cancelling'].includes(j.status));
+      const runningJobs = group.comfyBatch ? group.siblings.slice(0, 1) : group.siblings;
+      group.runningSibling = runningJobs.find(j => ['running', 'cancelling'].includes(j.status));
       group.queuedSiblings = group.siblings.filter(j => j.status === 'queued');
       group.completedSiblings = group.siblings.filter(j => (j.local_file !== undefined ? j.local_file : !!j.file) && !j.local_download_error);
       group.failedSiblings = group.siblings.filter(j => ['error', 'interrupted'].includes(j.status));
@@ -1238,7 +1319,8 @@ function updateQiGpuDisplay() {
       group.isRunning = !!group.runningSibling;
       group.isQueued = !group.runningSibling && group.queuedSiblings.length === group.siblings.length;
       group.isDone = group.completedSiblings.length === group.siblings.length;
-      group.primaryJob = group.runningSibling || group.queuedSiblings[0] || group.completedSiblings[0] || group.siblings[0];
+      group.primaryJob = group.comfyBatch ? group.siblings[0]
+        : group.runningSibling || group.queuedSiblings[0] || group.completedSiblings[0] || group.siblings[0];
     }
 
     const runningCount = groups.filter(g => g.isRunning || g.isQueued).length;
@@ -1265,11 +1347,12 @@ function updateQiGpuDisplay() {
         month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false
       });
 
-      const fingerprint = JSON.stringify(group.siblings.map(j => [
+      const queueNote = group.isQueued ? queueMessage(job) : '';
+      const fingerprint = JSON.stringify([queueNote, group.siblings.map(j => [
         j.id, j.status, j.queue_position, j.queue_reason, j.file, j.local_file, j.local_download_error,
         j.can_cancel, j.can_retry, j.can_resubmit,
         j.message, j.events?.length, j.creation?.prompt, j.creation?.seed
-      ]));
+      ])]);
 
       let card = existing.get(group.id);
       if (card && card.dataset.fingerprint === fingerprint) {
@@ -1280,7 +1363,7 @@ function updateQiGpuDisplay() {
             timer.textContent = `已用时 ${window.H3JobProgress.formatDuration(progress.elapsed)}`;
           }
           const stagePill = card.querySelector('.task-stage-pill');
-          const msg = (group.isBatch ? `第 ${group.runningSibling.batch_index || 1}/${group.total} 张：` : '') + (group.runningSibling.message || '正在处理中…');
+          const msg = (group.isBatch && !group.comfyBatch ? `第 ${group.runningSibling.batch_index || 1}/${group.total} 张：` : '') + (group.runningSibling.message || '正在处理中…');
           if (stagePill && stagePill.textContent !== msg) stagePill.textContent = msg;
         }
         updateCardElapsed(card, job);
@@ -1305,7 +1388,7 @@ function updateQiGpuDisplay() {
       if (group.isBatch) metaParts.push(`批次任务（共 ${group.total} 张图片）`);
       if (creation.gpu) metaParts.push(creation.gpu);
       if (creation.aspect_ratio) {
-        const dim = DIMENSIONS[creation.aspect_ratio] || '';
+        const dim = formatDimensions(creation.aspect_ratio, creation.resolution);
         metaParts.push(creation.aspect_ratio + (dim ? ` (${dim})` : ''));
       }
       if (creation.model_file) metaParts.push(shortModelName(creation.model_file));
@@ -1338,7 +1421,10 @@ function updateQiGpuDisplay() {
       } else if (group.isRunning) {
         stateBadge.className = 'task-badge badge-running';
         const actIdx = group.runningSibling.batch_index || 1;
-        const statusTxt = group.runningSibling.status === 'cancelling' ? '正在取消' : (group.isBatch ? `正在生成 第 ${actIdx}/${group.total} 张` : '正在生成');
+        const phase = {connect: '正在连接', prepare: '正在准备', download: '正在下载', saved: '正在保存'}[group.runningSibling.stage] || '正在生成';
+        const progress = group.comfyBatch ? `${phase}（共 ${group.total} 张）`
+          : group.isBatch ? `${phase} 第 ${actIdx}/${group.total} 张` : phase;
+        const statusTxt = group.runningSibling.status === 'cancelling' ? '正在取消' : progress;
         stateBadge.innerHTML = `<span class="pulse-dot"></span>${statusTxt}`;
       } else if (group.isDone) {
         stateBadge.className = 'task-badge badge-done';
@@ -1405,7 +1491,7 @@ function updateQiGpuDisplay() {
         statusLeft.className = 'task-live-monitor-status';
         const stagePill = document.createElement('span');
         stagePill.className = 'task-stage-pill';
-        stagePill.textContent = (group.isBatch ? `第 ${group.runningSibling.batch_index || 1}/${group.total} 张：` : '') + (group.runningSibling.message || '正在处理中…');
+        stagePill.textContent = (group.isBatch && !group.comfyBatch ? `第 ${group.runningSibling.batch_index || 1}/${group.total} 张：` : '') + (group.runningSibling.message || '正在处理中…');
         statusLeft.innerHTML = '<span class="pulse-dot"></span>';
         statusLeft.append(stagePill);
 
@@ -1452,9 +1538,10 @@ function updateQiGpuDisplay() {
           tab.className = 'task-card-variant-tab' + (sibling.id === selectedVariantId ? ' is-active' : '');
           tab.dataset.variantId = sibling.id;
           const isSibDone = (sibling.local_file !== undefined ? sibling.local_file : !!sibling.file) && !sibling.local_download_error;
-          const sibIcon = isSibDone ? '✓' : sibling.status === 'running' ? '◌' : sibling.status === 'queued' ? '⏳' : '✕';
+          const isSibRunning = sibling.status === 'running' || group.comfyBatch && group.isRunning;
+          const sibIcon = isSibDone ? '✓' : isSibRunning ? '◌' : sibling.status === 'queued' ? '⏳' : '✕';
           tab.textContent = `图片 ${sibling.batch_index || 1} ${sibIcon}`;
-          tab.title = `第 ${sibling.batch_index || 1} 张图片${isSibDone ? '（已生成）' : sibling.status === 'running' ? '（生成中）' : sibling.status === 'queued' ? '（等待中）' : ''}`;
+          tab.title = `第 ${sibling.batch_index || 1} 张图片${isSibDone ? '（已生成）' : isSibRunning ? '（处理中）' : sibling.status === 'queued' ? '（等待中）' : ''}`;
           tab.onclick = e => {
             e.stopPropagation();
             row.dataset.selectedVariantId = sibling.id;
@@ -1472,7 +1559,7 @@ function updateQiGpuDisplay() {
         url: '/image/' + s.file,
         filename: s.file,
         prompt: creation.prompt || '',
-        dimensions: creation.aspect_ratio ? DIMENSIONS[creation.aspect_ratio] : '',
+        dimensions: formatDimensions(creation.aspect_ratio, creation.resolution),
         model: shortModelName(creation.model_file),
         date: date
       }));
@@ -1539,12 +1626,12 @@ function updateQiGpuDisplay() {
         } else if (sibling.status === 'running') {
           const placeholder = document.createElement('div');
           placeholder.className = 'task-card-image-placeholder';
-          placeholder.innerHTML = '<span class="pulse-dot"></span><span>图片正在生成中…</span>';
+          placeholder.innerHTML = `<span class="pulse-dot"></span><span>${escapeHtml(sibling.message || '图片正在生成中…')}</span>`;
           mediaWrap.append(placeholder);
         } else if (sibling.status === 'queued') {
           const placeholder = document.createElement('div');
           placeholder.className = 'task-card-image-placeholder';
-          placeholder.innerHTML = '<span class="queued-icon">⏳</span><span>等待排队中…</span>';
+          placeholder.innerHTML = `<span class="queued-icon">⏳</span><span>${escapeHtml(queueNote)}</span>`;
           mediaWrap.append(placeholder);
         } else if (['error', 'interrupted'].includes(sibling.status)) {
           const placeholder = document.createElement('div');
@@ -1619,15 +1706,15 @@ function updateQiGpuDisplay() {
               openLightboxViewer(galleryData, galleryIdx >= 0 ? galleryIdx : 0);
             };
             grid.append(item);
-          } else if (sib.status === 'running') {
+          } else if (sib.status === 'running' || group.comfyBatch && group.isRunning) {
             const pl = document.createElement('div');
             pl.className = 'qi-img-placeholder';
-            pl.innerHTML = `<span class="pulse-dot"></span><span>第 ${sib.batch_index || idx + 1} 张生成中</span>`;
+            pl.innerHTML = `<span class="pulse-dot"></span><span>第 ${sib.batch_index || idx + 1} 张处理中</span>`;
             grid.append(pl);
           } else if (sib.status === 'queued') {
             const pl = document.createElement('div');
             pl.className = 'qi-img-placeholder';
-            pl.innerHTML = `<span class="queued-icon">⏳</span><span>第 ${sib.batch_index || idx + 1} 张等待中</span>`;
+            pl.innerHTML = `<span class="queued-icon">⏳</span><span>第 ${sib.batch_index || idx + 1} 张 · ${escapeHtml(queueMessage(sib))}</span>`;
             grid.append(pl);
           } else {
             const pl = document.createElement('div');
@@ -1866,8 +1953,11 @@ function updateQiGpuDisplay() {
       $('qiDenoiseGroup')?.classList.toggle('hidden', !isRepaint);
     });
 
-    document.querySelectorAll('input[name="qiAspectRatio"]').forEach(r => {
-      r.addEventListener('change', updateRatioNote);
+    document.querySelectorAll('input[name="qiAspectRatio"], input[name="qiResolution"]').forEach(r => {
+      r.addEventListener('change', () => {
+        updateRatioNote();
+        saveFormat();
+      });
     });
 
     $('qiDenoise')?.addEventListener('input', e => {
@@ -1996,6 +2086,7 @@ function updateQiGpuDisplay() {
     });
 
     setupStepper();
+    restoreFormat();
     updateRatioNote();
     setMode('text');
     setInterval(updateRunMonitor, 1000);
@@ -2028,10 +2119,7 @@ function updateQiGpuDisplay() {
     setMode,
     useImage,
     renderTaskStream,
-    update: s => {
-      latestJobs = s.jobs || [];
-      renderTaskStream(s.jobs || []);
-    }
+    update: updateStatus
   };
 
   if (document.readyState === 'loading') {
