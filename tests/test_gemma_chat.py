@@ -209,9 +209,16 @@ class GemmaChatTests(unittest.TestCase):
         post_mock.assert_called_once()
         sent_body = post_mock.call_args[1].get('json', {})
         self.assertEqual(len(sent_body.get('messages', [])), 2)
+        expected_sys = (
+            "【角色信息】\n"
+            "- 角色名称：林薇\n"
+            "- 身份定位：热情奔放 · 元气满满\n\n"
+            "【角色设定】\n"
+            "You are Scarlett, an enthusiastic young woman."
+        )
         self.assertEqual(sent_body['messages'][0], {
             'role': 'system',
-            'content': 'You are Scarlett, an enthusiastic young woman.'
+            'content': expected_sys
         })
         self.assertEqual(sent_body['messages'][1], {
             'role': 'user',
@@ -279,9 +286,16 @@ class GemmaChatTests(unittest.TestCase):
 
         sent_body2 = post_mock2.call_args[1].get('json', {})
         # Should have: system, user 1, assistant 1, user 2
+        expected_leo_sys = (
+            "【角色信息】\n"
+            "- 角色名称：陆扬\n"
+            "- 身份定位：阳光爽朗 · 靠谱温暖\n\n"
+            "【角色设定】\n"
+            "You are Leo, a cheerful young man."
+        )
         self.assertEqual(sent_body2['messages'][0], {
             'role': 'system',
-            'content': 'You are Leo, a cheerful young man.'
+            'content': expected_leo_sys
         })
         self.assertEqual(sent_body2['messages'][-1], {
             'role': 'user',
@@ -390,7 +404,14 @@ class GemmaChatTests(unittest.TestCase):
         self.assertEqual(char_id, 'assistant')
         self.assertEqual(char_name, '小A Pro')
         self.assertEqual(sys_prompt, '你是小A Pro，顶级系统架构专家，风格严谨深刻。')
-        self.assertEqual(messages[0], {'role': 'system', 'content': '你是小A Pro，顶级系统架构专家，风格严谨深刻。'})
+        expected_asst_sys = (
+            "【角色信息】\n"
+            "- 角色名称：小A Pro\n"
+            "- 身份定位：高级数智专家\n\n"
+            "【角色设定】\n"
+            "你是小A Pro，顶级系统架构专家，风格严谨深刻。"
+        )
+        self.assertEqual(messages[0], {'role': 'system', 'content': expected_asst_sys})
 
         # 4. Reset character back to default
         restored = self.workspace.reset_character_route('assistant')
@@ -642,6 +663,135 @@ class GemmaChatTests(unittest.TestCase):
         self.assertEqual(messages[0], {'role': 'user', 'content': '之前看这张图'})
         self.assertEqual(messages[1], {'role': 'assistant', 'content': '之前的回答'})
         self.assertEqual(messages[2], {'role': 'user', 'content': '针对刚才的分析，请继续总结'})
+
+    def test_cancel_chat_stops_stream_and_preserves_partial_reply(self):
+        cid = 'f' * 32
+        deploy_job = dict(
+            id='deploy_cancel',
+            config=dict(app_id=APP_ID, operation='open', variant='native', gpu='L4', secret='sec'),
+            status='running',
+            chat_session='ready',
+            remote_result={'ready': True, 'endpoint': 'https://tunnel.example.com', 'secret': 'sec'},
+            created=100.0,
+            safe_release=True,
+            events=[]
+        )
+        self.controller.jobs['deploy_cancel'] = deploy_job
+        self.controller.session = dict(app_id=APP_ID, gemma_variant='native')
+
+        class MockIterLines:
+            def __init__(self, workspace, chat_id):
+                self.workspace = workspace
+                self.chat_id = chat_id
+
+            def __iter__(self):
+                # 产生第一块内容
+                yield b'data: {"choices":[{"delta":{"content":"\xe4\xbd\xa0\xe5\xa5\xbd"}}]}'
+                # 模拟用户点击停止按钮，调用 cancel_chat
+                self.workspace.cancel_chat(self.chat_id)
+                raise requests.exceptions.RequestException("Connection aborted by cancel")
+
+        mock_resp = MagicMock()
+        mock_resp.__enter__.return_value = mock_resp
+        mock_resp.status_code = 200
+        mock_resp.iter_lines.return_value = MockIterLines(self.workspace, cid)
+
+        with patch('requests.post', return_value=mock_resp):
+            resp = self.workspace.stream(cid, SendRequest(prompt='测试停止'))
+            async def consume(response):
+                chunks = []
+                async for chunk in response.body_iterator:
+                    chunks.append(chunk)
+                return chunks
+            asyncio.run(consume(resp))
+
+        # 验证任务状态更新为已取消，且已回复的内容被完整保留
+        chat_jobs = self.workspace.chat_jobs(cid)
+        self.assertEqual(len(chat_jobs), 1)
+        job = chat_jobs[0]
+        self.assertEqual(job['status'], 'cancelled')
+        self.assertEqual(job['stage'], 'cancelled')
+        self.assertEqual(job['message'], '回复已停止')
+        self.assertEqual(job['remote_result']['text'], '你好')
+
+        # 验证 snapshot 正常返回 reply，且 can_stop 为 False
+        snap = self.workspace.snapshot(chat_id=cid)
+        self.assertEqual(len(snap['turns']), 1)
+        turn = snap['turns'][0]
+        self.assertEqual(turn['reply'], '你好')
+        self.assertEqual(turn['status'], 'cancelled')
+        self.assertFalse(turn['can_stop'])
+
+        # 验证用户可以继续发送，且被停止消息的上下文保留在历史中
+        _, messages, _, _, _ = self.workspace._prepare_history(cid, SendRequest(prompt='继续说'))
+        self.assertEqual(len(messages), 3)
+        self.assertEqual(messages[0], {'role': 'user', 'content': '测试停止'})
+        self.assertEqual(messages[1], {'role': 'assistant', 'content': '你好'})
+        self.assertEqual(messages[2], {'role': 'user', 'content': '继续说'})
+
+    def test_character_name_and_identity_injection_into_chat(self):
+        from apps.gemma_chat.application import CharacterPayload
+        # 1. 创建一个未在提示词中手写名字和标签的自定义角色
+        custom_char = CharacterPayload(
+            id='custom_sophia',
+            name='苏菲',
+            tag='资深心理咨询师',
+            system_prompt='善于倾听来访者心声，说话温柔，不作道德评价。'
+        )
+        self.workspace.save_character_route(custom_char)
+
+        deploy_job = dict(
+            id='deploy_inject',
+            config=dict(app_id=APP_ID, operation='open', variant='native', gpu='L4', secret='sec'),
+            status='running',
+            chat_session='ready',
+            remote_result={'ready': True, 'endpoint': 'https://tunnel.example.com', 'secret': 'sec'},
+            created=100.0,
+            safe_release=True,
+            events=[]
+        )
+        self.controller.jobs['deploy_inject'] = deploy_job
+        self.controller.session = dict(app_id=APP_ID, gemma_variant='native')
+
+        # 发送对话，验证系统消息直接按固定格式自动注入了名称与身份定位
+        _, messages, char_id, char_name, sys_prompt = self.workspace._prepare_history(
+            'chat_sophia_1',
+            SendRequest(prompt='最近压力有点大', character_id='custom_sophia')
+        )
+        self.assertEqual(char_id, 'custom_sophia')
+        self.assertEqual(char_name, '苏菲')
+        self.assertEqual(sys_prompt, '善于倾听来访者心声，说话温柔，不作道德评价。')
+        self.assertEqual(len(messages), 2)
+        self.assertEqual(messages[0]['role'], 'system')
+        expected_sophia_sys = (
+            "【角色信息】\n"
+            "- 角色名称：苏菲\n"
+            "- 身份定位：资深心理咨询师\n\n"
+            "【角色设定】\n"
+            "善于倾听来访者心声，说话温柔，不作道德评价。"
+        )
+        self.assertEqual(messages[0]['content'], expected_sophia_sys)
+
+        # 2. 即使提示词中已经包含了名字，也依然无须检测，直接按统一固定结构注入
+        custom_char2 = CharacterPayload(
+            id='custom_sophia2',
+            name='苏菲',
+            tag='资深心理咨询师',
+            system_prompt='你是苏菲，知名心理专家，擅长情绪疏导。'
+        )
+        self.workspace.save_character_route(custom_char2)
+        _, messages2, _, _, _ = self.workspace._prepare_history(
+            'chat_sophia_2',
+            SendRequest(prompt='你好', character_id='custom_sophia2')
+        )
+        expected_sophia_sys2 = (
+            "【角色信息】\n"
+            "- 角色名称：苏菲\n"
+            "- 身份定位：资深心理咨询师\n\n"
+            "【角色设定】\n"
+            "你是苏菲，知名心理专家，擅长情绪疏导。"
+        )
+        self.assertEqual(messages2[0]['content'], expected_sophia_sys2)
 
 
 if __name__ == '__main__':

@@ -1,6 +1,6 @@
 # LStudio 架构：应用、算力与素材库
 
-工作台在本机管理导航、任务和素材，远程资源只负责运行应用。应用包括 H3 视频、Qwen-Image-2.1 生图和大模型对话，算力由 Colab 提供。
+工作台在本机管理导航、任务和素材，远程资源只负责运行应用。应用包括 H3 视频、图像创作和大模型对话，算力由 Colab 提供。图像创作提供 Qwen-Image-2.1 和 MiniMax-H3-Image。
 
 ## 应用
 
@@ -14,9 +14,10 @@
   - `seed_drive_cache.py`：H3 模型备份及缓存基准工具，网页备份接口从此应用目录加载；命令行使用 `python -m apps.h3.seed_drive_cache`。
   - `web/`：前端专属目录，包含 `content.html`（创作与角色管理面板）、`workbench.css`、`workbench.js`、`characters.js`。
 
-- **Qwen-Image-2.1 生图应用 (`apps/qwen_image/`)**：
+- **图像创作 (`apps/qwen_image/`)**：
   - `application.py`：拥有 Qwen-Image-2.1 应用规范 (`ApplicationSpec`)、`QwenImageJobConfig` 参数模型、素材校验钩子 (`validate_assets`)、远程程序打包 (`source()`)、输入素材清单、执行入口与空闲探测。
   - `remote_qwen_image.py`：对接社区开源模型库 `abenzerps/Qwen-Image-2.1-Turbo-Quantized`，构建 ComfyUI 工作流（支持 `leejet/ComfyUI-GGUF` 的 UnetLoaderGGUF 以及标准 UNETLoader、Qwen3-VL 文本编码器与 VAE），完成远端环境准备、采样执行与图片生成。
+  - MiniMax-H3-Image 使用 ComfyUI 内置的 `MiniMaxH3ImageConditioning` 与 Comfy-Org INT8 权重。与 Qwen-Image 共用任务、参考素材和结果保存流程，批量请求按单张图片依次执行。
   - `web/`：前端专属目录，包含 `content.html`（文生图与图生图面板）、`qwen-image.css`、`qwen-image.js`。
   - 素材用途声明 `references`（创作参考图）与 `outputs`（生成图片），物理保存于 `materials/qwen_image_2_1/` 下。
 

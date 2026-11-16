@@ -94,6 +94,25 @@ BUILTIN_CHARACTERS = [
 BUILTIN_MAP = {c['id']: c for c in BUILTIN_CHARACTERS}
 
 
+
+class ActiveStream:
+    def __init__(self, job_id: str, chat_id: str):
+        self.job_id = job_id
+        self.chat_id = chat_id
+        self.resp = None
+        self.cancelled = threading.Event()
+        self.parts: list[str] = []
+        self.metrics: dict = {}
+
+    def cancel(self):
+        self.cancelled.set()
+        if self.resp is not None:
+            try:
+                self.resp.close()
+            except Exception:
+                pass
+
+
 class GemmaWorkspace:
     CLOSE_TIMEOUT = 180
 
@@ -103,6 +122,7 @@ class GemmaWorkspace:
         self.closed_id = controller.store.get_state(APP_ID)
         self.closing = False
         self.close_error = None
+        self.active_streams: dict[str, ActiveStream] = {}
         self.router = APIRouter(prefix='/api/gemma')
         self.router.add_api_route('', self.snapshot, methods=['GET'])
         self.router.add_api_route('/debug', self.debug, methods=['GET'])
@@ -114,6 +134,7 @@ class GemmaWorkspace:
         self.router.add_api_route('/close', self.close, methods=['POST'], status_code=202)
         # Messages never enter the queue: the open chat task already owns the GPU.
         self.router.add_api_route('/chats/{chat_id}/stream', self.stream, methods=['POST'])
+        self.router.add_api_route('/chats/{chat_id}/cancel', self.cancel_chat, methods=['POST'])
         self.router.add_api_route('/chats/{chat_id}', self.remove_chat, methods=['DELETE'])
 
     def get_characters(self):
@@ -283,15 +304,19 @@ class GemmaWorkspace:
                 if turn.get('character_id'):
                     chat['character_id'] = turn.get('character_id')
                 if cid == chat_id:
+                    res_text = (job.get('remote_result') or {}).get('text')
+                    is_success = job['status'] in SUCCESS
+                    is_cancelled = job['status'] == 'cancelled'
+                    reply_text = res_text if (is_success or (is_cancelled and res_text)) else None
+                    draft_text = (res_text or self.controller.text_draft) if (self.controller.active == job['id'] or job['status'] in PENDING) else ''
                     turns.append({
                         'id': job['id'], 'prompt': turn.get('prompt') or '',
                         'images': turn.get('images') or [],
                         'variant': turn['variant'],
                         'status': job['status'], 'stage': job['stage'], 'message': job['message'],
                         'position': queue.get(job['id']),
-                        'reply': (job.get('remote_result') or {}).get('text') if job['status'] in SUCCESS else None,
-                        'draft': ((job.get('remote_result') or {}).get('text') or self.controller.text_draft)
-                        if self.controller.active == job['id'] or job['status'] in PENDING else '',
+                        'reply': reply_text,
+                        'draft': draft_text,
                         'can_stop': job['status'] in PENDING | {'error', 'interrupted'} and not job.get('safe_release'),
                         'character_name': turn.get('character_name'),
                         'character_id': turn.get('character_id'),
@@ -402,6 +427,31 @@ class GemmaWorkspace:
                     return c
         return None
 
+    @staticmethod
+    def _build_character_prompt(
+        raw_prompt: str | None,
+        char_name: str | None = None,
+        char_tag: str | None = None,
+        char_id: str | None = None,
+    ) -> str:
+        raw = (raw_prompt or '').strip()
+        name = (char_name or '').strip()
+        tag = (char_tag or '').strip()
+
+        if not name and not tag:
+            return raw
+
+        info_lines = []
+        if name:
+            info_lines.append(f"- 角色名称：{name}")
+        if tag:
+            info_lines.append(f"- 身份定位：{tag}")
+
+        info_block = "【角色信息】\n" + "\n".join(info_lines)
+        if raw:
+            return f"{info_block}\n\n【角色设定】\n{raw}"
+        return info_block
+
     def _prepare_history(self, chat_id: ChatId, payload: SendRequest):
         deployment = self.deployment()
         if self.closing or self.close_error or not self.ready(deployment):
@@ -423,11 +473,11 @@ class GemmaWorkspace:
             effective_char_name = effective_char_name or first_cfg.get('character_name')
             effective_char_id = effective_char_id or first_cfg.get('character_id')
 
-        if not effective_sys:
-            char = self._find_character(effective_char_id, effective_char_name)
-            if char:
-                effective_char_id = char.get('id')
-                effective_char_name = char.get('name')
+        char = self._find_character(effective_char_id, effective_char_name)
+        if char:
+            effective_char_id = effective_char_id or char.get('id')
+            effective_char_name = effective_char_name or char.get('name')
+            if not effective_sys:
                 effective_sys = char.get('system_prompt')
 
         variant = deployment.get('config', {}).get('variant')
@@ -438,9 +488,23 @@ class GemmaWorkspace:
             raise HTTPException(400, f'{model_name} 为纯文本模型，不支持多模态图片输入，请使用支持多模态的 Gemma 4 模型')
 
         messages = []
-        if effective_sys:
-            messages.append({'role': 'system', 'content': effective_sys})
-        for job in [item for item in history if item['status'] in SUCCESS][-12:]:
+        char_tag = char.get('tag') if char else None
+        injected_sys = self._build_character_prompt(
+            effective_sys,
+            effective_char_name,
+            char_tag,
+            effective_char_id
+        )
+        if injected_sys:
+            messages.append({'role': 'system', 'content': injected_sys})
+        def _valid_history_job(item):
+            if item.get('status') in SUCCESS:
+                return bool((item.get('remote_result') or {}).get('text'))
+            if item.get('status') == 'cancelled':
+                return bool((item.get('remote_result') or {}).get('text'))
+            return False
+
+        for job in [item for item in history if _valid_history_job(item)][-12:]:
             cfg = job['config']
             prompt = cfg.get('prompt') or ''
             imgs = cfg.get('images') or []
@@ -456,7 +520,8 @@ class GemmaWorkspace:
                 messages.append({'role': 'user', 'content': content_text})
             else:
                 messages.append({'role': 'user', 'content': prompt})
-            messages.append({'role': 'assistant', 'content': job['remote_result']['text']})
+            assistant_reply = (job.get('remote_result') or {}).get('text') or ''
+            messages.append({'role': 'assistant', 'content': assistant_reply})
 
         curr_prompt = payload.prompt or ('请描述这张图片' if payload.images else '')
         if payload.images:
@@ -469,6 +534,26 @@ class GemmaWorkspace:
         else:
             messages.append({'role': 'user', 'content': curr_prompt})
         return deployment, messages, effective_char_id, effective_char_name, effective_sys
+
+    def cancel_chat(self, chat_id: ChatId):
+        handle = self.active_streams.get(chat_id)
+        if handle:
+            handle.cancel()
+        with self.controller.lock:
+            for job in self.chat_jobs(chat_id):
+                if job['status'] in PENDING:
+                    text = ''.join(handle.parts).strip() if handle else ''
+                    remote_res = {'text': text, 'metrics': handle.metrics} if text else job.get('remote_result')
+                    job.update(
+                        status='cancelled',
+                        stage='cancelled',
+                        message='回复已停止',
+                        remote_result=remote_res,
+                        safe_release=True
+                    )
+            self.controller.save_jobs()
+            self.controller.text_draft = ''
+        return {'ok': True}
 
     def stream(self, chat_id: ChatId, payload: SendRequest):
         if not self.authorized():
@@ -498,9 +583,12 @@ class GemmaWorkspace:
             self.controller.save_jobs()
             self.controller.touch_chat_session(deployment)
 
+            handle = ActiveStream(job_id, chat_id)
+            self.active_streams[chat_id] = handle
+
         def stream_generator():
-            parts = []
-            metrics = {}
+            parts = handle.parts
+            metrics = handle.metrics
             started = time.monotonic()
             headers = {'Authorization': f'Bearer {secret}'} if secret else {}
             model_alias = 'lstudio-gpt-oss-120b' if config['variant'] == 'gpt_oss_120b' else 'lstudio-gemma-' + config['variant']
@@ -514,6 +602,9 @@ class GemmaWorkspace:
             }
             try:
                 with requests.post(f'{endpoint}/v1/chat/completions', json=body, headers=headers, stream=True, timeout=(10, 180)) as resp:
+                    handle.resp = resp
+                    if handle.cancelled.is_set():
+                        raise GeneratorExit()
                     if resp.status_code != 200:
                         err_text = ''
                         try:
@@ -528,6 +619,8 @@ class GemmaWorkspace:
                         raise RuntimeError(err_msg)
 
                     for line in resp.iter_lines():
+                        if handle.cancelled.is_set():
+                            break
                         if not line.startswith(b'data: '):
                             continue
                         line_str = line.decode('utf-8', errors='replace')
@@ -568,11 +661,15 @@ class GemmaWorkspace:
                             self.controller.text_draft = ''.join(parts)
                         yield f"{line_str}\n\n"
 
+                if handle.cancelled.is_set():
+                    raise GeneratorExit()
+
                 text = ''.join(parts).strip()
                 metrics['elapsed_ms'] = round((time.monotonic() - started) * 1000)
                 with self.controller.lock:
                     job.update(status='done', stage='done', message='回复已保存到本机',
-                               remote_result={'text': text, 'metrics': metrics})
+                               remote_result={'text': text, 'metrics': metrics},
+                               safe_release=True)
                     self.controller.save_jobs()
                     self.controller.text_draft = ''
                 yield "data: [DONE]\n\n"
@@ -580,19 +677,38 @@ class GemmaWorkspace:
                 text = ''.join(parts).strip()
                 with self.controller.lock:
                     job.update(status='cancelled', stage='cancelled', message='回复已停止',
-                               remote_result={'text': text, 'metrics': metrics} if text else None)
+                               remote_result={'text': text, 'metrics': metrics} if text else None,
+                               safe_release=True)
                     self.controller.save_jobs()
                     self.controller.text_draft = ''
             except Exception as exc:
+                if handle.cancelled.is_set():
+                    text = ''.join(parts).strip()
+                    with self.controller.lock:
+                        job.update(status='cancelled', stage='cancelled', message='回复已停止',
+                                   remote_result={'text': text, 'metrics': metrics} if text else None,
+                                   safe_release=True)
+                        self.controller.save_jobs()
+                        self.controller.text_draft = ''
+                    return
                 text = ''.join(parts).strip()
                 err_msg = str(exc).strip() or '模型回复失败，请重试'
                 with self.controller.lock:
                     job.update(status='error', stage='error', message=err_msg,
-                               remote_result={'text': text, 'metrics': metrics} if text else None)
+                               remote_result={'text': text, 'metrics': metrics} if text else None,
+                               safe_release=True)
                     self.controller.save_jobs()
                     self.controller.text_draft = ''
                 err_payload = json.dumps({'error': {'message': err_msg}}, ensure_ascii=False)
                 yield f'data: {err_payload}\n\n'
+            finally:
+                if self.active_streams.get(chat_id) is handle:
+                    self.active_streams.pop(chat_id, None)
+                if handle.resp:
+                    try:
+                        handle.resp.close()
+                    except Exception:
+                        pass
 
         return StreamingResponse(stream_generator(), media_type="text/event-stream")
 

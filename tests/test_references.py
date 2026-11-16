@@ -1,5 +1,6 @@
 """Reference validation and transport tests; no cloud allocation or generation."""
 import asyncio
+import base64
 import io
 import json
 from pathlib import Path
@@ -21,6 +22,19 @@ def ref(slot, role='character', description=''):
 
 
 class ReferenceTests(unittest.TestCase):
+    def test_large_reference_upload_sends_ordered_jupyter_chunks(self):
+        contents = app.TimedContents(SimpleNamespace(url='https://example.invalid', token='test-only'))
+        data = b'\x00\xffabcdefghijkl'
+        with tempfile.TemporaryDirectory(dir=app.PRIVATE) as directory:
+            source = Path(directory) / 'reference.png'
+            source.write_bytes(data)
+            with patch.object(contents, 'upload_chunk_size', 5), patch.object(contents, '_request') as send:
+                contents.upload(source, 'content/reference.png')
+        self.assertTrue(all(call.args == ('PUT', 'content/reference.png') for call in send.call_args_list))
+        chunks = [call.kwargs['json_data'] for call in send.call_args_list]
+        self.assertEqual([part['chunk'] for part in chunks], [1, 2, -1])
+        self.assertEqual(b''.join(base64.b64decode(part['content']) for part in chunks), data)
+
     def test_sparse_slots_are_mapped_in_prompt_and_graph_without_crop(self):
         c = app.H3JobConfig(prompt='@图片3中的男主在@图片1的花园里行走', references=[ref(3),ref(1,'scene')]).model_dump()
         g = build_graph(dict(c,job_id='test'))

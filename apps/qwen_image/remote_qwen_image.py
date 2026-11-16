@@ -102,6 +102,28 @@ DIMENSIONS_2K = {
     '2:3': (1696, 2528),
 }
 
+MINIMAX_MODEL = 'minimax_h3_image_pruned_int8_convrot.safetensors'
+MINIMAX_ENCODER = 'qwen3vl_32b_minimax_h3_int8_convrot.safetensors'
+MINIMAX_VAE = 'minimax_h3_image_vae_fp16.safetensors'
+MINIMAX_REPO = 'Comfy-Org/MiniMax-H3-Image'
+MINIMAX_GPUS = ('G4', 'H100', 'A100')
+MINIMAX_MAX_REFERENCES = 16
+MINIMAX_DIMENSIONS_4K = {
+    '1:1': (4096, 4096),
+    '16:9': (5472, 3072),
+    '9:16': (3072, 5472),
+    '4:3': (4736, 3552),
+    '3:4': (3552, 4736),
+    '3:2': (5024, 3360),
+    '2:3': (3360, 5024),
+    '21:9': (6272, 2688),
+}
+MINIMAX_DIMENSIONS = {
+    'standard': {**DIMENSIONS, '21:9': (1568, 672)},
+    '2k': {**DIMENSIONS_2K, '21:9': (3136, 1344)},
+    '4k': MINIMAX_DIMENSIONS_4K,
+}
+
 MODEL_CACHE = None
 CURRENT_CONFIG = {}
 EXPECTED_GPU = 'A100'
@@ -117,6 +139,12 @@ def event(stage, message, **extra):
 
 
 def files_for(c):
+    if c.get('model_file') == MINIMAX_MODEL:
+        return [
+            (MINIMAX_REPO, 'diffusion_models/' + MINIMAX_MODEL, 'diffusion_models'),
+            ('Comfy-Org/MiniMax-H3', 'text_encoders/' + MINIMAX_ENCODER, 'text_encoders'),
+            (MINIMAX_REPO, 'vae/' + MINIMAX_VAE, 'vae'),
+        ]
     if is_edit_job(c):
         raw_model = c.get('model_file', 'qwen-image-edit-2511-Q4_K_M.gguf')
         if not raw_model or 'turbo' in raw_model:
@@ -157,7 +185,48 @@ def output_prefix(c):
     return prefix
 
 
+def output_subfolder(c):
+    return 'MiniMaxH3Image' if c.get('model_file') == MINIMAX_MODEL else 'QwenImage'
+
+
+def build_minimax_graph(c):
+    def node(class_type, **inputs):
+        return {'class_type': class_type, 'inputs': inputs}
+
+    ratio = c.get('aspect_ratio', '1:1')
+    width, height = MINIMAX_DIMENSIONS[c.get('resolution', 'standard')][ratio]
+
+    refs = sorted(c.get('references', []), key=lambda ref: ref['slot'])
+    prompt = c['prompt']
+    graph = {
+        '1': node('UNETLoader', unet_name=MINIMAX_MODEL, weight_dtype='default'),
+        '2': node('CLIPLoader', clip_name=MINIMAX_ENCODER, type='minimax', device='default'),
+        '3': node('VAELoader', vae_name=MINIMAX_VAE),
+        '5': node('ConditioningZeroOut', conditioning=['4', 0]),
+        '7': node('KSampler', model=['1', 0], positive=['4', 0], negative=['5', 0],
+                  latent_image=['4', 1], seed=c.get('seed', 0), steps=6, cfg=1.0,
+                  sampler_name='euler', scheduler='simple', denoise=1.0),
+        '8': node('VAEDecode', samples=['7', 0], vae=['3', 0]),
+        '9': node('SaveImage', images=['8', 0], filename_prefix=output_subfolder(c) + '/' + output_prefix(c)),
+    }
+    image_inputs = {}
+    for index, ref in enumerate(refs, start=1):
+        node_id = str(20 + index)
+        graph[node_id] = node('LoadImage', image=ref['image_id'])
+        image_inputs[f'images.image_{index}'] = [node_id, 0]
+    if refs:
+        # User-facing slot numbers map to the sequential ComfyUI input order.
+        labels = {str(ref['slot']): f'<Picture {index}>' for index, ref in enumerate(refs, start=1)}
+        prompt = re.sub(r'@(?:图片|图)\s*([0-9]+)', lambda match: labels.get(match[1], match[0]), prompt)
+    graph['4'] = node('MiniMaxH3ImageConditioning', clip=['2', 0], vae=['3', 0],
+                      prompt=prompt, width=width, height=height, **image_inputs)
+    return graph
+
+
 def build_graph(c):
+    if c.get('model_file') == MINIMAX_MODEL:
+        return build_minimax_graph(c)
+
     def node(cls, **inputs):
         return {'class_type': cls, 'inputs': inputs}
 
@@ -360,6 +429,7 @@ def prepare_model(repo, filename, category, downloader, cache=None, loads=None):
 def prepare():
     global CURRENT_CONFIG
     c = CURRENT_CONFIG
+    minimax = c.get('model_file') == MINIMAX_MODEL
     gpu_output = ''
     try:
         gpu_output = subprocess.check_output(
@@ -367,9 +437,14 @@ def prepare():
             text=True
         ).strip()
         name, memory = gpu_output.splitlines()[0].rsplit(',', 1)
-        event('prepare', '检查 GPU 资源：' + name.strip(), gpu_info={'name': name.strip(), 'memory_mib': int(memory.strip())})
-    except Exception:
+        memory_mib = int(memory.strip())
+        event('prepare', '检查 GPU 资源：' + name.strip(), gpu_info={'name': name.strip(), 'memory_mib': memory_mib})
+    except (OSError, ValueError, IndexError, subprocess.CalledProcessError) as exc:
+        if minimax:
+            raise RuntimeError('无法确认 MiniMax-H3-Image 所需的 GPU 显存') from exc
         event('prepare', '未检测到 nvidia-smi，使用默认配置')
+    if minimax and memory_mib < 70000:
+        raise RuntimeError(f'MiniMax-H3-Image 需要 G4、H100 或 A100 80GB，当前 GPU：{gpu_output}')
 
     if not ROOT.exists():
         event('prepare', '克隆 ComfyUI 核心代码…')
@@ -385,10 +460,6 @@ def prepare():
         subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', '-r', str(ROOT / 'requirements.txt'), 'gguf', 'huggingface_hub', 'pillow'], check=True)
         ready_marker.touch()
 
-    from huggingface_hub import hf_hub_download
-    for repo, filename, category in files_for(c):
-        prepare_model(repo, filename, category, hf_hub_download, MODEL_CACHE)
-
     import requests
     serving = False
     try:
@@ -397,9 +468,20 @@ def prepare():
     except Exception:
         serving = False
 
-    if not serving:
+    if minimax:
+        if not serving:
+            start_comfy()
+        response = requests.get('http://127.0.0.1:8188/object_info/MiniMaxH3ImageConditioning', timeout=10)
+        response.raise_for_status()
+        if 'MiniMaxH3ImageConditioning' not in response.json():
+            raise PreserveRuntimeError('当前 ComfyUI 缺少 MiniMax H3 Image 节点，请释放旧运行时并重新提交')
+
+    from huggingface_hub import hf_hub_download
+    for repo, filename, category in files_for(c):
+        prepare_model(repo, filename, category, hf_hub_download, MODEL_CACHE)
+    if not minimax and not serving:
         start_comfy()
-    event('prepare', 'Qwen-Image 模型与服务已就绪')
+    event('prepare', '模型与 ComfyUI 已就绪')
 
 
 def start_comfy():
@@ -425,7 +507,8 @@ def generate(c):
         raise PreserveRuntimeError('ComfyUI 仍有任务在排队或运行中，请等待完成后提交')
 
     count = c.get('count', 1)
-    candidates = sorted((ROOT / 'output' / 'QwenImage').glob(output_prefix(c) + '_*.png'))
+    subfolder = output_subfolder(c)
+    candidates = sorted((ROOT / 'output' / subfolder).glob(output_prefix(c) + '_*.png'))
     if candidates:
         if count > 1 and len(candidates) != count:
             raise PreserveRuntimeError(f'批量生图产物不完整，找到 {len(candidates)}/{count} 张，已保留运行时')
@@ -474,7 +557,7 @@ def generate(c):
             if images or status.get('completed'):
                 if len(images) != count:
                     raise PreserveRuntimeError(f'ComfyUI 返回 {len(images)}/{count} 张图片，已保留运行时')
-                paths = [ROOT / 'output' / img.get('subfolder', 'QwenImage') / img['filename'] for img in images]
+                paths = [ROOT / 'output' / img.get('subfolder', subfolder) / img['filename'] for img in images]
                 return report_results(paths)
 
     raise RuntimeError('生图任务超时（超过 30 分钟）')
@@ -484,12 +567,13 @@ def run(c):
     global EXPECTED_GPU, CURRENT_CONFIG
     CURRENT_CONFIG = c
     EXPECTED_GPU = c.get('gpu', 'A100')
+    model_name = 'MiniMax-H3-Image' if c.get('model_file') == MINIMAX_MODEL else 'Qwen-Image'
     stop = threading.Event()
 
     def heartbeat():
         started = time.monotonic()
         while not stop.wait(15):
-            event('heartbeat', 'Qwen-Image 正在处理中，已用时 %d 秒' % (time.monotonic() - started))
+            event('heartbeat', '%s 正在处理中，已用时 %d 秒' % (model_name, time.monotonic() - started))
 
     threading.Thread(target=heartbeat, daemon=True).start()
     try:

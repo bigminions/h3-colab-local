@@ -36,6 +36,10 @@ function updateQiGpuDisplay() {
   const $ = id => document.getElementById(id);
   const getApiKey = () => $('apiKey')?.value || '__API_KEY__';
   const formatStorageKey = 'lstudio-qi-format';
+  const MINIMAX_MODEL = 'minimax_h3_image_pruned_int8_convrot.safetensors';
+  const MINIMAX_GPUS = ['G4', 'H100', 'A100'];
+  const isMiniMax = () => $('qiModelFile')?.value === MINIMAX_MODEL;
+  const referenceLimit = () => isMiniMax() ? 16 : 3;
 
   const RATIO_NOTES = {
     '1:1': '方图',
@@ -44,7 +48,8 @@ function updateQiGpuDisplay() {
     '4:3': '经典横版',
     '3:4': '社交竖图',
     '3:2': '单反横画幅',
-    '2:3': '人像海报'
+    '2:3': '人像海报',
+    '21:9': '超宽横图'
   };
 
   const DIMENSIONS = {
@@ -54,7 +59,8 @@ function updateQiGpuDisplay() {
     '4:3': '1152 × 864',
     '3:4': '864 × 1152',
     '3:2': '1216 × 832',
-    '2:3': '832 × 1216'
+    '2:3': '832 × 1216',
+    '21:9': '1568 × 672'
   };
 
   const DIMENSIONS_2K = {
@@ -64,11 +70,23 @@ function updateQiGpuDisplay() {
     '4:3': '2400 × 1792',
     '3:4': '1792 × 2400',
     '3:2': '2528 × 1696',
-    '2:3': '1696 × 2528'
+    '2:3': '1696 × 2528',
+    '21:9': '3136 × 1344'
+  };
+
+  const DIMENSIONS_4K = {
+    '1:1': '4096 × 4096',
+    '16:9': '5472 × 3072',
+    '9:16': '3072 × 5472',
+    '4:3': '4736 × 3552',
+    '3:4': '3552 × 4736',
+    '3:2': '5024 × 3360',
+    '2:3': '3360 × 5024',
+    '21:9': '6272 × 2688'
   };
 
   let mode = 'text'; // 'text' | 'image'
-  let references = []; // [{ slot: 1..3, image_id, name, url, pending, error }]
+  let references = [];
   let qiActiveMentionIndex = 0;
   let qiMentionMatches = [];
   let submitting = false;
@@ -133,7 +151,6 @@ function updateQiGpuDisplay() {
     const promptLabel = document.querySelector('label[for="qiPrompt"]');
     const promptArea = $('qiPrompt');
     const modelSelect = $('qiModelFile');
-    const modelLabel = $('qiModelLabel') || document.querySelector('label[for="qiModelFile"]');
     const stepsInput = $('qiSteps');
     const cfgInput = $('qiCfg');
     const denoiseGroup = $('qiDenoiseGroup');
@@ -164,35 +181,34 @@ function updateQiGpuDisplay() {
 
     if (isImage) {
       if (promptLabel) promptLabel.textContent = '编辑指令 (Instruction)';
-      if (modelLabel) modelLabel.textContent = '编辑模型 (Qwen-Image-Edit 20B)';
       if (promptArea) {
         promptArea.placeholder = '输入编辑指令，说明需要保留和修改的内容…\n\n例如：\n• 把 @图片1 中的圆形改成方形\n• 将 @图片1 的背景替换为 @图片2 的背景\n• 保留主体的位置和大小';
       }
       if (modelSelect && (modelSelect.value.includes('turbo') || !modelSelect.value)) {
         modelSelect.value = 'qwen-image-edit-2511-Q4_K_M.gguf';
       }
-      if (stepsInput && Number(stepsInput.value) <= 8) {
+      if (!isMiniMax() && stepsInput && Number(stepsInput.value) <= 8) {
         stepsInput.value = '20';
       }
-      if (cfgInput && Number(cfgInput.value) <= 1.0) {
+      if (!isMiniMax() && cfgInput && Number(cfgInput.value) <= 1.0) {
         cfgInput.value = '4.0';
       }
     } else {
       if (promptLabel) promptLabel.textContent = '画面描述 (Prompt)';
-      if (modelLabel) modelLabel.textContent = '生图模型 (Qwen-Image Turbo)';
       if (promptArea) {
         promptArea.placeholder = '描述画面主体、背景、光影细节与艺术风格…\n\n例如：白色背景上放着一个蓝色立方体，柔和光照，固定视角。';
       }
       if (modelSelect && (modelSelect.value.includes('edit') || !modelSelect.value)) {
         modelSelect.value = 'qwen-image-2.1-turbo-Q4_K_M.gguf';
       }
-      if (stepsInput && Number(stepsInput.value) === 20) {
+      if (!isMiniMax() && stepsInput && Number(stepsInput.value) === 20) {
         stepsInput.value = '8';
       }
-      if (cfgInput && Number(cfgInput.value) === 4.0) {
+      if (!isMiniMax() && cfgInput && Number(cfgInput.value) === 4.0) {
         cfgInput.value = '1.0';
       }
     }
+    updateModelControls();
   }
 
   function selectedRatio() {
@@ -226,7 +242,7 @@ function updateQiGpuDisplay() {
   }
 
   function formatDimensions(ratio, resolution) {
-    const dimensions = resolution === '2k' ? DIMENSIONS_2K : DIMENSIONS;
+    const dimensions = resolution === '4k' ? DIMENSIONS_4K : resolution === '2k' ? DIMENSIONS_2K : DIMENSIONS;
     return dimensions[ratio] || '';
   }
 
@@ -236,11 +252,46 @@ function updateQiGpuDisplay() {
     if (note) note.textContent = `${formatDimensions(ratio, selectedResolution())} px · ${RATIO_NOTES[ratio]}`;
   }
 
+  function updateModelControls() {
+    const minimax = isMiniMax();
+    for (const field of document.querySelectorAll('[data-qi-qwen-only]')) {
+      field.classList.toggle('hidden', minimax);
+      field.querySelector('input, select').disabled = minimax;
+    }
+    for (const [id, available, fallback] of [
+      ['qiResolution4K', minimax, '2k'],
+      ['qiRatio219', minimax, '1:1']
+    ]) {
+      const label = $(id);
+      if (!label) continue;
+      const input = label.querySelector('input');
+      label.classList.toggle('hidden', !available);
+      input.disabled = !available;
+      if (!available && input.checked) {
+        document.querySelector(`input[name="${input.name}"][value="${fallback}"]`).checked = true;
+      }
+    }
+    $('qiDenoiseGroup')?.classList.toggle('hidden', minimax || mode !== 'image' || $('qiEditType')?.value !== 'repaint');
+    $('qiMiniMaxHint')?.classList.toggle('hidden', !minimax);
+    const hint = $('qiReferenceLimitHint');
+    if (hint) hint.textContent = `智能图像编辑支持最多 ${referenceLimit()} 张素材图片。`;
+    updateRatioNote();
+  }
+
+  function selectMiniMaxGpu() {
+    const gpu = $('qiGpu');
+    if (!isMiniMax() || !gpu || MINIMAX_GPUS.includes(gpu.value)) return;
+    if (![...gpu.options].some(option => option.value === 'G4')) return;
+    gpu.value = 'G4';
+    gpu.dispatchEvent(new Event('change'));
+  }
+
   function saveFormat() {
     try {
       localStorage.setItem(formatStorageKey, JSON.stringify({
         aspect_ratio: selectedRatio(),
-        resolution: selectedResolution()
+        resolution: selectedResolution(),
+        minimax: isMiniMax()
       }));
     } catch (_) {}
   }
@@ -249,6 +300,7 @@ function updateQiGpuDisplay() {
     try {
       const saved = JSON.parse(localStorage.getItem(formatStorageKey));
       if (!saved) return;
+      if (saved.minimax && $('qiModelFile')) $('qiModelFile').value = MINIMAX_MODEL;
       for (const [name, value] of [['qiAspectRatio', saved.aspect_ratio], ['qiResolution', saved.resolution]]) {
         const radio = [...document.querySelectorAll(`input[name="${name}"]`)].find(input => input.value === value);
         if (radio) radio.checked = true;
@@ -266,7 +318,7 @@ function updateQiGpuDisplay() {
 
   function renderReferences() {
     references.forEach((ref, idx) => { ref.slot = idx + 1; });
-    const countText = `${references.length} / 3 张`;
+    const countText = `${references.length} / ${referenceLimit()} 张`;
     if ($('qiReferenceCount')) $('qiReferenceCount').textContent = countText;
     if ($('qiReferenceStatus')) $('qiReferenceStatus').textContent = countText;
 
@@ -364,7 +416,7 @@ function updateQiGpuDisplay() {
       cardsContainer.append(card);
     }
 
-    if (references.length < 3) {
+    if (references.length < referenceLimit()) {
       dropZone.hidden = false;
       dropZone.classList.remove('hidden');
       dropZone.style.display = '';
@@ -386,7 +438,7 @@ function updateQiGpuDisplay() {
 
     let targetRef = existingRef;
     if (!targetRef) {
-      if (references.length >= 3) return;
+      if (references.length >= referenceLimit()) return;
       targetRef = {
         slot: references.length + 1,
         image_id: '',
@@ -417,7 +469,7 @@ function updateQiGpuDisplay() {
 
   async function handleReferenceFiles(files) {
     if (!files || !files.length) return;
-    const availableSlots = 3 - references.length;
+    const availableSlots = Math.max(0, referenceLimit() - references.length);
     const toAdd = Array.from(files).slice(0, availableSlots);
     for (const f of toAdd) {
       await uploadSingleReference(f);
@@ -426,7 +478,7 @@ function updateQiGpuDisplay() {
 
   async function pickLibraryImages() {
     if (!window.Workspace?.openAssetPicker) return;
-    const maxAvailable = 3 - references.length;
+    const maxAvailable = referenceLimit() - references.length;
     if (maxAvailable <= 0) return;
     const picked = await window.Workspace.openAssetPicker({
       kind: 'images',
@@ -436,7 +488,7 @@ function updateQiGpuDisplay() {
     });
     if (!picked || !picked.length) return;
     for (const asset of picked) {
-      if (references.length >= 3) break;
+      if (references.length >= referenceLimit()) break;
       let url = '';
       try {
         const resp = await fetch(asset.url, { headers: { 'X-LStudio-Key': window.KEY || '' } });
@@ -666,9 +718,19 @@ function updateQiGpuDisplay() {
       showError('请输入画面描述 (Prompt)');
       return;
     }
-    if (mode === 'image' && references.length === 0) {
-      showError('智能图像编辑模式需要至少添加一张图片（图1 作为主体基底）');
-      return;
+    if (mode === 'image') {
+      if (references.length === 0) {
+        showError('智能图像编辑需要至少添加一张图片');
+        return;
+      }
+      if (references.length > referenceLimit()) {
+        showError(`当前模型最多支持 ${referenceLimit()} 张参考图，请移除多余图片`);
+        return;
+      }
+      if (references.some(ref => ref.pending || !ref.image_id)) {
+        showError('请等待参考图上传完成');
+        return;
+      }
     }
 
     const seedInput = $('qiSeed')?.value?.trim();
@@ -683,24 +745,24 @@ function updateQiGpuDisplay() {
     const negativePrompt = $('qiNegativePrompt')?.value?.trim() || '';
     const gpu = $('qiGpu')?.value || localStorage.getItem('lstudio-qi-gpu') || 'T4';
     const idleMinutes = Number($('idleMinutes')?.value || 10);
+    const minimax = isMiniMax();
+    if (minimax && !MINIMAX_GPUS.includes(gpu)) {
+      showError('MiniMax-H3-Image 需要 G4、H100 或 A100 80GB');
+      return;
+    }
 
     const editType = $('qiEditType')?.value || 'instruction';
 
     const payload = {
       app_id: 'qwen_image_2_1',
-      edit_type: editType,
       provider_id: 'colab',
       prompt: prompt,
-      negative_prompt: negativePrompt,
       aspect_ratio: ratio,
       resolution: selectedResolution(),
       model_file: modelFile,
-      encoder: encoder,
-      steps: steps,
-      cfg: cfg,
+      ...(!minimax && { edit_type: editType, negative_prompt: negativePrompt, encoder, steps, cfg, denoise }),
       count: count,
       seed: seed,
-      denoise: denoise,
       gpu: gpu,
       release_mode: getReleaseMode(),
       idle_minutes: idleMinutes,
@@ -954,11 +1016,10 @@ function updateQiGpuDisplay() {
         const radio = document.querySelector(`input[name="qiAspectRatio"][value="${creation.aspect_ratio}"]`);
         if (radio) radio.checked = true;
       }
-      const resolution = creation.resolution === '2k' ? '2k' : 'standard';
-      const resolutionRadio = document.querySelector(`input[name="qiResolution"][value="${resolution}"]`);
+      const resolution = creation.resolution || 'standard';
+      const resolutionRadio = [...document.querySelectorAll('input[name="qiResolution"]')]
+        .find(input => input.value === resolution);
       if (resolutionRadio) resolutionRadio.checked = true;
-      updateRatioNote();
-      saveFormat();
       if ($('qiModelFile') && creation.model_file) {
         const mapped = creation.model_file.replace('qwen-image-2.1-UC-', 'qwen-image-2.1-turbo-');
         $('qiModelFile').value = mapped;
@@ -991,7 +1052,7 @@ function updateQiGpuDisplay() {
         for (const ref of references) {
           if (ref.url && ref.url.startsWith('blob:')) URL.revokeObjectURL(ref.url);
         }
-        references = creation.references.slice(0, 3).map((ref, idx) => ({
+        references = creation.references.slice(0, referenceLimit()).map((ref, idx) => ({
           slot: idx + 1,
           image_id: ref.image_id,
           name: ref.name || ref.image_id,
@@ -1023,8 +1084,11 @@ function updateQiGpuDisplay() {
       } else {
         setMode('text');
       }
-      if ($('qiSteps') && creation.steps) $('qiSteps').value = creation.steps;
-      if ($('qiCfg') && creation.cfg) $('qiCfg').value = creation.cfg;
+      if (!isMiniMax()) {
+        if ($('qiSteps') && creation.steps) $('qiSteps').value = creation.steps;
+        if ($('qiCfg') && creation.cfg) $('qiCfg').value = creation.cfg;
+      }
+      saveFormat();
 
       if (creation.gpu && $('qiGpu')) {
         if ([...$('qiGpu').options].some(o => o.value === creation.gpu)) {
@@ -1153,13 +1217,13 @@ function updateQiGpuDisplay() {
   function setAsReference(sibling, button) {
     if (!sibling?.file) return;
     const newRef = {
-      slot: Math.min(references.length + 1, 3),
+      slot: Math.min(references.length + 1, referenceLimit()),
       image_id: sibling.file,
       name: sibling.file,
       url: '/image/' + sibling.file,
       pending: false
     };
-    if (references.length >= 3) {
+    if (references.length >= referenceLimit()) {
       references[0] = newRef;
     } else {
       references.push(newRef);
@@ -1394,7 +1458,7 @@ function updateQiGpuDisplay() {
       if (creation.model_file) metaParts.push(shortModelName(creation.model_file));
       if (creation.steps) metaParts.push(`${creation.steps} 步`);
       if (creation.cfg) metaParts.push(`CFG ${creation.cfg}`);
-      if (creation.denoise && creation.references?.length) metaParts.push(`重绘 ${creation.denoise}`);
+      if (creation.model_file !== MINIMAX_MODEL && creation.denoise && creation.references?.length) metaParts.push(`重绘 ${creation.denoise}`);
 
       const metaText = document.createElement('span');
       metaText.className = 'task-card-meta-text';
@@ -1912,6 +1976,7 @@ function updateQiGpuDisplay() {
 
   function shortModelName(file) {
     if (!file) return 'Qwen-Image';
+    if (file === MINIMAX_MODEL) return 'MiniMax-H3-Image · INT8';
     if (file.includes('Q4_K_M')) return 'GGUF Q4';
     if (file.includes('fp8')) return 'FP8';
     if (file.includes('int8_convrot')) return 'INT8';
@@ -1950,9 +2015,13 @@ function updateQiGpuDisplay() {
   function initialize() {
     $('qiTextTab')?.addEventListener('click', () => setMode('text'));
     $('qiImageTab')?.addEventListener('click', () => setMode('image'));
-    $('qiEditType')?.addEventListener('change', e => {
-      const isRepaint = e.target.value === 'repaint';
-      $('qiDenoiseGroup')?.classList.toggle('hidden', !isRepaint);
+    $('qiEditType')?.addEventListener('change', updateModelControls);
+    $('qiModelFile')?.addEventListener('change', () => {
+      setMode(mode);
+      selectMiniMaxGpu();
+      renderReferences();
+      showError('');
+      saveFormat();
     });
 
     document.querySelectorAll('input[name="qiAspectRatio"], input[name="qiResolution"]').forEach(r => {
@@ -2089,8 +2158,9 @@ function updateQiGpuDisplay() {
 
     setupStepper();
     restoreFormat();
-    updateRatioNote();
     setMode('text');
+    selectMiniMaxGpu();
+    renderReferences();
     setInterval(updateRunMonitor, 1000);
   }
 
@@ -2101,13 +2171,13 @@ function updateQiGpuDisplay() {
       if (resp.ok) url = URL.createObjectURL(await resp.blob());
     } catch (_) {}
     const newRef = {
-      slot: Math.min(references.length + 1, 3),
+      slot: Math.min(references.length + 1, referenceLimit()),
       image_id: asset.id,
       name: asset.name,
       url: url || asset.url,
       pending: false
     };
-    if (references.length >= 3) {
+    if (references.length >= referenceLimit()) {
       references[0] = newRef;
     } else {
       references.push(newRef);

@@ -207,6 +207,7 @@
 #qwenImagePage .qi-ratio-rect.r-3-4  { width: 12px; height: 16px; }
 #qwenImagePage .qi-ratio-rect.r-3-2  { width: 17px; height: 11.5px; }
 #qwenImagePage .qi-ratio-rect.r-2-3  { width: 11.5px; height: 17px; }
+#qwenImagePage .qi-ratio-rect.r-21-9 { width: 21px; height: 9px; }
 
 #qwenImagePage .qi-ratio-label {
   font-size: 11px !important;

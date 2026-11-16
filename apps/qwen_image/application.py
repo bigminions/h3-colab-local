@@ -5,11 +5,11 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from workspace_runtime import ApplicationSpec
-from .remote_qwen_image import DIMENSIONS
+from .remote_qwen_image import DIMENSIONS, MINIMAX_GPUS, MINIMAX_MAX_REFERENCES, MINIMAX_MODEL
 
 
 class ReferenceImage(BaseModel):
-    slot: int = Field(default=1, ge=1, le=4)
+    slot: int = Field(default=1, ge=1, le=MINIMAX_MAX_REFERENCES)
     image_id: str = Field(pattern=r'^[0-9a-f]{32}\.(png|jpg|webp)$')
     description: str = Field(default='', max_length=500)
 
@@ -30,8 +30,8 @@ class QwenImageJobConfig(BaseModel):
     prompt: str = Field(min_length=1, max_length=8000)
     negative_prompt: str = Field(default='', max_length=2000)
     title: str = Field(default='', max_length=80)
-    aspect_ratio: Literal['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3'] = '1:1'
-    resolution: Literal['standard', '2k'] = 'standard'
+    aspect_ratio: Literal['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3', '21:9'] = '1:1'
+    resolution: Literal['standard', '2k', '4k'] = 'standard'
     model_file: Literal[
         'qwen-image-2.1-turbo-Q4_K_M.gguf',
         'qwen-image-2.1-turbo-fp8.safetensors',
@@ -51,6 +51,7 @@ class QwenImageJobConfig(BaseModel):
         'qwen-image-edit-2511-Q8_0.gguf',
         'qwen_image_edit_2511_fp8mixed.safetensors',
         'qwen_image_edit_fp8_e4m3fn.safetensors',
+        MINIMAX_MODEL,
     ] = 'qwen-image-2.1-turbo-Q4_K_M.gguf'
     encoder: Literal['int8_convrot', 'bf16'] = 'int8_convrot'
     steps: int = Field(default=8, ge=1, le=60)
@@ -63,7 +64,7 @@ class QwenImageJobConfig(BaseModel):
     endpoint: str | None = None
     generation_type: Literal['text', 'image'] | None = None
     edit_type: Literal['instruction', 'repaint'] = 'instruction'
-    references: list[ReferenceImage] = Field(default_factory=list, max_length=4)
+    references: list[ReferenceImage] = Field(default_factory=list, max_length=MINIMAX_MAX_REFERENCES)
     denoise: float = Field(default=0.75, ge=0.0, le=1.0)
 
     @field_validator('model_file', mode='before')
@@ -89,9 +90,25 @@ class QwenImageJobConfig(BaseModel):
         if self.generation_type and self.generation_type != inferred:
             raise ValueError('生成方式与上传的图片不匹配；图生图至少需要一张图片')
         self.generation_type = inferred
-        if self.references:
-            if len({r.slot for r in self.references}) != len(self.references):
-                raise ValueError('参考图编号不能重复')
+        if len({r.slot for r in self.references}) != len(self.references):
+            raise ValueError('参考图编号不能重复')
+        if self.model_file == MINIMAX_MODEL:
+            if 'gpu' not in self.model_fields_set:
+                self.gpu = MINIMAX_GPUS[0]
+            if self.gpu not in MINIMAX_GPUS:
+                raise ValueError('MiniMax-H3-Image 需要 G4、H100 或 A100 80GB')
+            if self.negative_prompt or self.edit_type != 'instruction' or self.encoder != 'int8_convrot':
+                raise ValueError('MiniMax-H3-Image 使用固定编码器，支持文生图和指令编辑')
+            if ('steps' in self.model_fields_set and self.steps != 6) or self.cfg != 1.0:
+                raise ValueError('MiniMax-H3-Image 固定使用 6 步和 CFG 1')
+            self.steps = 6
+            self.denoise = 1.0
+        else:
+            if self.resolution == '4k' or self.aspect_ratio == '21:9':
+                raise ValueError('4K 和 21:9 仅适用于 MiniMax-H3-Image')
+            if any(ref.slot > 4 for ref in self.references):
+                raise ValueError('Qwen-Image 的参考图编号必须在 1–4 之间')
+        if self.references and self.model_file != MINIMAX_MODEL:
             if self.edit_type == 'instruction' and self.model_file == 'qwen-image-2.1-turbo-Q4_K_M.gguf':
                 self.model_file = 'qwen-image-edit-2511-Q4_K_M.gguf'
         return self
@@ -103,7 +120,7 @@ class QwenImageApplication:
     spec = ApplicationSpec(
         id='qwen_image_2_1',
         name='Qwen-Image-2.1',
-        description='文生图与智能图像编辑 · Qwen-Image-Edit (unsloth/Qwen-Image-Edit-2511-GGUF)',
+        description='文生图与智能图像编辑 · Qwen-Image-2.1 / MiniMax-H3-Image',
         output_kind='image',
         providers=('colab',),
         tabs=({'id': 'tool', 'name': '创作'},),

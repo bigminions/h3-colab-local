@@ -1,4 +1,5 @@
 """LStudio local workspace, application jobs and compute coordination."""
+import base64
 import ctypes
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
@@ -46,6 +47,7 @@ from asset_library import AssetLibrary
 from compute_colab import ColabProvider, consumer_probe_step, log_consumer_probe
 from apps.h3 import H3Application, H3JobConfig
 from apps.qwen_image import QwenImageApplication, QwenImageJobConfig
+from apps.qwen_image.remote_qwen_image import MINIMAX_MODEL
 from apps.gemma_chat.application import APP_ID as GEMMA_APP_ID, GemmaApplication
 from apps.gemma_chat.workspace import GemmaWorkspace
 from workspace_runtime import ApplicationRegistry, ProviderRegistry, ProviderSpec
@@ -227,6 +229,29 @@ def bounded_request_timeout(connect, read):
 
 
 class TimedContents(ContentsClient):
+    upload_chunk_size = 1024 * 1024
+
+    def upload(self, local_path, remote_path):
+        if Path(local_path).stat().st_size <= self.upload_chunk_size:
+            return super().upload(local_path, remote_path)
+
+        filename = remote_path.rsplit('/', 1)[-1]
+        with open(local_path, 'rb') as handle:
+            data = handle.read(self.upload_chunk_size)
+            chunk = 1
+            while data:
+                following = handle.read(self.upload_chunk_size)
+                # Jupyter replaces the file on chunk 1 and appends through chunk -1.
+                result = self._request('PUT', remote_path, json_data={
+                    'name': filename, 'path': remote_path, 'type': 'file', 'format': 'base64',
+                    'content': base64.b64encode(data).decode('ascii'),
+                    'chunk': chunk if following or chunk == 1 else -1,
+                })
+                if not following:
+                    return result
+                data = following
+                chunk += 1
+
     def _request(self, method, path, params=None, json_data=None):
         import requests
         response = requests.request(method, self.base_url + '/api/contents/' + quote(path.strip('/'), safe='/'),
@@ -1394,7 +1419,7 @@ class Controller:
                 job = dict(id=job_id, config=config.model_dump(), events=[], status='queued', stage='connect', message='排队中，等待执行', created=time.time())
                 self.jobs[job_id] = job
                 if getattr(config, 'count', 1) > 1:
-                    comfy_batch = isinstance(config, QwenImageJobConfig)
+                    comfy_batch = isinstance(config, QwenImageJobConfig) and config.model_file != MINIMAX_MODEL
                     for index in range(config.count):
                         child = job if index == 0 else dict(id=uuid.uuid4().hex, events=[], status='queued',
                             stage='connect', message='排队中，等待执行', created=job['created'] + index / 1000)
@@ -1457,8 +1482,8 @@ class Controller:
             self.save_jobs()
             self.event(job, 'connect', config.gpu + ' 运行时已连接，准备执行任务')
             if not job.get('remote_result'):
-                self.connected_operation(job,lambda:self.transport.execute(job),
-                                         '执行 Gemma 任务' if output_kind == 'text' else '执行视频任务')
+                operation = {'text': '执行 Gemma 任务', 'image': '执行图片任务', 'video': '执行视频任务'}[output_kind]
+                self.connected_operation(job, lambda: self.transport.execute(job), operation)
             self.check_cancelled(job)
             result = job['remote_result']
             if output_kind == 'text':

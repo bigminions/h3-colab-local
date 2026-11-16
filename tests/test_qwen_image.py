@@ -140,6 +140,45 @@ class QwenImageApplicationTests(unittest.TestCase):
 
 
 class QwenImageRemoteWorkflowTests(unittest.TestCase):
+    def test_minimax_uses_native_conditioning_and_distilled_sampling(self):
+        model = remote_qwen_image.MINIMAX_MODEL
+        config = QwenImageJobConfig(prompt='A still life of fruit', model_file=model)
+        graph = build_graph(config.model_dump())
+        self.assertEqual((config.gpu, config.resolution, config.steps), ('G4', 'standard', 6))
+        self.assertEqual(graph['2']['inputs']['type'], 'minimax')
+        self.assertEqual(graph['4']['class_type'], 'MiniMaxH3ImageConditioning')
+        self.assertNotIn('images.image_1', graph['4']['inputs'])
+        for tier, pixels in (('standard', 1024), ('2k', 2048), ('4k', 4096)):
+            with self.subTest(resolution=tier):
+                tier_config = QwenImageJobConfig(prompt=config.prompt, model_file=model, resolution=tier)
+                inputs = build_graph(tier_config.model_dump())['4']['inputs']
+                self.assertEqual((inputs['width'], inputs['height']), (pixels, pixels))
+        self.assertEqual(graph['7']['inputs']['latent_image'], ['4', 1])
+        self.assertEqual(graph['7']['inputs']['steps'], 6)
+        self.assertEqual(graph['7']['inputs']['cfg'], 1.0)
+        self.assertEqual([category for _, _, category in files_for(config.model_dump())],
+                         ['diffusion_models', 'text_encoders', 'vae'])
+
+        first, second = 'a' * 32 + '.png', 'b' * 32 + '.webp'
+        edit = QwenImageJobConfig(
+            prompt='Edit @图片2 using @图16 as reference; keep <Picture 1> centered.',
+            model_file=model, aspect_ratio='21:9', resolution='4k',
+            references=[ReferenceImage(slot=16, image_id=second), ReferenceImage(slot=2, image_id=first)],
+        )
+        graph = build_graph(edit.model_dump())
+        inputs = graph['4']['inputs']
+        self.assertEqual(inputs['prompt'], 'Edit <Picture 1> using <Picture 2> as reference; keep <Picture 1> centered.')
+        self.assertEqual((inputs['width'], inputs['height']), (6272, 2688))
+        for index, expected in enumerate((first, second), start=1):
+            self.assertEqual(graph[inputs[f'images.image_{index}'][0]]['inputs']['image'], expected)
+        self.assertTrue(graph['9']['inputs']['filename_prefix'].startswith('MiniMaxH3Image/'))
+        with self.assertRaises(ValidationError):
+            QwenImageJobConfig(prompt='test', model_file=model, gpu='T4')
+        with self.assertRaises(ValidationError):
+            QwenImageJobConfig(prompt='test', model_file=model, steps=8)
+        with self.assertRaises(ValidationError):
+            QwenImageJobConfig(prompt='test', resolution='4k')
+
     def test_files_for_huggingface_repo(self):
         cfg = {'model_file': 'qwen-image-2.1-turbo-Q4_K_M.gguf', 'encoder': 'int8_convrot'}
         files = files_for(cfg)
@@ -354,6 +393,21 @@ class QwenImageWorkspaceIntegrationTests(unittest.TestCase):
             job = self.control.jobs[job_id]
             self.assertEqual(job['config']['resolution'], '2k')
             self.assertEqual(self.control.public_job(job)['creation']['resolution'], '2k')
+
+    def test_minimax_batch_queues_one_image_per_job(self):
+        (self.root / 'google-token.dat').touch()
+        config = QwenImageJobConfig(prompt='A blue ceramic vase', model_file=remote_qwen_image.MINIMAX_MODEL,
+                                    count=2, seed=42, resolution='4k')
+        with patch.object(self.control, 'ensure_worker'), patch.object(app, 'drive_cache', MagicMock(enabled=False)):
+            ids = app.create_job(config)['ids']
+        self.assertEqual(len(ids), 2)
+        self.assertEqual([entry['id'] for entry in self.control.queue_snapshot()], ids)
+        for index, job_id in enumerate(ids):
+            job = self.control.jobs[job_id]
+            self.assertFalse(job.get('comfy_batch'))
+            self.assertEqual(job['config']['count'], 1)
+            self.assertEqual(job['config']['seed'], 42 + index)
+            self.assertEqual(self.control.public_job(job)['creation']['resolution'], '4k')
 
     def test_comfy_batch_submits_once_and_recovers_interrupted_download(self):
         output = self.root / 'output' / 'QwenImage'

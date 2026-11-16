@@ -401,9 +401,12 @@ class ColabProvider:
                 source += 'from google.colab import drive\ndrive.mount("/content/drive", timeout_ms=900000)\nMODEL_CACHE = _mounted.MountedDriveModelCache(event)\n'
             else:
                 source += 'MODEL_CACHE = _drive_module.DriveModelCache(' + repr(self.services.drive_cache.remote_token()) + ', event, quota_project=' + repr(self.services.drive_cache.quota_project) + ', token_provider=lambda: input("H3_DRIVE_ACCESS_TOKEN"))\n'
-        for name in application.input_assets(job['config']):
+        assets = application.input_assets(job['config'])
+        for index, name in enumerate(assets, 1):
+            self.controller.check_cancelled(job)
             asset = self.services.asset_library.resolve(name)
-            self.services.TimedContents(s).upload(str(asset), 'content/' + asset.name)
+            self.connection_step(f'上传输入素材 {index}/{len(assets)}',
+                lambda: self.services.TimedContents(s).upload(str(asset), 'content/' + asset.name))
         code = application.invocation(source, {**job, 'reuse_model': True} if warm_gemma else job)
         lines_seen = set()
         submitted_at = None

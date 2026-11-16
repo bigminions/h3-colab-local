@@ -6,7 +6,7 @@
 
         <div class="creation-heading">
 
-          <h2 class="card-title">Qwen-Image-2.1 生图</h2>
+          <h2 class="card-title">图像创作</h2>
 
           <div class="tabs" role="tablist" aria-label="生图方式">
 
@@ -38,9 +38,9 @@
 
               <div id="qiReferenceHelp" class="reference-help hidden">
 
-                <p class="hint reference-guide">智能图像编辑支持最多 3 张素材图片。</p>
+                <p id="qiReferenceLimitHint" class="hint reference-guide">智能图像编辑支持最多 3 张素材图片。</p>
 
-                <p class="hint reference-guide">在下方输入 @ 选择图片，直接在描述中用文字说明参考用途，例如“保持 @图片1 长相面容不变，换上 @图片2 的衣服，画风参考 @图片3”。首张图片按输出比例居中适配，其余参考图保留原有比例。</p>
+                <p class="hint reference-guide">在下方输入 @ 选择图片，并说明每张图的用途。例如“保留 @图片1 的人物，换上 @图片2 的衣服”。</p>
 
               </div>
 
@@ -76,7 +76,7 @@
 
               </div>
 
-              <div style="margin-top:12px;">
+              <div data-qi-qwen-only style="margin-top:12px;">
                 <label class="field-label" for="qiEditType">编辑模式</label>
                 <select id="qiEditType" style="width:100%;padding:6px 10px;background:#1a2332;border:1px solid var(--line);border-radius:6px;color:#e1e7f0;font-size:12px;">
                   <option value="instruction" selected>智能指令编辑 (Qwen-Image-Edit · 深度保留面部与背景，只按指令修改)</option>
@@ -110,7 +110,7 @@
 
               <div id="qiMentionMenu" class="mention-menu hidden" role="listbox" aria-label="图片引用建议" style="position:absolute;z-index:100;min-width:220px;max-width:320px;max-height:250px;overflow-y:auto;border:1px solid #3c4d68;background:#161e2c;border-radius:10px;padding:6px;box-shadow:0 12px 32px rgba(0,0,0,0.55);"></div>
 
-              <div class="qi-negative-group">
+              <div class="qi-negative-group" data-qi-qwen-only>
 
                 <label class="field-label" for="qiNegativePrompt">反向提示词 (Negative Prompt · 可选)</label>
 
@@ -235,6 +235,14 @@
 
                 </label>
 
+                <label id="qiRatio219" class="qi-ratio-item hidden" title="21:9 · 超宽横图">
+                  <input type="radio" name="qiAspectRatio" value="21:9" disabled>
+                  <span class="qi-ratio-box">
+                    <span class="qi-icon-stage"><span class="qi-ratio-rect r-21-9" aria-hidden="true"></span></span>
+                    <span class="qi-ratio-label">21:9</span>
+                  </span>
+                </label>
+
               </div>
 
             </fieldset>
@@ -252,12 +260,16 @@
                     <input type="radio" name="qiResolution" value="2k">
                     <span class="qi-ratio-box">2K</span>
                   </label>
+                  <label id="qiResolution4K" class="qi-ratio-item hidden">
+                    <input type="radio" name="qiResolution" value="4k" disabled>
+                    <span class="qi-ratio-box">4K</span>
+                  </label>
                 </div>
               </div>
 
               <div class="qi-field">
 
-                <label id="qiModelLabel" class="field-label" for="qiModelFile">扩散模型 (GGUF / Safetensors)</label>
+                <label id="qiModelLabel" class="field-label" for="qiModelFile">图像模型</label>
 
                 <select id="qiModelFile">
                   <optgroup id="qiModelGroupEdit" label="智能图像编辑 (Qwen-Image-Edit 20B)">
@@ -268,11 +280,13 @@
                     <option value="qwen-image-2.1-turbo-Q4_K_M.gguf">Turbo Q4_K_M.gguf · 3.8GB（文生图推荐 · 极速出图）</option>
                     <option value="qwen-image-2.1-turbo-fp8.safetensors">Turbo fp8.safetensors · 6.6GB（高精度细节 · 原生FP8）</option>
                   </optgroup>
+                  <option value="minimax_h3_image_pruned_int8_convrot.safetensors">MiniMax-H3-Image · INT8</option>
                 </select>
+                <p id="qiMiniMaxHint" class="hint hidden">固定 6 步采样。需要 G4、H100 或 A100 80GB，首次运行约下载 47.5 GB 权重。</p>
 
               </div>
 
-              <div class="qi-field">
+              <div class="qi-field" data-qi-qwen-only>
 
                 <label class="field-label" for="qiEncoder">文本编码器 (Qwen3-VL 8B)</label>
 
@@ -290,7 +304,7 @@
 
             <div class="qi-param-grid">
 
-              <div class="qi-field">
+              <div class="qi-field" data-qi-qwen-only>
 
                 <label class="field-label" for="qiSteps">采样步数</label>
 
@@ -298,7 +312,7 @@
 
               </div>
 
-              <div class="qi-field">
+              <div class="qi-field" data-qi-qwen-only>
 
                 <label class="field-label" for="qiCfg">提示词引导 (CFG)</label>
 

@@ -387,21 +387,17 @@
         </div>
 
         <div class="form-control">
-          <label class="label py-0.5"><span class="label-text font-medium text-xs">人设性格简述</span></label>
-          <input id="gemmaCharFormDesc" type="text" class="input input-sm input-bordered w-full" placeholder="一两句话概括角色性格、语气与特点" maxlength="300">
-        </div>
-
-        <div class="form-control">
           <label class="label py-0.5"><span class="label-text font-medium text-xs">开场输入引导提示</span></label>
           <input id="gemmaCharFormPlaceholder" type="text" class="input input-sm input-bordered w-full" placeholder="例如：和我说说你今天遇到了什么新鲜事吧！..." maxlength="150">
         </div>
 
         <div class="form-control">
-          <label class="label py-0.5 flex justify-between">
-            <span class="label-text font-medium text-xs">系统提示词 (System Prompt) *</span>
-            <span class="text-[11px] text-base-content/60">决定角色的口吻、性格、专业知识与回答风格</span>
+          <label class="label py-0.5 flex justify-between items-center">
+            <span class="label-text font-medium text-xs">完整角色设定 (System Prompt) *</span>
+            <span class="text-[11px] text-base-content/60">角色的核心人设、性格特征、说话口吻及行为准则</span>
           </label>
-          <textarea id="gemmaCharFormSys" class="textarea textarea-sm textarea-bordered min-h-[110px] h-28 font-mono text-xs leading-relaxed" placeholder="设定角色的说话口吻、性格禁忌、专业背景等系统人设指示词..." required maxlength="8000"></textarea>
+          <textarea id="gemmaCharFormSys" class="textarea textarea-sm textarea-bordered min-h-[140px] h-36 font-mono text-xs leading-relaxed" placeholder="详细设定角色的性格特征、身世背景、说话口吻、行为偏好与对话禁忌等完整指令..." required maxlength="8000"></textarea>
+          <input type="hidden" id="gemmaCharFormDesc" value="">
         </div>
 
         <div class="modal-action flex justify-between items-center mt-2 pt-2 border-t border-base-300">

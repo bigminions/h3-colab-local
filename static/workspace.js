@@ -32,7 +32,7 @@
   let libraryRequest = 0, librarySignature = '', previewRequest = 0, previewURL = null;
   const thumbnails = new Map();
   const panels = {tool:'toolPage', characters:'characterPage', qwen_image:'qwenImagePage', gemma:'gemmaPage', library:'libraryPage', compute:'computePage', connections:'connectionPage'};
-  const labels = {tool:['应用','H3 视频'], characters:['应用','H3 视频'], qwen_image:['应用','Qwen-Image-2.1'], gemma:['应用','大模型对话'], library:['工作区','素材库'], compute:['工作区','算力'], connections:['工作区','设置']};
+  const labels = {tool:['应用','H3 视频'], characters:['应用','H3 视频'], qwen_image:['应用','图像创作'], gemma:['应用','大模型对话'], library:['工作区','素材库'], compute:['工作区','算力'], connections:['工作区','设置']};
   const kinds = {images:'图片', videos:'视频', audios:'音频'};
 
 

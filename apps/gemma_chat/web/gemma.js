@@ -260,7 +260,7 @@
     $('gemmaCharFormName').value = isEdit ? char.name : '';
     $('gemmaCharFormAvatar').value = isEdit ? (char.avatar || '') : '';
     $('gemmaCharFormTag').value = isEdit ? (char.tag || '') : '';
-    $('gemmaCharFormDesc').value = isEdit ? (char.desc || '') : '';
+    if ($('gemmaCharFormDesc')) $('gemmaCharFormDesc').value = isEdit ? (char.desc || '') : '';
     $('gemmaCharFormPlaceholder').value = isEdit ? (char.placeholder || '') : '';
     $('gemmaCharFormSys').value = isEdit ? (char.system_prompt || '') : '';
 
@@ -300,14 +300,18 @@
       alert('请先点击「选择/更换头像」选择一张图片并完成裁剪');
       return;
     }
+    const sysPrompt = $('gemmaCharFormSys').value.trim();
+    const explicitDesc = ($('gemmaCharFormDesc')?.value || '').trim();
+    const desc = explicitDesc || sysPrompt.slice(0, 100);
+
     const charData = {
       id,
       name,
       avatar,
       tag: $('gemmaCharFormTag').value.trim(),
-      desc: $('gemmaCharFormDesc').value.trim(),
+      desc,
       placeholder: $('gemmaCharFormPlaceholder').value.trim(),
-      system_prompt: $('gemmaCharFormSys').value.trim(),
+      system_prompt: sysPrompt,
       builtin: isBuiltin,
       is_customized: true,
     };
@@ -441,7 +445,8 @@
       check.innerHTML = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>`;
 
       header.append(meta, check);
-      const desc = node('p', 'gemma-char-desc', char.desc);
+      const descText = char.desc || char.system_prompt || '';
+      const desc = node('p', 'gemma-char-desc', descText);
       body.append(header, desc);
 
       // Edit button for character (both builtin and custom)
@@ -772,7 +777,10 @@
       }
 
       const char = getCharacterByIdOrName(turn.character_id, turn.character_name) || getActiveCharacter(chatId);
-      const text = turn.reply || turn.draft || '';
+      let text = turn.reply || turn.draft || '';
+      if (!text && turn.status === 'cancelled' && article && article.dataset.text) {
+        text = article.dataset.text;
+      }
       const unfinished = ['cancelled', 'error', 'interrupted', 'incomplete', 'discarded'].includes(turn.status);
       const isRunning = turn.status === 'running' || turn.status === 'queued';
 
@@ -858,7 +866,7 @@
 
         const note = article.querySelector('.gemma-reply-note');
         if (note) {
-          if (unfinished && !turn.reply) {
+          if (unfinished) {
             note.hidden = false;
             note.replaceChildren();
             let noteText = '这条消息未完成';
@@ -1286,6 +1294,9 @@
       if (err.name === 'AbortError') {
         tempTurn.status = 'cancelled';
         tempTurn.message = '已停止回复';
+        if (draftText && !tempTurn.reply) {
+          tempTurn.reply = draftText;
+        }
       } else {
         actionError = err.message;
         tempTurn.status = 'error';
@@ -1294,7 +1305,10 @@
     } finally {
       activeStreamAbort = null;
       action = null;
-      renderTurns(state.turns, false);
+      if (tempTurn.draft && !tempTurn.reply) {
+        tempTurn.reply = tempTurn.draft;
+      }
+      renderTurns(state?.turns || [], false);
       await refresh();
     }
   }
@@ -1446,15 +1460,42 @@
     });
     if (selected && chatId !== chat.id && !root.hidden) prompt.focus();
   };
-  $('gemmaStop').onclick = () => {
+  $('gemmaStop').onclick = async () => {
+    const activeChatId = chatId;
     if (activeStreamAbort) {
-      activeStreamAbort.abort();
+      try {
+        activeStreamAbort.abort();
+      } catch (_) {}
       activeStreamAbort = null;
-      updateComposer();
-      return;
     }
     const turn = currentTurn();
-    if (turn) perform('stop', () => api(`jobs/${turn.id}/cancel`, {method: 'POST'}));
+    const currentJobId = turn?.id && !String(turn.id).startsWith('temp_') ? turn.id : null;
+
+    if (state && Array.isArray(state.turns)) {
+      const activeRunningTurn = state.turns.find(t => t.status === 'running' || t.id === turn?.id || String(t.id).startsWith('temp_'));
+      if (activeRunningTurn) {
+        activeRunningTurn.status = 'cancelled';
+        activeRunningTurn.message = '已停止回复';
+        if (activeRunningTurn.draft && !activeRunningTurn.reply) {
+          activeRunningTurn.reply = activeRunningTurn.draft;
+        }
+        activeRunningTurn.can_stop = false;
+      }
+    }
+    action = null;
+    updateComposer();
+    renderTurns(state?.turns || [], false);
+
+    try {
+      await api(`gemma/chats/${activeChatId}/cancel`, {method: 'POST'});
+    } catch (_) {
+      if (currentJobId) {
+        try {
+          await api(`jobs/${currentJobId}/cancel`, {method: 'POST'});
+        } catch (_) {}
+      }
+    }
+    await refresh();
   };
   let pendingImages = [];
 
