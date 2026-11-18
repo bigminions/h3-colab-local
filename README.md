@@ -2,6 +2,8 @@
 
 **本地创作工作台，按需使用云端 GPU。**
 
+![LStudio 大模型对话界面](static/cover.png)
+
 LStudio 在 Windows 本机管理应用、素材与任务，将模型下载与重度推理交给远程 GPU（如 Google Colab）。生成的素材和作品全部保存在本机，无需本机配备高性能 NVIDIA 显卡。
 
 工作台主要包含三个部分：
