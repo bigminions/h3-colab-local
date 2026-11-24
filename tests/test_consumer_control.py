@@ -1,9 +1,11 @@
 """Remote HTTP observation and cancellation are independent of busy execution."""
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
 from requests import ReadTimeout
@@ -53,6 +55,53 @@ class ConsumerProviderTests(unittest.TestCase):
             self.assertEqual(self.provider.consumer_status(), {'state': 'idle'})
         idle.assert_called_once()
         record.assert_not_called()
+
+    def test_stalled_extra_kernels_do_not_block_reuse_of_idle_managed_kernel(self):
+        session = self.control.session
+        session.update(name='test', variant='GPU', accelerator='L4', machine_shape='STANDARD',
+                       kernel_id='managed', session_id='session', app_id='qwen_image_2_1')
+        last_activity = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat().replace('+00:00', 'Z')
+        kernels = [dict(id='stalled', execution_state='starting', connections=0, last_activity=last_activity),
+                   dict(id='managed', execution_state='idle', connections=1)]
+        assignment = SimpleNamespace(endpoint=session['endpoint'], runtime_proxy_info=SimpleNamespace(
+            url=session['url'], token=session['token']))
+        self.provider._proxy_request = MagicMock(return_value=self.response(kernels))
+        with patch.object(self.provider, 'client') as client, patch('requests.get') as get, \
+                patch.object(app, 'ColabRuntime') as runtime, patch.object(self.provider, '_consumer_record') as record:
+            client.return_value.list_assignments.return_value = [assignment]
+            get.return_value = self.response(kernels)
+            runtime.return_value.execute_code.return_value = [dict(text='QWEN_IMAGE_IDLE_CHECK {"idle": true}')]
+            self.assertEqual(self.provider.consumer_status(), {'state': 'idle'})
+            self.assertFalse(self.provider.check_idle())
+        self.assertEqual(runtime.call_args.kwargs['kernel_id'], 'managed')
+        runtime.return_value.execute_code.assert_called_once()
+        record.assert_not_called()
+
+    def test_unconfirmed_or_active_kernels_still_block_reuse(self):
+        old = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        current = datetime.now(timezone.utc).isoformat()
+        managed = dict(id='managed', execution_state='idle')
+        other = dict(id='other', execution_state='starting', connections=0, last_activity=old)
+        self.control.session['kernel_id'] = 'managed'
+        for kernels in ([dict(other, execution_state='busy'), managed],
+                        [dict(other, connections=1), managed],
+                        [dict(other, last_activity=current), managed],
+                        [dict(other, last_activity=None), managed],
+                        [other, dict(managed, execution_state='starting', connections=0, last_activity=old)],
+                        [other]):
+            with self.subTest(kernels=kernels), patch.object(self.provider, 'check_idle') as idle, \
+                    patch.object(self.provider, '_proxy_request', return_value=self.response(kernels)), \
+                    patch.object(self.provider, '_consumer_record', return_value={'heartbeat': 0}):
+                self.assertEqual(self.provider.consumer_status()['state'], 'unknown')
+                idle.assert_not_called()
+
+    def test_background_probe_leaves_initial_kernel_creation_to_active_task(self):
+        self.control.active = 'starting-image-job'
+        self.control.session['app_id'] = 'qwen_image_2_1'
+        self.provider._proxy_request = MagicMock(return_value=self.response([]))
+        with patch.object(self.provider, 'check_idle') as idle:
+            self.assertEqual(self.provider.observe_consumer(), {'state': 'connecting'})
+        idle.assert_not_called()
 
     def test_proxy_failure_reconciles_a_released_assignment(self):
         self.provider._proxy_request = MagicMock(side_effect=ReadTimeout('offline'))

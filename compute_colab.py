@@ -7,6 +7,7 @@ import json
 import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
+from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
 import threading
 import time
@@ -18,6 +19,7 @@ from runtime_recovery import RuntimeBusy, RuntimeReleased
 
 _probe_timing = ContextVar('colab_probe_timing', default=None)
 _probe_logger = logging.getLogger('uvicorn.error.colab_probe')
+KERNEL_STARTUP_GRACE = timedelta(minutes=2)
 
 
 @contextmanager
@@ -50,6 +52,30 @@ def consumer_probe_step(name):
     finally:
         step['ms'] = round((time.monotonic() - started) * 1000)
         timing['steps'].append(step)
+
+
+def _kernels_idle(kernels, reusable_kernel_id=None):
+    non_idle = [kernel for kernel in kernels if kernel.get('execution_state') != 'idle']
+    if not non_idle:
+        return True
+    if not reusable_kernel_id or not any(
+            kernel.get('id') == reusable_kernel_id and kernel.get('execution_state') == 'idle'
+            for kernel in kernels):
+        return False
+
+    # A stalled launch without any clients should not block reuse of the idle kernel.
+    cutoff = datetime.now(timezone.utc) - KERNEL_STARTUP_GRACE
+    for kernel in non_idle:
+        if (kernel.get('execution_state') != 'starting' or not kernel.get('id')
+                or kernel['id'] == reusable_kernel_id or kernel.get('connections') != 0):
+            return False
+        try:
+            last_activity = datetime.fromisoformat(kernel['last_activity'])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if last_activity.tzinfo is None or last_activity > cutoff:
+            return False
+    return True
 
 
 class ColabProvider:
@@ -172,17 +198,18 @@ class ColabProvider:
                     except Exception:
                         pass
                 raise
-        busy = any(k.get('execution_state') != 'idle' for k in kernels)
+        busy = not _kernels_idle(kernels, session.get('kernel_id'))
         if passive and self._gemma_idle_confirmed(session):
             if not busy and any(k.get('id') == session['kernel_id'] for k in kernels):
                 return {'state': 'idle'}
             self._gemma_idle = None
         if not busy:
-            if passive and session.get('app_id') == 'gemma_chat' and self.controller.active:
-                # Avoid submitting a probe cell during local Gemma dispatch.
+            if passive and self.controller.active and (
+                    not session.get('kernel_id') or session.get('app_id') == 'gemma_chat'):
+                # Let the active task establish its kernel before probing it.
                 return {'state': 'connecting'}
             # The kernel can be idle while the generation subprocess still has work.
-            if self.check_idle():
+            if self.check_idle(for_reuse=True):
                 return {'state': 'idle'}
         with consumer_probe_step('task_record'):
             record = self._consumer_record()
@@ -640,7 +667,7 @@ print('H3_DRIVE_UPLOAD ' + json.dumps(value))
         self._unassign_confirmed(client, endpoint)
         return True
 
-    def check_idle(self, endpoint=None):
+    def check_idle(self, endpoint=None, *, for_reuse=False):
         """Check a listed runtime without allocating a VM or interrupting a kernel."""
         import requests
         session = self.controller.session
@@ -670,7 +697,7 @@ print('H3_DRIVE_UPLOAD ' + json.dumps(value))
                 headers={'X-Colab-Client-Agent': 'colab-cli', 'X-Colab-Runtime-Proxy-Token': s.token}, timeout=(10, 20))
             response.raise_for_status()
             kernels = response.json()
-        if not isinstance(kernels, list) or any(k.get('execution_state') != 'idle' for k in kernels):
+        if not isinstance(kernels, list) or not _kernels_idle(kernels, s.kernel_id if for_reuse else None):
             return False
         kernel_id = s.kernel_id if any(k.get('id') == s.kernel_id for k in kernels) else None
         runtime = self.services.ColabRuntime(s.url, s.token, kernel_id=kernel_id, session_id=s.session_id)
